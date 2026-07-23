@@ -1,6 +1,7 @@
 name: Build Base Docker Images
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -22,7 +23,6 @@ jobs:
 
     env:
       DOCKER_FILE: docker/docker_${{ matrix.dockerimg }}
-      IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/nvenc-build
       FFMPEG_DLL_REPO: https://github.com/rigaya/build_scripts.git
       FFMPEG_DLL_REF: master
       NVENC_HEADER_DIR: /opt/nvenc_headers
@@ -32,6 +32,10 @@ jobs:
       NVENCC_FFMPEG_VERSION: '8.1.2'
 
     steps:
+      - name: Prepare image name
+        id: prep
+        run: echo "image_repo=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/nvenc-build" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -64,7 +68,7 @@ jobs:
           context: ./
           file: ${{ env.DOCKER_FILE }}
           push: true
-          tags: ${{ env.IMAGE_REPO }}:${{ matrix.dockerimg }}
+          tags: ${{ steps.prep.outputs.image_repo }}:${{ matrix.dockerimg }}
           build-args: |
             FFMPEG_DLL_REPO=${{ env.FFMPEG_DLL_REPO }}
             FFMPEG_DLL_REF=${{ env.FFMPEG_DLL_REF }}
@@ -76,5 +80,4 @@ jobs:
             NVENCC_FFMPEG_VERSION=${{ env.NVENCC_FFMPEG_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
 
