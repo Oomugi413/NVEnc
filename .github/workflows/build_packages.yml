@@ -1,6 +1,7 @@
 name: Build Linux Packages
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - master
@@ -9,18 +10,31 @@ on:
     tags:
       - '*'
 
+permissions:
+  contents: write
+  packages: read
+
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - dockerimg: ubuntu2004_cuda11
+          - dockerimg: ubuntu2404_cuda13
             pkgtype: deb
             arch: x86_64
-          - dockerimg: fedora39_cuda12
-            pkgtype: rpm
-            arch: x86_64
+            package_suffix: ''
+          # Legacy distribution targets. Keep their Dockerfiles, but do not
+          # build release packages for them by default. Uncomment either entry
+          # to produce a distinctly named legacy package.
+          # - dockerimg: ubuntu2004_cuda11
+          #   pkgtype: deb
+          #   arch: x86_64
+          #   package_suffix: ubuntu2004_cuda11
+          # - dockerimg: fedora39_cuda12
+          #   pkgtype: rpm
+          #   arch: x86_64
+          #   package_suffix: fedora39_cuda12
           #- dockerimg: ubuntu2204_cuda11_aarch64
           #  pkgtype: deb
           #  arch: arm64
@@ -74,6 +88,13 @@ jobs:
             exit 1
           fi
 
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Pull base image
         run: docker pull ${{ steps.prep.outputs.base_image }}
 
@@ -114,6 +135,14 @@ jobs:
               echo "libplacebo/libvmaf must be statically linked, but shared dependency was found." >&2
               exit 1
             fi
+            if [[ "${{ matrix.dockerimg }}" == "ubuntu2404_cuda13" ]]; then
+              sm_120_count="$(cuobjdump --list-elf ./build/nvencc | grep -c "sm_120" || true)"
+              if [[ "${sm_120_count}" -eq 0 ]]; then
+                echo "NVEncC does not contain an sm_120 native cubin." >&2
+                exit 1
+              fi
+              echo "sm_120 cubins: ${sm_120_count}"
+            fi
           '
           docker exec build_pkg bash -lc '
             set -e
@@ -126,7 +155,9 @@ jobs:
             ./check_options.py -exe ./build/nvencc
           '
           docker exec build_pkg cp ./build/nvencc ./nvencc
-          docker exec build_pkg ./build_${{ env.PKG_TYPE }}.sh
+          docker exec \
+            --env PACKAGE_FILE_SUFFIX="${{ matrix.package_suffix }}" \
+            build_pkg ./build_${{ env.PKG_TYPE }}.sh
           docker exec build_pkg bash -lc "cp -v ./*.${{ env.PKG_TYPE }} /output/"
           PKGFILE=`ls ${{ steps.prep.outputs.output_dir }}/*.${{ env.PKG_TYPE }}`
           echo ${PKGFILE}
@@ -138,7 +169,7 @@ jobs:
           7z h -scrc* ${{ steps.build_exec.outputs.pkgfile }}
 
       - name: Upload Release Asset
-        id: upload-release-asset 
+        id: upload-release-asset
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
         env:
