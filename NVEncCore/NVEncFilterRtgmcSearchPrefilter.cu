@@ -343,13 +343,6 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::setupSearchRefine1Resources(const RGYFr
     for (auto &resources : m_searchRefine2PlaneResources) {
         resources.clear();
     }
-    for (auto &resize : m_searchRefine1ResizeDown) {
-        resize.reset();
-    }
-    for (auto &resize : m_searchRefine1ResizeUp) {
-        resize.reset();
-    }
-
     const auto setupPlane = [&](const int planeIndex, const RGYFrameInfo &planeBaseInfo) -> RGY_ERR {
         if (planeBaseInfo.width <= 0 || planeBaseInfo.height <= 0) {
             return RGY_ERR_INVALID_PARAM;
@@ -370,34 +363,6 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::setupSearchRefine1Resources(const RGYFr
         m_searchRefine1PlaneResources[planeIndex].halfSearchBase = std::move(halfSearchBase);
         m_searchRefine1PlaneResources[planeIndex].halfSearchSmoothed = std::move(halfSearchSmoothed);
 
-        auto downParam = std::make_shared<NVEncFilterParamResize>();
-        downParam->frameIn = fullInfo;
-        downParam->frameOut = halfInfo;
-        downParam->interp = RGY_VPP_RESIZE_BILINEAR;
-        downParam->frameIn.mem_type = RGY_MEM_TYPE_GPU;
-        downParam->frameOut.mem_type = RGY_MEM_TYPE_GPU;
-        downParam->bOutOverwrite = false;
-        auto downResize = std::make_unique<NVEncFilterResizePlaneProxy>();
-        auto sts = downResize->init(downParam, m_pLog);
-        if (sts != RGY_ERR_NONE) {
-            return sts;
-        }
-
-        auto upParam = std::make_shared<NVEncFilterParamResize>();
-        upParam->frameIn = halfInfo;
-        upParam->frameOut = fullInfo;
-        upParam->interp = RGY_VPP_RESIZE_BILINEAR;
-        upParam->frameIn.mem_type = RGY_MEM_TYPE_GPU;
-        upParam->frameOut.mem_type = RGY_MEM_TYPE_GPU;
-        upParam->bOutOverwrite = false;
-        auto upResize = std::make_unique<NVEncFilterResizePlaneProxy>();
-        sts = upResize->init(upParam, m_pLog);
-        if (sts != RGY_ERR_NONE) {
-            return sts;
-        }
-
-        m_searchRefine1ResizeDown[planeIndex] = std::move(downResize);
-        m_searchRefine1ResizeUp[planeIndex] = std::move(upResize);
         return RGY_ERR_NONE;
     };
 
@@ -1018,10 +983,8 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
         const RGYFrameInfo &planePrev2Src, const RGYFrameInfo &planePrevSrc, const RGYFrameInfo &planeCurSrc,
         const RGYFrameInfo &planeNextSrc, const RGYFrameInfo &planeNext2Src, const RGYFrameInfo &planeDstSrc,
         const int fullRangeMode) -> RGY_ERR {
-        auto *resizeDown = m_searchRefine1ResizeDown[planeIndex].get();
-        auto *resizeUp = m_searchRefine1ResizeUp[planeIndex].get();
         auto &resources = m_searchRefine1PlaneResources[planeIndex];
-        if (!resizeDown || !resizeUp || !resources.motionGuide || !resources.halfSearchBase || !resources.halfSearchSmoothed) {
+        if (!resources.motionGuide || !resources.halfSearchBase || !resources.halfSearchSmoothed) {
             AddMessage(RGY_LOG_ERROR, _T("rtgmc-search-prefilter search_refine1 resources are not ready for plane %d.\n"), planeIndex);
             return RGY_ERR_NULL_PTR;
         }
@@ -1045,15 +1008,10 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
             return sts;
         }
 
-        RGYFrameInfo *halfSearchBaseFrame = &planeHalfSearchBase;
-        int halfSearchBaseFrames = 0;
-        auto planeMotionGuideInput = planeMotionGuide;
-        sts = resizeDown->filter(&planeMotionGuideInput, &halfSearchBaseFrame, &halfSearchBaseFrames, stream);
-        if (sts == RGY_ERR_NONE && (halfSearchBaseFrames != 1 || halfSearchBaseFrame == nullptr)) {
-            sts = RGY_ERR_INVALID_CALL;
-        }
+        sts = launch->halfSearchBaseFromGuide(planeMotionGuide, planeHalfSearchBase, stream);
         if (sts != RGY_ERR_NONE) {
-            AddMessage(RGY_LOG_ERROR, _T("failed to bilinear downsample rtgmc-search-prefilter search_refine1 plane %d: %s.\n"),
+            AddMessage(RGY_LOG_ERROR, _T("error at %s plane %d: %s.\n"),
+                _T("kernel_rtgmc_search_prefilter_half_search_base_from_guide"),
                 planeIndex, get_err_mes(sts));
             return sts;
         }
@@ -1070,24 +1028,11 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
             return sts;
         }
 
-        RGYFrameInfo *dstFrame = &planeDstWork;
-        int dstFrames = 0;
-        auto planeHalfSearchSmoothedInput = planeHalfSearchSmoothed;
-        sts = resizeUp->filter(&planeHalfSearchSmoothedInput, &dstFrame, &dstFrames, stream);
-        if (sts == RGY_ERR_NONE && (dstFrames != 1 || dstFrame == nullptr)) {
-            sts = RGY_ERR_INVALID_CALL;
-        }
+        sts = launch->halfResolutionUpsample(planeHalfSearchSmoothed, planeDstWork, fullRangeMode, stream);
         if (sts != RGY_ERR_NONE) {
-            AddMessage(RGY_LOG_ERROR, _T("failed to bilinear upsample rtgmc-search-prefilter search_refine1 plane %d: %s.\n"),
+            AddMessage(RGY_LOG_ERROR, _T("error at %s plane %d: %s.\n"),
+                _T("kernel_rtgmc_search_prefilter_half_resolution_upsample"),
                 planeIndex, get_err_mes(sts));
-            return sts;
-        }
-        if (fullRangeMode != 0) {
-            sts = launch->rangeConvert(planeDstWork, fullRangeMode, stream);
-            if (sts != RGY_ERR_NONE) {
-                AddMessage(RGY_LOG_ERROR, _T("error at %s plane %d: %s.\n"),
-                    _T("kernel_rtgmc_search_prefilter_range_convert"), planeIndex, get_err_mes(sts));
-            }
         }
         return sts;
     };
@@ -1582,12 +1527,6 @@ void NVEncFilterRtgmcSearchPrefilter::close() {
     }
     for (auto &resources : m_searchRefine2PlaneResources) {
         resources.clear();
-    }
-    for (auto &resize : m_searchRefine1ResizeDown) {
-        resize.reset();
-    }
-    for (auto &resize : m_searchRefine1ResizeUp) {
-        resize.reset();
     }
     for (auto &resize : m_searchRefine2ResizeEdgeSoftenedSearch) {
         resize.reset();

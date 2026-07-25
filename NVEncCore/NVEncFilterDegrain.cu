@@ -30,14 +30,17 @@
 
 #define NVENC_DEGRAIN_DECLARE_MOTION_SEARCH_LAUNCHERS(PIXEL, BLK) \
 RGY_ERR launchNVEncDegrainMotionSearchSearchParallelU##PIXEL##Blk##BLK( \
-    const uint8_t *sourcePlane, const uint8_t *referencePlane, CUMemBuf &vectors, \
+    const uint8_t *sourcePlane, const uint8_t *referencePlane, \
+    const uint8_t *subpelPlanes, const int subpelPlaneStride, CUMemBuf &vectors, \
     const int pitch, const int width, const int height, const int planeBase, const int blockCount, \
     const RGYDegrainBlockLayout &layout, const int pel, const int subpelInterp, \
     const int pad, const int motionCostScale, const int lowSadWeightScale, \
     const int zeroCandidateCostScale, const int frameAverageCandidateCostScale, \
-    const int newCandidateCostScale, const int level, cudaStream_t stream); \
+    const int newCandidateCostScale, const int searchParam, \
+    const int level, cudaStream_t stream); \
 RGY_ERR launchNVEncDegrainMotionSearchSpatialRefineU##PIXEL##Blk##BLK( \
     const uint8_t *sourcePlane, const uint8_t *referencePlane, \
+    const uint8_t *subpelPlanes, const int subpelPlaneStride, \
     CUMemBuf &vectors, const CUMemBuf &vectorsPrev, CUMemBuf &vectorsFinal, \
     const int pitch, const int width, const int height, const int planeBase, const int finalBase, \
     const int blockCount, const RGYDegrainBlockLayout &layout, \
@@ -64,10 +67,23 @@ RGY_ERR launchNVEncDegrainDownsampleLuma2x(
     return launchNVEncDegrainDownsampleLuma2xImpl(src, dst, dstPitch, dstWidth, dstHeight, stream);
 }
 
+RGY_ERR launchNVEncDegrainBuildSubpelPlanes(
+    const uint8_t *src, const int pitch, CUMemBuf &dst, const int planeStride,
+    const int width, const int height, const int subpelInterp, cudaStream_t stream) {
+    return launchNVEncDegrainBuildSubpelPlanesImpl(src, pitch, dst, planeStride, width, height, subpelInterp, stream);
+}
+
 RGY_ERR launchNVEncDegrainMotionSearchSeedAnchorVectors(
     CUMemBuf& vectors, const CUMemBuf& frameAverageMV, const int frameAverageIndex, const int planeStride,
     const int refs, const int pel, cudaStream_t stream) {
     return launchNVEncDegrainMotionSearchSeedAnchorVectorsImpl(vectors, frameAverageMV, frameAverageIndex, planeStride, refs, pel, stream);
+}
+
+RGY_ERR launchNVEncDegrainMotionSearchSeedGlobalFromCoarse(
+    CUMemBuf& dstVectors, const CUMemBuf& srcVectorsFinal,
+    const int dstPlaneBase, const int srcFinalBase, const int srcBlockCount, cudaStream_t stream) {
+    return launchNVEncDegrainMotionSearchSeedGlobalFromCoarseImpl(
+        dstVectors, srcVectorsFinal, dstPlaneBase, srcFinalBase, srcBlockCount, stream);
 }
 
 RGY_ERR launchNVEncDegrainMotionSearchSeedZeroVectors(
@@ -93,16 +109,19 @@ RGY_ERR launchNVEncDegrainMotionSearchExportSad(
 }
 
 RGY_ERR launchNVEncDegrainMotionSearchSearchParallel(
-    const uint8_t *sourcePlane, const uint8_t *referencePlane, CUMemBuf &vectors,
+    const uint8_t *sourcePlane, const uint8_t *referencePlane,
+    const uint8_t *subpelPlanes, const int subpelPlaneStride, CUMemBuf &vectors,
     const int pitch, const int width, const int height, const int planeBase, const int blockCount,
     const RGYDegrainBlockLayout &layout, const int pixelBytes, const int pel, const int subpelInterp,
     const int pad, const int motionCostScale, const int lowSadWeightScale,
     const int zeroCandidateCostScale, const int frameAverageCandidateCostScale,
-    const int newCandidateCostScale, const int level, cudaStream_t stream) {
+    const int newCandidateCostScale, const int searchParam,
+    const int level, cudaStream_t stream) {
 #define NVENC_DEGRAIN_DISPATCH_SEARCH(PIXEL, BLK) \
-    return launchNVEncDegrainMotionSearchSearchParallelU##PIXEL##Blk##BLK(sourcePlane, referencePlane, vectors, \
+    return launchNVEncDegrainMotionSearchSearchParallelU##PIXEL##Blk##BLK(sourcePlane, referencePlane, subpelPlanes, subpelPlaneStride, vectors, \
         pitch, width, height, planeBase, blockCount, layout, pel, subpelInterp, pad, motionCostScale, lowSadWeightScale, \
-        zeroCandidateCostScale, frameAverageCandidateCostScale, newCandidateCostScale, level, stream)
+        zeroCandidateCostScale, frameAverageCandidateCostScale, newCandidateCostScale, \
+        searchParam, level, stream)
     if (pixelBytes > 1) {
         switch (layout.blockSize) {
         case 8:  NVENC_DEGRAIN_DISPATCH_SEARCH(16, 8);
@@ -123,13 +142,14 @@ RGY_ERR launchNVEncDegrainMotionSearchSearchParallel(
 
 RGY_ERR launchNVEncDegrainMotionSearchSpatialRefine(
     const uint8_t *sourcePlane, const uint8_t *referencePlane,
+    const uint8_t *subpelPlanes, const int subpelPlaneStride,
     CUMemBuf &vectors, const CUMemBuf &vectorsPrev, CUMemBuf &vectorsFinal,
     const int pitch, const int width, const int height, const int planeBase, const int finalBase,
     const int blockCount, const RGYDegrainBlockLayout &layout, const int pixelBytes,
     const int pel, const int subpelInterp, const int pad, const int motionCostScale,
     const int lowSadWeightScale, const int newCandidateCostScale, cudaStream_t stream) {
 #define NVENC_DEGRAIN_DISPATCH_REFINE(PIXEL, BLK) \
-    return launchNVEncDegrainMotionSearchSpatialRefineU##PIXEL##Blk##BLK(sourcePlane, referencePlane, vectors, vectorsPrev, vectorsFinal, \
+    return launchNVEncDegrainMotionSearchSpatialRefineU##PIXEL##Blk##BLK(sourcePlane, referencePlane, subpelPlanes, subpelPlaneStride, vectors, vectorsPrev, vectorsFinal, \
         pitch, width, height, planeBase, finalBase, blockCount, layout, pel, subpelInterp, pad, motionCostScale, \
         lowSadWeightScale, newCandidateCostScale, stream)
     if (pixelBytes > 1) {

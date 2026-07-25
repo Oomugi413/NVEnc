@@ -31,6 +31,7 @@
 
 #include <memory>
 #include <cstdint>
+#include <vector>
 #include <cuda_runtime_api.h>
 #include "rgy_err.h"
 
@@ -84,12 +85,20 @@ public:
     // Blocking; in only needs to stay valid for the call.
     RGY_ERR infer(const float *in, float *out);
 
+    // 2入力以上のNCHWモデルをホストバッファで実行する。
+    RGY_ERR inferMulti(const std::vector<const float *> &inputs, const std::vector<float *> &outputs);
+
     // CUDAデバイス上のCHW floatバッファを直接入出力に束縛する。
     // init()でuserComputeStreamを指定して初期化できた場合のみ利用できる。
     RGY_ERR inferDevice(const float *inDevice, float *outDevice);
     bool deviceIOAvailable() const;
 
     int inChannels()  const;
+    int inputCount() const;
+    int inputChannels(int index) const;
+    int inputHeight(int index) const;
+    int inputWidth(int index) const;
+    int outputCount() const;
     int inHeight()    const;
     int inWidth()     const;
     int outChannels() const;
@@ -101,12 +110,17 @@ public:
     tstring inferencePrecision() const; // "f32"
     tstring providerName() const;       // "cuda" or "tensorrt" (the EP actually used)
     tstring lastError() const;
+    tstring cacheInfo() const;          // engine cache state ("" when caching is off)
 
     static bool available() { return ENABLE_ONNXRUNTIME != 0; }
 
 private:
     RGYOnnxRTCUDA(const RGYOnnxRTCUDA &) = delete;
     void operator=(const RGYOnnxRTCUDA &) = delete;
+
+    RGY_ERR initImpl(const tstring &modelPath, const int deviceID, const RGYOnnxRTProvider provider,
+                     const int height, const int width, tstring &errMessage,
+                     cudaStream_t userComputeStream, const tstring &precision, const tstring &cacheDir);
 
     class Impl;
     std::unique_ptr<Impl> m_impl;

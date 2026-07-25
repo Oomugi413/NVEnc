@@ -81,6 +81,12 @@ static int rtgmcNestedAnalyzeDelta(const VppRtgmc &rtgmc) {
     return std::max({ 1, std::min(rtgmc.analyze.delta, RGY_DEGRAIN_MAX_DELTA), std::min(rtgmc.tr1.delta, RGY_DEGRAIN_MAX_DELTA), std::min(rtgmc.tr2.delta, RGY_DEGRAIN_MAX_DELTA) });
 }
 
+static bool rtgmcDegrainOverlapSupported(const VppDegrain &degrain) {
+    return degrain.overlap == 0
+        || degrain.overlap == degrain.blksize / 4
+        || degrain.overlap == degrain.blksize / 2;
+}
+
 static bool rtgmcInputTypeBlendEnabled(const VppRtgmc &rtgmc) {
     return (rtgmc.inputType == 2 || rtgmc.inputType == 3) && rtgmc.progSADMask > 0.0f;
 }
@@ -415,6 +421,16 @@ RGY_ERR NVEncFilterRtgmc::checkParam(const std::shared_ptr<NVEncFilterParamRtgmc
         AddMessage(RGY_LOG_ERROR, _T("rtgmc mv_spatial_refine must be -1 or greater.\n"));
         return RGY_ERR_INVALID_PARAM;
     }
+    if (prm->rtgmc.rep1.repThin < 0 || prm->rtgmc.rep1.repThin > 7
+        || prm->rtgmc.rep2.repThin < 0 || prm->rtgmc.rep2.repThin > 7) {
+        AddMessage(RGY_LOG_ERROR, _T("rtgmc rep1-thin/rep2-thin must be 0 - 7.\n"));
+        return RGY_ERR_INVALID_PARAM;
+    }
+    if (prm->rtgmc.rep1.repPad < 0 || prm->rtgmc.rep1.repPad > 3
+        || prm->rtgmc.rep2.repPad < 0 || prm->rtgmc.rep2.repPad > 3) {
+        AddMessage(RGY_LOG_ERROR, _T("rtgmc rep1-pad/rep2-pad must be 0 - 3.\n"));
+        return RGY_ERR_INVALID_PARAM;
+    }
     if (rtgmcInputTypeBlendEnabled(prm->rtgmc) && !RGY_HAS_RTGMC_MMASK_FILTER) {
         AddMessage(RGY_LOG_ERROR, _T("rtgmc input_type=2/3 with prog_sad_mask>0 requires rtgmc-mmask filter, but it is not available in this build.\n"));
         return RGY_ERR_UNSUPPORTED;
@@ -501,9 +517,9 @@ RGY_ERR NVEncFilterRtgmc::initRetouchCompFilters(const std::shared_ptr<NVEncFilt
         param->baseFps = baseFps;
         param->bOutOverwrite = false;
         param->degrain = prm->rtgmc.tr1;
-        if (param->degrain.overlap != 0 && param->degrain.overlap * 2 != param->degrain.blksize) {
+        if (!rtgmcDegrainOverlapSupported(param->degrain)) {
             AddMessage(RGY_LOG_WARN,
-                _T("retouch helper overlap=%d is adjusted to %d because the current Degrain backend supports overlap=0 or blksize/2.\n"),
+                _T("retouch helper overlap=%d is adjusted to %d because the current Degrain backend supports overlap=0, blksize/4 or blksize/2.\n"),
                 param->degrain.overlap, param->degrain.blksize / 2);
             param->degrain.overlap = param->degrain.blksize / 2;
         }
@@ -596,9 +612,9 @@ RGY_ERR NVEncFilterRtgmc::initSourceMatchCorrectionFilters(const std::shared_ptr
             auto param = std::make_shared<NVEncFilterParamDegrain>();
             param->degrain = (stageIdx == 0) ? prm->rtgmc.tr1 : prm->rtgmc.tr2;
             param->degrain.chroma = processSourceMatchChroma;
-            if (param->degrain.overlap != 0 && param->degrain.overlap * 2 != param->degrain.blksize) {
+            if (!rtgmcDegrainOverlapSupported(param->degrain)) {
                 AddMessage(RGY_LOG_WARN,
-                    _T("source-match correction overlap=%d is adjusted to %d because the current Degrain backend supports overlap=0 or blksize/2.\n"),
+                    _T("source-match correction overlap=%d is adjusted to %d because the current Degrain backend supports overlap=0, blksize/4 or blksize/2.\n"),
                     param->degrain.overlap, param->degrain.blksize / 2);
                 param->degrain.overlap = param->degrain.blksize / 2;
             }
@@ -1421,9 +1437,9 @@ RGY_ERR NVEncFilterRtgmc::initFilters(const std::shared_ptr<NVEncFilterParamRtgm
         return RGY_ERR_NONE;
     };
     auto rtgDegrainRuntimeParam = [&](VppDegrain degrain, const TCHAR *stage) {
-        if (degrain.overlap != 0 && degrain.overlap * 2 != degrain.blksize) {
+        if (!rtgmcDegrainOverlapSupported(degrain)) {
             AddMessage(RGY_LOG_WARN,
-                _T("%s overlap=%d is adjusted to %d because the current Degrain backend supports overlap=0 or blksize/2.\n"),
+                _T("%s overlap=%d is adjusted to %d because the current Degrain backend supports overlap=0, blksize/4 or blksize/2.\n"),
                 stage, degrain.overlap, degrain.blksize / 2);
             degrain.overlap = degrain.blksize / 2;
         }
@@ -1595,14 +1611,20 @@ RGY_ERR NVEncFilterRtgmc::initFilters(const std::shared_ptr<NVEncFilterParamRtgm
         if (sts != RGY_ERR_NONE) return sts;
     }
     {
-        auto filter = std::make_unique<NVEncFilterRtgmcShimmerRepair>();
-        auto param = std::make_shared<NVEncFilterParamRtgmcShimmerRepair>();
-        param->stage = RGYRtgmcShimmerRepairStage::PreRetouch;
-        param->repairThin = prm->rtgmc.rep1.repThin;
-        param->repairPad = prm->rtgmc.rep1.repPad;
-        param->processChroma = prm->rtgmc.rep1.repChroma;
-        auto sts = initOne(std::move(filter), param);
-        if (sts != RGY_ERR_NONE) return sts;
+        if (prm->rtgmc.rep1.repThin == 0) {
+            auto sts = initBypass();
+            if (sts != RGY_ERR_NONE) return sts;
+            AddMessage(RGY_LOG_DEBUG, _T("rep1 shimmer repair stage is skipped because rep-thin=0.\n"));
+        } else {
+            auto filter = std::make_unique<NVEncFilterRtgmcShimmerRepair>();
+            auto param = std::make_shared<NVEncFilterParamRtgmcShimmerRepair>();
+            param->stage = RGYRtgmcShimmerRepairStage::PreRetouch;
+            param->repairThin = prm->rtgmc.rep1.repThin;
+            param->repairPad = prm->rtgmc.rep1.repPad;
+            param->processChroma = prm->rtgmc.rep1.repChroma;
+            auto sts = initOne(std::move(filter), param);
+            if (sts != RGY_ERR_NONE) return sts;
+        }
     }
     {
         auto filter = std::make_unique<NVEncFilterRtgmcLossless>();
@@ -1655,14 +1677,20 @@ RGY_ERR NVEncFilterRtgmc::initFilters(const std::shared_ptr<NVEncFilterParamRtgm
         }
     }
     {
-        auto filter = std::make_unique<NVEncFilterRtgmcShimmerRepair>();
-        auto param = std::make_shared<NVEncFilterParamRtgmcShimmerRepair>();
-        param->stage = RGYRtgmcShimmerRepairStage::PostTR2;
-        param->repairThin = prm->rtgmc.rep2.repThin;
-        param->repairPad = prm->rtgmc.rep2.repPad;
-        param->processChroma = prm->rtgmc.rep2.repChroma;
-        auto sts = initOne(std::move(filter), param);
-        if (sts != RGY_ERR_NONE) return sts;
+        if (prm->rtgmc.rep2.repThin == 0) {
+            auto sts = initBypass();
+            if (sts != RGY_ERR_NONE) return sts;
+            AddMessage(RGY_LOG_DEBUG, _T("rep2 shimmer repair stage is skipped because rep-thin=0.\n"));
+        } else {
+            auto filter = std::make_unique<NVEncFilterRtgmcShimmerRepair>();
+            auto param = std::make_shared<NVEncFilterParamRtgmcShimmerRepair>();
+            param->stage = RGYRtgmcShimmerRepairStage::PostTR2;
+            param->repairThin = prm->rtgmc.rep2.repThin;
+            param->repairPad = prm->rtgmc.rep2.repPad;
+            param->processChroma = prm->rtgmc.rep2.repChroma;
+            auto sts = initOne(std::move(filter), param);
+            if (sts != RGY_ERR_NONE) return sts;
+        }
     }
     {
         auto filter = std::make_unique<NVEncFilterRtgmcRetouch>();

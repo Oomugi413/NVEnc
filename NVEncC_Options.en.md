@@ -1124,6 +1124,7 @@ and is highly likely to become a bottleneck and result in poor encoding performa
 
 ### --vship-ssimulacra2
 Calculate SSIMULACRA2 score using Vship library (GPU accelerated).
+At the end, the log also shows the standard deviation, median, 5th percentile, 95th percentile, minimum, and maximum in the same line as the average score.
 
 ### --vship-butteraugli [&lt;param1&gt;=&lt;value1&gt;[,&lt;param2&gt;=&lt;value2&gt;]...]
 Calculate Butteraugli score using Vship library (GPU accelerated).
@@ -2694,6 +2695,30 @@ Rotate video. 90, 180, 270 degrees is allowed.
 
   - transpose=&lt;bool&gt;
 
+### --vpp-lenscorrection [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+
+Correct radial lens distortion using Brown-Conrady coefficients.
+
+- k1=&lt;float&gt;, k2=&lt;float&gt;: radial distortion coefficients.
+- cx=&lt;float&gt;, cy=&lt;float&gt;: correction centre in normalized image coordinates (default: 0.5).
+
+```
+--vpp-lenscorrection k1=-0.20,k2=0.04
+```
+
+### --vpp-v360 [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+
+Convert between equirect, flat, and cubemap projections.
+
+- in=&lt;string&gt;, out=&lt;string&gt;: input/output projection: equirect / flat / cubemap.
+- yaw=&lt;float&gt;, pitch=&lt;float&gt;, roll=&lt;float&gt;: view rotation in degrees.
+- h_fov=&lt;float&gt;: horizontal field of view for flat output.
+- w=&lt;int&gt;, h=&lt;int&gt;: output resolution.
+
+```
+--vpp-v360 in=equirect,out=flat,yaw=30,pitch=0,h_fov=90,w=1920,h=1080
+```
+
 ### --vpp-convolution3d [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
 3d noise reduction.
 
@@ -3131,6 +3156,10 @@ Apply custom shaders in the specified path using [libplacebo](https://code.video
 - **Parameters**
     - shader=&lt;string&gt;  
       Target shader file path. (glsl file)
+    - &lt;name&gt;=&lt;value&gt;
+      Replace the value of `#define &lt;name&gt; ...` in the shader before it is parsed. This is a shader-source (compile-time) parameter and may be specified multiple times. It is separate from `custom=` parameters.
+    - custom=&lt;name&gt;=&lt;value&gt;
+      Set a runtime parameter declared with `//!PARAM` in the shader. libplacebo checks the parameter type and range. This parameter may be specified multiple times.
     - res=&lt;int&gt;x&lt;int&gt;  
       Output resolution of the filter.
     - csp=&lt;string&gt;  
@@ -3195,6 +3224,12 @@ Apply custom shaders in the specified path using [libplacebo](https://code.video
     ``` 
     Example: Apply a custom shader (1280x720 -> 2560x1440)
     --vpp-libplacebo-shader shader=default-shader-pack-2.1.0\Anime4K_Upscale_CNN_x2_L.glsl,res=2560x1440
+
+    Example: Set a shader //!PARAM.
+    --vpp-libplacebo-shader shader=example.glsl,custom=GAIN=1.5
+
+    Example: Set a shader #define.
+    --vpp-libplacebo-shader shader=example.glsl,GAIN=1.5
     ```
 
 ### --vpp-resize &lt;string&gt; or [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
@@ -4309,8 +4344,10 @@ Pre/post processing is inferred from the model channel count: 1ch=luma SR, 3ch=R
 - **Parameters**
   - model=&lt;string&gt;  
     Path to the ONNX model file (required). A model registered in models.json can be specified without extension when `--vpp-onnx-model-dir` is specified.
-  - provider=&lt;string&gt; (default: auto)  
+  - provider=&lt;string&gt; (default: auto)
     Execution provider. auto / cuda / tensorrt (trt)
+  - prec=&lt;string&gt; (default: auto)
+    TensorRT calculation precision. auto / fp16 (f16) / fp32 (f32). auto uses fp16 with TensorRT. The CUDA provider uses fp32.
   - colormatrix=&lt;string&gt; (default: auto)
     Accepts the same names as [`--colormatrix`](#--colormatrix-string). `--vpp-onnx` supports auto / auto_res / smpte170m / bt470bg / bt709 / bt2020nc. The legacy names bt601 and bt2020 are also accepted as aliases for smpte170m and bt2020nc.
   - colormatrix_out=&lt;string&gt; (default: auto)
@@ -4321,6 +4358,10 @@ Pre/post processing is inferred from the model channel count: 1ch=luma SR, 3ch=R
     Color space for 3ch models. rgb / ycbcr (for ArtCNN *_YCbCr models)
   - noise=&lt;int&gt; (default: 15, range: 0 - 255)  
     Noise sigma for noise models.
+  - frames=&lt;int&gt; (default: 1)  
+    Temporal window size for models with `T*3` RGB input channels and 3 output channels. Specify a positive odd number so that the output corresponds to the centre frame.
+  - mask=&lt;string&gt;  
+    Grayscale mask image for a two-input ONNX model. White pixels are processed and black pixels are retained. This is intended for static masks such as logo or watermark removal.
   - out_res=&lt;WxH&gt;  
     End-of-chain resize to an arbitrary final size, applied after model inference.
     A negative value on one axis keeps the source aspect (e.g. out_res=-2x1080).
@@ -4391,7 +4432,9 @@ This option only specifies where model files are located. The ONNX Runtime GPU, 
 ### --vpp-onnx-cache-dir &lt;string&gt;
 Directory used to cache TensorRT engines.
 
-The cache is disabled when this option is omitted. The first run builds an engine, while later runs with the same model, precision, input shape, and GPU can load the cached engine and substantially reduce startup time.
+The cache is disabled when this option is omitted. The first run builds an engine, while later runs with the same model content, precision, input shape, and runtime environment can load the cached engine and substantially reduce startup time.
+
+Separate directories are used for each NVEnc version and revision, ONNX Runtime version, CUDA driver API version, and GPU. A TensorRT version mismatch is detected by TensorRT's own engine compatibility check, after which the affected engine is rebuilt once. Models in the same runtime environment share a timing cache. Directories for older environments are not removed automatically.
 
 ```
 --vpp-onnx-cache-dir C:\models\HWEnc-onnx-cache

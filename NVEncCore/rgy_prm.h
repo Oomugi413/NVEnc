@@ -84,7 +84,7 @@ static const int RGY_AUDIO_QUALITY_DEFAULT = 0;
 #define ENABLE_VPP_FILTER_ANIME4K      (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP)
 #define ENABLE_VPP_FILTER_ONNX         ((ENABLE_OPENVINO && ENCODER_QSV) || (ENABLE_ONNXRUNTIME && (ENCODER_NVENC || ENCODER_VCEENC)))
 #define ENABLE_VPP_FILTER_RIFE_OV      ((ENABLE_OPENVINO && ENCODER_QSV) || (ENABLE_ONNXRUNTIME && (ENCODER_NVENC || ENCODER_VCEENC)))
-#define ENABLE_VPP_FILTER_STDEINT      0 //((ENABLE_OPENVINO && ENCODER_QSV) || (ENABLE_ONNXRUNTIME && (ENCODER_NVENC || ENCODER_VCEENC)))
+#define ENABLE_VPP_FILTER_STDEINT      (0) // DISABLED
 #define ENABLE_VPP_FILTER_DENOISE_DCT  (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
 #define ENABLE_VPP_FILTER_SMOOTH       (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
 #define ENABLE_VPP_FILTER_FFT3D        (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP)
@@ -193,6 +193,8 @@ enum class VppType : int {
     CL_DELOGO,
     CL_SELECT_EVERY,
     CL_TRANSFORM,
+    CL_LENSCORRECTION,
+    CL_V360,
 
     CL_CONVOLUTION3D,
     CL_DENOISE_KNN,
@@ -1872,6 +1874,7 @@ struct VppLibplaceboShader {
     int width;
     int height;
     std::vector<std::pair<tstring, tstring>> params;
+    std::vector<std::pair<tstring, tstring>> custom_params;
     VppLibplaceboInputCSP csp;
     RGY_VPP_RESIZE_ALGO resize_algo;
     VppLibplaceboColorsystem colorsystem;
@@ -3535,6 +3538,8 @@ struct VppOnnx {
     CspColorRange colorrange; // auto=tv
     tstring colorspace;  // 3ch models: "rgb" (default) or "ycbcr" (ArtCNN *_YCbCr / JPEG-YCbCr)
     int     noise;       // noise sigma (0..255) fed to the conditioning channel of noise models (default 15)
+    int     frames;      // ONNX時系列窓のフレーム数（1は単一フレーム）
+    tstring maskFile;     // ユーザー提供マスク画像（2入力inpaintingモデル用）
     int                  postResizeW;
     int                  postResizeH;
     RGY_VPP_RESIZE_ALGO  postResizeAlgo;
@@ -3675,6 +3680,54 @@ struct VppTransform {
     bool setRotate(int rotate);
     bool operator==(const VppTransform &x) const;
     bool operator!=(const VppTransform &x) const;
+    tstring print() const;
+};
+
+struct VppLensCorrection {
+    bool enable;
+    float k1;
+    float k2;
+    float cx;
+    float cy;
+
+    VppLensCorrection();
+    bool operator==(const VppLensCorrection &x) const;
+    bool operator!=(const VppLensCorrection &x) const;
+    tstring print() const;
+};
+
+enum class VppV360Proj {
+    EQUIRECT = 0,
+    FLAT = 1,
+    CUBE3X2 = 2,
+};
+
+const CX_DESC list_vpp_v360_proj[] = {
+    { _T("e"),           (int)VppV360Proj::EQUIRECT },
+    { _T("equirect"),    (int)VppV360Proj::EQUIRECT },
+    { _T("flat"),        (int)VppV360Proj::FLAT },
+    { _T("rectilinear"), (int)VppV360Proj::FLAT },
+    { _T("c3x2"),        (int)VppV360Proj::CUBE3X2 },
+    { _T("cubemap"),     (int)VppV360Proj::CUBE3X2 },
+    { _T("cube"),        (int)VppV360Proj::CUBE3X2 },
+    { NULL, 0 }
+};
+
+struct VppV360 {
+    bool enable;
+    int in_proj;
+    int out_proj;
+    float yaw;
+    float pitch;
+    float roll;
+    float in_hfov;
+    float out_hfov;
+    int w;
+    int h;
+
+    VppV360();
+    bool operator==(const VppV360 &x) const;
+    bool operator!=(const VppV360 &x) const;
     tstring print() const;
 };
 
@@ -3901,6 +3954,8 @@ struct RGYParamVpp {
     VppSoftLight softlight;
     VppTweak tweak;
     VppTransform transform;
+    VppLensCorrection lenscorrection;
+    VppV360 v360;
     VppDeband deband;
     VppLibplaceboDeband libplacebo_deband;
     std::vector<VppOverlay> overlay;

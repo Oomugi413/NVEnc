@@ -30,15 +30,21 @@
 #if ENABLE_ONNXRUNTIME
 
 #include <cstring>
+#include <cstdint>
 #include <vector>
+#include <array>
 #include <string>
 #include <mutex>
 #include <unordered_map>
+#include <fstream>
+#include <filesystem>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "rgy_onnxruntime.h"
 #include "rgy_util.h"
+#include "rgy_filesystem.h"
+#include "rgy_rev.h"
 
 // ------- one-time dynamic load of ONNX Runtime + Ort C++ API init -------------
 
@@ -68,6 +74,76 @@ namespace {
             return char_to_tstring(prop.name);
         }
         return tstring();
+    }
+
+    // FNV-1a 64bit over the model file bytes. The engine cache must key on the model
+    // CONTENT: ORT's own cache filename hash covers only the file NAME and the graph
+    // node names (not the weights, not the tensor shapes), so a re-exported model
+    // under the same name would silently reuse a stale engine built from old weights.
+    uint64_t fnv1a64File(const tstring &path) {
+        uint64_t h = 14695981039346656037ULL;
+        std::ifstream f(std::filesystem::path(path), std::ios::binary);
+        if (!f.good()) return 0;
+        std::vector<char> buf(1 << 20);
+        for (;;) {
+            f.read(buf.data(), buf.size());
+            const auto n = f.gcount();
+            if (n <= 0) break;
+            for (std::streamsize i = 0; i < n; i++) {
+                h ^= (uint64_t)(uint8_t)buf[i];
+                h *= 1099511628211ULL;
+            }
+        }
+        return h;
+    }
+
+    tstring sanitizeForDirName(const tstring &name) {
+        tstring out;
+        for (const auto c : name) {
+            if ((c >= _T('0') && c <= _T('9')) || (c >= _T('a') && c <= _T('z')) || (c >= _T('A') && c <= _T('Z'))) {
+                out.push_back(c);
+            }
+        }
+        if (out.length() > 24) out.resize(24);
+        return out;
+    }
+
+    tstring tensorRTCacheEnvironment(const cudaDeviceProp& prop) {
+        tstring fingerprint = char_to_tstring(ENCODER_NAME) + _T("_") + VER_STR_FILEVERSION_TCHAR
+            + _T("_rev") + char_to_tstring(ENCODER_REV);
+        if (const auto getApiBase = onnxRuntime().p_OrtGetApiBase(); getApiBase != nullptr) {
+            if (const auto version = getApiBase()->GetVersionString(); version != nullptr && version[0] != '\0') {
+                fingerprint += _T("_ort") + char_to_tstring(version);
+            }
+        }
+        int cudaDriverVersion = 0;
+        if (cudaDriverGetVersion(&cudaDriverVersion) == cudaSuccess && cudaDriverVersion > 0) {
+            fingerprint += strsprintf(_T("_cuda%d"), cudaDriverVersion);
+        }
+        fingerprint += strsprintf(_T("_sm%d%d_%s"), prop.major, prop.minor,
+            sanitizeForDirName(char_to_tstring(prop.name)).c_str());
+        return fingerprint;
+    }
+
+    bool clearTensorRTEngineCache(const tstring& dir, tstring& errorMessage) {
+        std::error_code ec;
+        const auto cacheDir = std::filesystem::path(dir);
+        for (const auto& entry : std::filesystem::directory_iterator(cacheDir, ec)) {
+            if (ec) break;
+            const auto extension = entry.path().extension();
+            if (entry.is_regular_file(ec)
+                && (extension == std::filesystem::path(_T(".engine")) || extension == std::filesystem::path(_T(".profile")))) {
+                if (!std::filesystem::remove(entry.path(), ec) || ec) {
+                    break;
+                }
+            }
+        }
+        if (ec) {
+            errorMessage = strsprintf(_T("TensorRT engine cacheの削除に失敗しました: %s: %s"),
+                dir.c_str(), char_to_tstring(ec.message()).c_str());
+            return false;
+        }
+        return true;
     }
 
     tstring cudaErrorMessage(const TCHAR *func, const int deviceID, const cudaError_t err) {
@@ -109,7 +185,9 @@ public:
     std::unique_ptr<Ort::Env> env;
     std::unique_ptr<Ort::AllocatorWithDefaultOptions> alloc;
     std::unique_ptr<Ort::Session> session{ nullptr };
-    std::string inName, outName;     // owned copies of the model's first I/O names
+    std::string inName, outName;     // 互換用の先頭I/O名
+    std::vector<std::string> inNames, outNames;
+    std::vector<int> inCs, inHs, inWs, outCs, outHs, outWs;
     int inC = 0, inH = 0, inW = 0;
     int outC = 0, outH = 0, outW = 0;
     int deviceID = 0;
@@ -117,6 +195,9 @@ public:
     tstring provider = _T("cuda");   // the EP actually used
     tstring precision = _T("f32");
     tstring lastError;
+    tstring engineCacheDir;          // per-key TensorRT engine cache dir ("" = caching off)
+    bool engineCacheHadFiles = false; // a cached engine existed there before session create
+    bool engineCacheLoadFailure = false;
     bool deviceIO = false;
     std::unique_ptr<Ort::MemoryInfo> deviceMemInfo;
     std::unique_ptr<Ort::Value> deviceInput;
@@ -133,6 +214,38 @@ RGYOnnxRTCUDA::~RGYOnnxRTCUDA() {}
 RGY_ERR RGYOnnxRTCUDA::init(const tstring &modelPath, const int deviceID, const RGYOnnxRTProvider provider,
                             const int height, const int width, tstring &errMessage,
                             cudaStream_t userComputeStream, const tstring &precision, const tstring &cacheDir) {
+    auto err = initImpl(modelPath, deviceID, provider, height, width, errMessage, userComputeStream, precision, cacheDir);
+    // A cached TensorRT engine is deserialized without content validation; a stale or
+    // corrupt cache file fails the whole session instead of triggering a rebuild. If a
+    // pre-existing cache was in play, clear that key directory and retry once cold.
+    if (err != RGY_ERR_NONE && m_impl->engineCacheLoadFailure && !m_impl->engineCacheDir.empty()) {
+        tstring clearError;
+        if (!clearTensorRTEngineCache(m_impl->engineCacheDir, clearError)) {
+            errMessage += _T(" (") + clearError + _T(")");
+            return err;
+        }
+        tstring retryMessage;
+        err = initImpl(modelPath, deviceID, provider, height, width, retryMessage, userComputeStream, precision, cacheDir);
+        if (err == RGY_ERR_NONE) {
+            m_impl->lastError = tstring(_T("cached TensorRT engine was unusable and has been rebuilt: ")) + errMessage;
+            errMessage.clear();
+        } else {
+            errMessage += tstring(_T(" (retry after clearing engine cache: ")) + retryMessage + _T(")");
+        }
+    }
+    return err;
+}
+
+RGY_ERR RGYOnnxRTCUDA::initImpl(const tstring &modelPath, const int deviceID, const RGYOnnxRTProvider provider,
+                            const int height, const int width, tstring &errMessage,
+                            cudaStream_t userComputeStream, const tstring &precision, const tstring &cacheDir) {
+    enum class InitStage {
+        Other,
+        TensorRTSessionCreate,
+        TensorRTProbe
+    };
+    auto initStage = InitStage::Other;
+    auto &I = *m_impl;
     CudaContextRestorer contextRestorer;
     loadOrtOnce();
     if (!s_ortReady) {
@@ -140,10 +253,12 @@ RGY_ERR RGYOnnxRTCUDA::init(const tstring &modelPath, const int deviceID, const 
         return RGY_ERR_UNSUPPORTED;
     }
     try {
-        auto &I = *m_impl;
         I.deviceID = deviceID;
         I.provider = _T("cuda");
         I.precision = _T("f32");
+        I.engineCacheDir.clear();
+        I.engineCacheHadFiles = false;
+        I.engineCacheLoadFailure = false;
         I.deviceIO = false;
         I.deviceMemInfo.reset();
         I.deviceInput.reset();
@@ -180,7 +295,8 @@ RGY_ERR RGYOnnxRTCUDA::init(const tstring &modelPath, const int deviceID, const 
                 && api.UpdateTensorRTProviderOptionsWithValue != nullptr
                 && api.SessionOptionsAppendExecutionProvider_TensorRT_V2 != nullptr) {
                 try {
-                    const bool useFP16 = tolowercase(precision) == _T("auto");
+                    const auto precLower = tolowercase(precision);
+                    const bool useFP16 = (precLower == _T("auto") || precLower == _T("fp16") || precLower == _T("f16"));
                     Ort::TensorRTProviderOptions trtOptions;
                     std::unordered_map<std::string, std::string> optionValues = {
                         { "device_id", std::to_string(deviceID) },
@@ -189,11 +305,49 @@ RGY_ERR RGYOnnxRTCUDA::init(const tstring &modelPath, const int deviceID, const 
                     if (userComputeStream != nullptr) {
                         optionValues["has_user_compute_stream"] = "1";
                     }
-                    std::string cacheDirUtf8;
                     if (!cacheDir.empty()) {
-                        cacheDirUtf8 = tchar_to_string(cacheDir, CP_UTF8);
-                        optionValues["trt_engine_cache_enable"] = "1";
-                        optionValues["trt_engine_cache_path"] = cacheDirUtf8;
+                        // ORT reuses a cached engine whenever its filename hash matches, but that
+                        // hash covers neither the model weights nor the input shape: the same model
+                        // at another resolution, or a re-exported model under the same name, maps to
+                        // the same cache file and the stale engine fails the session (or worse, runs
+                        // with the old weights). Key a subdirectory on everything a TensorRT engine
+                        // is actually specific to: model content, WxH, precision, GPU (SM + name).
+                        cudaDeviceProp prop;
+                        memset(&prop, 0, sizeof(prop));
+                        cudaGetDeviceProperties(&prop, deviceID);
+                        const auto keyDirName = strsprintf(_T("trt_m%016llx_%dx%d_%s"),
+                            (unsigned long long)fnv1a64File(modelPath), width, height,
+                            useFP16 ? _T("fp16") : _T("fp32"));
+                        // NVEnc・ORT・CUDAドライバAPI・GPUの環境が変わった場合は、
+                        // TensorRTに古いキャッシュを渡さず別の親ディレクトリを使う。
+                        const auto environmentDir = cacheDir + _T("/") + tensorRTCacheEnvironment(prop);
+                        const auto engineCacheDir = environmentDir + _T("/") + keyDirName;
+                        const auto timingCacheDir = environmentDir + _T("/trt_timing");
+                        const bool engineCacheCreated = CreateDirectoryRecursive(engineCacheDir.c_str());
+                        const bool timingCacheCreated = CreateDirectoryRecursive(timingCacheDir.c_str());
+                        if (rgy_directory_exists(engineCacheDir)) {
+                            optionValues["trt_engine_cache_enable"] = "1";
+                            optionValues["trt_engine_cache_path"] = tchar_to_string(engineCacheDir, CP_UTF8);
+                            I.engineCacheDir = engineCacheDir;
+                            std::error_code ec;
+                            for (const auto &entry : std::filesystem::directory_iterator(std::filesystem::path(engineCacheDir), ec)) {
+                                if (entry.is_regular_file(ec) && entry.path().extension() == std::filesystem::path(_T(".engine"))) {
+                                    I.engineCacheHadFiles = true;
+                                    break;
+                                }
+                            }
+                        } else if (!engineCacheCreated) {
+                            I.lastError = _T("TensorRT engine cacheディレクトリを作成できないため、キャッシュを無効にしました: ") + engineCacheDir;
+                        }
+                        if (rgy_directory_exists(timingCacheDir)) {
+                            // kernel tactic timings; keyed per compute capability inside the cache and
+                            // shared across models, so cold engine builds on this GPU get much shorter
+                            optionValues["trt_timing_cache_enable"] = "1";
+                            optionValues["trt_timing_cache_path"] = tchar_to_string(timingCacheDir, CP_UTF8);
+                        } else if (!timingCacheCreated) {
+                            const auto timingError = _T("TensorRT timing cacheディレクトリを作成できないため、timing cacheを無効にしました: ") + timingCacheDir;
+                            I.lastError += (I.lastError.empty() ? tstring() : _T(" ")) + timingError;
+                        }
                     }
                     trtOptions.Update(optionValues);
                     if (userComputeStream != nullptr) {
@@ -205,6 +359,8 @@ RGY_ERR RGYOnnxRTCUDA::init(const tstring &modelPath, const int deviceID, const 
                     I.precision = useFP16 ? _T("f16") : _T("f32");
                 } catch (const Ort::Exception &e) {
                     tensorRTV2Error = tstring(_T("TensorRT V2 provider options failed: ")) + char_to_tstring(e.what());
+                    I.engineCacheDir.clear();
+                    I.engineCacheHadFiles = false;
                 }
             } else {
                 tensorRTV2Error = _T("TensorRT V2 provider options are unavailable.");
@@ -254,56 +410,76 @@ RGY_ERR RGYOnnxRTCUDA::init(const tstring &modelPath, const int deviceID, const 
             }
         }
 
+        initStage = (tensorRTAttached && I.engineCacheHadFiles) ? InitStage::TensorRTSessionCreate : InitStage::Other;
         I.session = std::make_unique<Ort::Session>(*I.env, modelPath.c_str(), opts);
+        initStage = InitStage::Other;
 
         if (I.session->GetInputCount() < 1 || I.session->GetOutputCount() < 1) {
             errMessage = _T("model has no input/output tensor.");
             return RGY_ERR_UNSUPPORTED;
         }
         // names (own the strings; the AllocatedStringPtr frees on scope exit)
-        {
-            auto inN  = I.session->GetInputNameAllocated(0, *I.alloc);
-            auto outN = I.session->GetOutputNameAllocated(0, *I.alloc);
-            I.inName  = inN.get();
-            I.outName = outN.get();
+        I.inNames.clear(); I.inCs.clear(); I.inHs.clear(); I.inWs.clear();
+        for (size_t i = 0; i < I.session->GetInputCount(); i++) {
+            auto name = I.session->GetInputNameAllocated(i, *I.alloc);
+            I.inNames.emplace_back(name.get());
+            auto shape = I.session->GetInputTypeInfo(i).GetTensorTypeAndShapeInfo().GetShape();
+            const int c = (shape.size() >= 2 && shape[1] > 0) ? (int)shape[1] : 1;
+            const int h = (shape.size() >= 4 && shape[2] > 0) ? (int)shape[2] : height;
+            const int w = (shape.size() >= 4 && shape[3] > 0) ? (int)shape[3] : width;
+            I.inCs.push_back(c); I.inHs.push_back(h); I.inWs.push_back(w);
         }
-        // input channel count from the model (dim 1); N/H/W are pinned by us
-        auto inTypeInfo = I.session->GetInputTypeInfo(0);
-        auto inInfo  = inTypeInfo.GetTensorTypeAndShapeInfo();
-        auto inShape = inInfo.GetShape(); // may contain -1 for dynamic dims
-        I.inC = (inShape.size() >= 2 && inShape[1] > 0) ? (int)inShape[1] : 1;
-        I.inH = height;
-        I.inW = width;
+        I.inName = I.inNames.front();
+        I.inC = I.inCs.front(); I.inH = I.inHs.front(); I.inW = I.inWs.front();
+        I.outNames.clear(); I.outCs.clear(); I.outHs.clear(); I.outWs.clear();
+        for (size_t i = 0; i < I.session->GetOutputCount(); i++) {
+            auto name = I.session->GetOutputNameAllocated(i, *I.alloc);
+            I.outNames.emplace_back(name.get());
+        }
+        I.outName = I.outNames.front();
         I.deviceName = cudaDeviceName(deviceID);
 
         // Probe inference with a zero input to discover the output shape and warm
         // the provider (for TensorRT the first run builds the engine).
-        std::vector<int64_t> inDims = { 1, I.inC, I.inH, I.inW };
-        std::vector<float> zero((size_t)I.inC * I.inH * I.inW, 0.0f);
         Ort::MemoryInfo memCpu = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        Ort::Value inT = Ort::Value::CreateTensor<float>(memCpu, zero.data(), zero.size(),
-                                                         inDims.data(), inDims.size());
-        const char *inNames[]  = { I.inName.c_str() };
-        const char *outNames[] = { I.outName.c_str() };
+        std::vector<Ort::Value> inTensors;
+        std::vector<std::vector<float>> zero;
+        inTensors.reserve(I.inNames.size());
+        zero.reserve(I.inNames.size());
+        std::vector<std::array<int64_t, 4>> inDims(I.inNames.size());
+        for (size_t i = 0; i < I.inNames.size(); i++) {
+            inDims[i] = { 1, I.inCs[i], I.inHs[i], I.inWs[i] };
+            zero.emplace_back((size_t)I.inCs[i] * I.inHs[i] * I.inWs[i], 0.0f);
+            inTensors.emplace_back(Ort::Value::CreateTensor<float>(memCpu, zero.back().data(), zero.back().size(), inDims[i].data(), 4));
+        }
+        std::vector<const char *> inNames;
+        for (const auto &n : I.inNames) inNames.push_back(n.c_str());
+        std::vector<const char *> outNames;
+        for (const auto &n : I.outNames) outNames.push_back(n.c_str());
         cudaerr = selectCudaDevice(I.deviceID);
         if (cudaerr != cudaSuccess) {
             errMessage = cudaErrorMessage(_T("cudaSetDevice"), I.deviceID, cudaerr);
             return RGY_ERR_CUDA;
         }
         cudaGetLastError();
-        auto outs = I.session->Run(Ort::RunOptions{ nullptr }, inNames, &inT, 1, outNames, 1);
-        auto oShape = outs[0].GetTensorTypeAndShapeInfo().GetShape();
-        if (oShape.size() != 4) {
-            errMessage = _T("model output is not a 4D NCHW tensor.");
-            return RGY_ERR_UNSUPPORTED;
+        initStage = (tensorRTAttached && I.engineCacheHadFiles) ? InitStage::TensorRTProbe : InitStage::Other;
+        auto outs = I.session->Run(Ort::RunOptions{ nullptr }, inNames.data(), inTensors.data(), inTensors.size(), outNames.data(), outNames.size());
+        initStage = InitStage::Other;
+        for (const auto &out : outs) {
+            auto oShape = out.GetTensorTypeAndShapeInfo().GetShape();
+            if (oShape.size() != 4) {
+                errMessage = _T("model output is not a 4D NCHW tensor.");
+                return RGY_ERR_UNSUPPORTED;
+            }
+            I.outCs.push_back((int)oShape[1]); I.outHs.push_back((int)oShape[2]); I.outWs.push_back((int)oShape[3]);
         }
-        I.outC = (int)oShape[1];
-        I.outH = (int)oShape[2];
-        I.outW = (int)oShape[3];
+        I.outC = I.outCs.front(); I.outH = I.outHs.front(); I.outW = I.outWs.front();
     } catch (const Ort::Exception &e) {
+        I.engineCacheLoadFailure = (initStage != InitStage::Other);
         errMessage = char_to_tstring(e.what());
         return RGY_ERR_UNKNOWN;
     } catch (const std::exception &e) {
+        I.engineCacheLoadFailure = (initStage != InitStage::Other);
         errMessage = char_to_tstring(e.what());
         return RGY_ERR_UNKNOWN;
     }
@@ -334,6 +510,47 @@ RGY_ERR RGYOnnxRTCUDA::infer(const float *in, float *out) {
         const char *inNames[]  = { I.inName.c_str() };
         const char *outNames[] = { I.outName.c_str() };
         I.session->Run(Ort::RunOptions{ nullptr }, inNames, &inT, 1, outNames, &outT, 1);
+    } catch (const Ort::Exception &e) {
+        m_impl->lastError = char_to_tstring(e.what());
+        return RGY_ERR_UNKNOWN;
+    } catch (const std::exception &e) {
+        m_impl->lastError = char_to_tstring(e.what());
+        return RGY_ERR_UNKNOWN;
+    }
+    return RGY_ERR_NONE;
+}
+
+RGY_ERR RGYOnnxRTCUDA::inferMulti(const std::vector<const float *> &inputs, const std::vector<float *> &outputs) {
+    if (!m_impl->session || inputs.size() != m_impl->inNames.size() || outputs.size() != m_impl->outNames.size()) {
+        return RGY_ERR_INVALID_PARAM;
+    }
+    CudaContextRestorer contextRestorer;
+    try {
+        auto &I = *m_impl;
+        I.lastError.clear();
+        auto cudaerr = selectCudaDevice(I.deviceID);
+        if (cudaerr != cudaSuccess) {
+            I.lastError = cudaErrorMessage(_T("cudaSetDevice"), I.deviceID, cudaerr);
+            return RGY_ERR_CUDA;
+        }
+        cudaGetLastError();
+        Ort::MemoryInfo memCpu = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        std::vector<Ort::Value> inTensors, outTensors;
+        std::vector<std::array<int64_t, 4>> inDims(I.inNames.size()), outDims(I.outNames.size());
+        for (size_t i = 0; i < I.inNames.size(); i++) {
+            inDims[i] = { 1, I.inCs[i], I.inHs[i], I.inWs[i] };
+            const size_t count = (size_t)I.inCs[i] * I.inHs[i] * I.inWs[i];
+            inTensors.emplace_back(Ort::Value::CreateTensor<float>(memCpu, const_cast<float *>(inputs[i]), count, inDims[i].data(), 4));
+        }
+        for (size_t i = 0; i < I.outNames.size(); i++) {
+            outDims[i] = { 1, I.outCs[i], I.outHs[i], I.outWs[i] };
+            const size_t count = (size_t)I.outCs[i] * I.outHs[i] * I.outWs[i];
+            outTensors.emplace_back(Ort::Value::CreateTensor<float>(memCpu, outputs[i], count, outDims[i].data(), 4));
+        }
+        std::vector<const char *> inNames, outNames;
+        for (const auto &n : I.inNames) inNames.push_back(n.c_str());
+        for (const auto &n : I.outNames) outNames.push_back(n.c_str());
+        I.session->Run(Ort::RunOptions{ nullptr }, inNames.data(), inTensors.data(), inTensors.size(), outNames.data(), outTensors.data(), outTensors.size());
     } catch (const Ort::Exception &e) {
         m_impl->lastError = char_to_tstring(e.what());
         return RGY_ERR_UNKNOWN;
@@ -387,6 +604,11 @@ RGY_ERR RGYOnnxRTCUDA::inferDevice(const float *inDevice, float *outDevice) {
 bool RGYOnnxRTCUDA::deviceIOAvailable() const { return m_impl->deviceIO; }
 
 int RGYOnnxRTCUDA::inChannels()  const { return m_impl->inC; }
+int RGYOnnxRTCUDA::inputCount() const { return (int)m_impl->inNames.size(); }
+int RGYOnnxRTCUDA::inputChannels(int index) const { return (index >= 0 && index < (int)m_impl->inCs.size()) ? m_impl->inCs[index] : 0; }
+int RGYOnnxRTCUDA::inputHeight(int index) const { return (index >= 0 && index < (int)m_impl->inHs.size()) ? m_impl->inHs[index] : 0; }
+int RGYOnnxRTCUDA::inputWidth(int index) const { return (index >= 0 && index < (int)m_impl->inWs.size()) ? m_impl->inWs[index] : 0; }
+int RGYOnnxRTCUDA::outputCount() const { return (int)m_impl->outNames.size(); }
 int RGYOnnxRTCUDA::inHeight()    const { return m_impl->inH; }
 int RGYOnnxRTCUDA::inWidth()     const { return m_impl->inW; }
 int RGYOnnxRTCUDA::outChannels() const { return m_impl->outC; }
@@ -399,6 +621,12 @@ tstring RGYOnnxRTCUDA::deviceFullName() const { return m_impl->deviceName; }
 tstring RGYOnnxRTCUDA::inferencePrecision() const { return m_impl->precision; }
 tstring RGYOnnxRTCUDA::providerName() const { return m_impl->provider; }
 tstring RGYOnnxRTCUDA::lastError() const { return m_impl->lastError; }
+tstring RGYOnnxRTCUDA::cacheInfo() const {
+    if (m_impl->engineCacheDir.empty()) return tstring();
+    return strsprintf(_T("TensorRT engine cache %s: %s"),
+        m_impl->engineCacheHadFiles ? _T("hit") : _T("cold, engine built"),
+        m_impl->engineCacheDir.c_str());
+}
 
 #else // !ENABLE_ONNXRUNTIME
 
@@ -411,9 +639,15 @@ RGY_ERR RGYOnnxRTCUDA::init(const tstring &, const int, const RGYOnnxRTProvider,
     return RGY_ERR_UNSUPPORTED;
 }
 RGY_ERR RGYOnnxRTCUDA::infer(const float *, float *) { return RGY_ERR_UNSUPPORTED; }
+RGY_ERR RGYOnnxRTCUDA::inferMulti(const std::vector<const float *> &, const std::vector<float *> &) { return RGY_ERR_UNSUPPORTED; }
 RGY_ERR RGYOnnxRTCUDA::inferDevice(const float *, float *) { return RGY_ERR_UNSUPPORTED; }
 bool RGYOnnxRTCUDA::deviceIOAvailable() const { return false; }
 int RGYOnnxRTCUDA::inChannels()  const { return 0; }
+int RGYOnnxRTCUDA::inputCount() const { return 0; }
+int RGYOnnxRTCUDA::inputChannels(int) const { return 0; }
+int RGYOnnxRTCUDA::inputHeight(int) const { return 0; }
+int RGYOnnxRTCUDA::inputWidth(int) const { return 0; }
+int RGYOnnxRTCUDA::outputCount() const { return 0; }
 int RGYOnnxRTCUDA::inHeight()    const { return 0; }
 int RGYOnnxRTCUDA::inWidth()     const { return 0; }
 int RGYOnnxRTCUDA::outChannels() const { return 0; }
@@ -424,5 +658,6 @@ tstring RGYOnnxRTCUDA::deviceFullName() const { return tstring(); }
 tstring RGYOnnxRTCUDA::inferencePrecision() const { return tstring(); }
 tstring RGYOnnxRTCUDA::providerName() const { return tstring(); }
 tstring RGYOnnxRTCUDA::lastError() const { return tstring(); }
+tstring RGYOnnxRTCUDA::cacheInfo() const { return tstring(); }
 
 #endif // ENABLE_ONNXRUNTIME

@@ -51,9 +51,15 @@ RGY_ERR launchNVEncDegrainDebug(
     const RGYDegrainBlockLayout &layout, int pel, cudaStream_t stream);
 RGY_ERR launchNVEncDegrainDownsampleLuma2x(
     const RGYFrameInfo &src, const CUMemBuf &dst, int dstPitch, int dstWidth, int dstHeight, cudaStream_t stream);
+RGY_ERR launchNVEncDegrainBuildSubpelPlanes(
+    const uint8_t *src, int pitch, CUMemBuf &dst, int planeStride,
+    int width, int height, int subpelInterp, cudaStream_t stream);
 RGY_ERR launchNVEncDegrainMotionSearchSeedAnchorVectors(
     CUMemBuf &vectors, const CUMemBuf &frameAverageMV, int planeBase, int planeStride,
     int planeCount, int pel, cudaStream_t stream);
+RGY_ERR launchNVEncDegrainMotionSearchSeedGlobalFromCoarse(
+    CUMemBuf &dstVectors, const CUMemBuf &srcVectorsFinal,
+    int dstPlaneBase, int srcFinalBase, int srcBlockCount, cudaStream_t stream);
 RGY_ERR launchNVEncDegrainMotionSearchSeedZeroVectors(
     CUMemBuf &vectors, CUMemBuf &vectorsPrev, CUMemBuf &sads, int planeBase,
     int sadBase, int blockCount, cudaStream_t stream);
@@ -66,14 +72,17 @@ RGY_ERR launchNVEncDegrainMotionSearchExportSad(
     int finalBase, int sadBase, int blockCount, int outOffset,
     int referenceDirection, int refs, cudaStream_t stream);
 RGY_ERR launchNVEncDegrainMotionSearchSearchParallel(
-    const uint8_t *sourcePlane, const uint8_t *referencePlane, CUMemBuf &vectors,
+    const uint8_t *sourcePlane, const uint8_t *referencePlane,
+    const uint8_t *subpelPlanes, int subpelPlaneStride, CUMemBuf &vectors,
     int pitch, int width, int height, int planeBase, int blockCount,
     const RGYDegrainBlockLayout &layout, int pixelBytes, int pel, int subpelInterp,
     int pad, int motionCostScale, int lowSadWeightScale,
     int zeroCandidateCostScale, int frameAverageCandidateCostScale,
-    int newCandidateCostScale, int level, cudaStream_t stream);
+    int newCandidateCostScale, int searchParam,
+    int level, cudaStream_t stream);
 RGY_ERR launchNVEncDegrainMotionSearchSpatialRefine(
     const uint8_t *sourcePlane, const uint8_t *referencePlane,
+    const uint8_t *subpelPlanes, int subpelPlaneStride,
     CUMemBuf &vectors, const CUMemBuf &vectorsPrev, CUMemBuf &vectorsFinal,
     int pitch, int width, int height, int planeBase, int finalBase,
     int blockCount, const RGYDegrainBlockLayout &layout, int pixelBytes,
@@ -465,6 +474,32 @@ bool degrainEnvFlagEnabled(const char *name) {
     return value && value[0] == '1' && value[1] == '\0';
 }
 
+bool degrainSubpelPlanesEnabledFromEnv() {
+    static const bool enabled = []() {
+        const auto value = std::getenv("NVENC_DEGRAIN_SUBPEL_PLANES");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+bool allocDegrainMotionSearchWorkspaceBuffer(
+    std::unique_ptr<CUMemBuf> &buf,
+    size_t &currentBytes,
+    const size_t requiredBytes) {
+    currentBytes = requiredBytes;
+    if (requiredBytes == 0) {
+        buf.reset();
+        return true;
+    }
+    if (!buf || buf->nSize != requiredBytes) {
+        buf = std::make_unique<CUMemBuf>(requiredBytes, "degrain subpel planes");
+        if (buf->alloc() != RGY_ERR_NONE) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool degrainMotionSearchProfileEnabled() {
     static const bool enabled = degrainEnvFlagEnabled("NVENC_DEGRAIN_MOTION_SEARCH_PROFILE");
     return enabled;
@@ -682,8 +717,9 @@ RGY_ERR NVEncFilterDegrain::checkParam(const std::shared_ptr<NVEncFilterParamDeg
         AddMessage(RGY_LOG_ERROR, _T("degrain overlap must satisfy 0 <= overlap < blksize.\n"));
         return RGY_ERR_UNSUPPORTED;
     }
-    if (prm->degrain.overlap != 0 && prm->degrain.overlap != prm->degrain.blksize / 2) {
-        AddMessage(RGY_LOG_ERROR, _T("degrain Step2a currently supports only overlap=0 or overlap=blksize/2.\n"));
+    if (prm->degrain.overlap != 0 && prm->degrain.overlap != prm->degrain.blksize / 2
+        && prm->degrain.overlap != prm->degrain.blksize / 4) {
+        AddMessage(RGY_LOG_ERROR, _T("degrain Step2a currently supports only overlap=0, blksize/4 or blksize/2.\n"));
         return RGY_ERR_UNSUPPORTED;
     }
     if (prm->degrain.delta < 1 || prm->degrain.delta > 5) {
@@ -2727,6 +2763,32 @@ RGY_ERR NVEncFilterDegrain::prepareAnalysisStateMotionSearch(const RGYFrameInfo 
     const auto levelPlaneBase = [](const int dir, const int planeStride) { return dir * planeStride; };
     const auto blockPlaneBase = [](const int dir, const int blockCount) { return dir * blockCount; };
 
+    // pel=2: 4位相サブペルプレーン (整数/H/V/HV) を事前計算し、
+    // SADの毎サンプル6タップ補間を整数座標のプレーン参照に置き換える。
+    bool useSubpelPlanes = (prm->degrain.pel == 2)
+        && (RGY_CSP_BIT_DEPTH[planeCur.csp] <= 8)
+        && degrainSubpelPlanesEnabledFromEnv();
+    int subpelL0Stride = 0;
+    int subpelL1Stride = 0;
+    if (useSubpelPlanes) {
+        subpelL0Stride = planeCur.pitch[0] * planeCur.height;
+        subpelL1Stride = m_analysis.lumaLevel1Pitch * m_analysis.lumaLevel1Height;
+        if (!allocDegrainMotionSearchWorkspaceBuffer(ws.subpelLevel0, ws.subpelLevel0Bytes, (size_t)subpelL0Stride * 4)
+            || !allocDegrainMotionSearchWorkspaceBuffer(ws.subpelLevel1, ws.subpelLevel1Bytes, (size_t)subpelL1Stride * 4)) {
+            AddMessage(RGY_LOG_WARN, _T("failed to allocate degrain subpel plane buffers; falling back to on-the-fly interpolation.\n"));
+            ws.subpelLevel0.reset();
+            ws.subpelLevel1.reset();
+            ws.subpelLevel0Bytes = 0;
+            ws.subpelLevel1Bytes = 0;
+            useSubpelPlanes = false;
+        }
+    } else {
+        ws.subpelLevel0.reset();
+        ws.subpelLevel1.reset();
+        ws.subpelLevel0Bytes = 0;
+        ws.subpelLevel1Bytes = 0;
+    }
+
     RGYCudaEvent initLevel1Event;
     auto profileStepStart = profileNow();
     err = degrainWaitEvents(stream, { frameAverageMVEvent });
@@ -2783,6 +2845,35 @@ RGY_ERR NVEncFilterDegrain::prepareAnalysisStateMotionSearch(const RGYFrameInfo 
         const int planeBase1 = levelPlaneBase(dir, planeStride1);
         const int blockBase1 = blockPlaneBase(dir, blockCount1);
 
+        if (useSubpelPlanes) {
+            auto errSubpel = launchNVEncDegrainBuildSubpelPlanes(
+                refPlanes[dir].ptr[0],
+                planeCur.pitch[0],
+                *ws.subpelLevel0,
+                subpelL0Stride,
+                planeCur.width,
+                planeCur.height,
+                motionSearchConfig.subpelInterp,
+                stream);
+            if (errSubpel != RGY_ERR_NONE) {
+                AddMessage(RGY_LOG_ERROR, _T("failed to build degrain level0 subpel planes: %s.\n"), get_err_mes(errSubpel));
+                return errSubpel;
+            }
+            errSubpel = launchNVEncDegrainBuildSubpelPlanes(
+                reinterpret_cast<const uint8_t *>(m_analysis.lumaLevel1[dir + 1]->ptr),
+                m_analysis.lumaLevel1Pitch,
+                *ws.subpelLevel1,
+                subpelL1Stride,
+                m_analysis.lumaLevel1Width,
+                m_analysis.lumaLevel1Height,
+                motionSearchConfigLevel1.subpelInterp,
+                stream);
+            if (errSubpel != RGY_ERR_NONE) {
+                AddMessage(RGY_LOG_ERROR, _T("failed to build degrain level1 subpel planes: %s.\n"), get_err_mes(errSubpel));
+                return errSubpel;
+            }
+        }
+
         std::vector<RGYCudaEvent> seedLevel1Wait = { initLevel1Event };
         if (previousEvent() != nullptr) {
             seedLevel1Wait.push_back(previousEvent);
@@ -2820,6 +2911,8 @@ RGY_ERR NVEncFilterDegrain::prepareAnalysisStateMotionSearch(const RGYFrameInfo 
             err = launchNVEncDegrainMotionSearchSearchParallel(
                 reinterpret_cast<const uint8_t *>(m_analysis.lumaLevel1[0]->ptr),
                 reinterpret_cast<const uint8_t *>(m_analysis.lumaLevel1[dir + 1]->ptr),
+                useSubpelPlanes ? reinterpret_cast<const uint8_t *>(ws.subpelLevel1->ptr) : reinterpret_cast<const uint8_t *>(m_analysis.lumaLevel1[dir + 1]->ptr),
+                useSubpelPlanes ? subpelL1Stride : 0,
                 *ws.level1.vectors,
                 m_analysis.lumaLevel1Pitch,
                 m_analysis.lumaLevel1Width,
@@ -2836,6 +2929,7 @@ RGY_ERR NVEncFilterDegrain::prepareAnalysisStateMotionSearch(const RGYFrameInfo 
                 motionSearchConfigLevel1.zeroCandidateCostScale,
                 motionSearchConfigLevel1.frameAverageCandidateCostScale,
                 motionSearchConfigLevel1.newCandidateCostScale,
+                motionSearchConfigLevel1.searchParam,
                 motionSearchConfigLevel1.level,
                 stream);
         }
@@ -2866,6 +2960,8 @@ RGY_ERR NVEncFilterDegrain::prepareAnalysisStateMotionSearch(const RGYFrameInfo 
                 err = launchNVEncDegrainMotionSearchSpatialRefine(
                     reinterpret_cast<const uint8_t *>(m_analysis.lumaLevel1[0]->ptr),
                     reinterpret_cast<const uint8_t *>(m_analysis.lumaLevel1[dir + 1]->ptr),
+                    useSubpelPlanes ? reinterpret_cast<const uint8_t *>(ws.subpelLevel1->ptr) : reinterpret_cast<const uint8_t *>(m_analysis.lumaLevel1[dir + 1]->ptr),
+                    useSubpelPlanes ? subpelL1Stride : 0,
                     *ws.level1.vectors,
                     *ws.level1.vectorsPrev,
                     *ws.level1.vectorsFinal,
@@ -2942,6 +3038,20 @@ RGY_ERR NVEncFilterDegrain::prepareAnalysisStateMotionSearch(const RGYFrameInfo 
 
         const int planeBase0 = levelPlaneBase(dir, planeStride0);
         const int blockBase0 = blockPlaneBase(dir, blockCount0);
+        if (prm->degrain.globalMotion) {
+            // level1の平均ベクトルをlevel0のGLOBALアンカーに反映する
+            err = launchNVEncDegrainMotionSearchSeedGlobalFromCoarse(
+                *ws.level0.vectors,
+                *ws.level1.vectorsFinal,
+                planeBase0,
+                blockBase1,
+                blockCount1,
+                stream);
+            if (err != RGY_ERR_NONE) {
+                AddMessage(RGY_LOG_ERROR, _T("failed to seed degrain motion search global vector from coarse level: %s.\n"), get_err_mes(err));
+                return err;
+            }
+        }
         RGYCudaEvent interpolateEvent;
         profileStepStart = profileNow();
         err = degrainWaitEvents(stream, { exportLevel1Event, initLevel0Event });
@@ -2981,6 +3091,8 @@ RGY_ERR NVEncFilterDegrain::prepareAnalysisStateMotionSearch(const RGYFrameInfo 
             err = launchNVEncDegrainMotionSearchSearchParallel(
                 planeCur.ptr[0],
                 refPlanes[dir].ptr[0],
+                useSubpelPlanes ? reinterpret_cast<const uint8_t *>(ws.subpelLevel0->ptr) : refPlanes[dir].ptr[0],
+                useSubpelPlanes ? subpelL0Stride : 0,
                 *ws.level0.vectors,
                 planeCur.pitch[0],
                 planeCur.width,
@@ -2997,6 +3109,7 @@ RGY_ERR NVEncFilterDegrain::prepareAnalysisStateMotionSearch(const RGYFrameInfo 
                 motionSearchConfig.zeroCandidateCostScale,
                 motionSearchConfig.frameAverageCandidateCostScale,
                 motionSearchConfig.newCandidateCostScale,
+                motionSearchConfig.searchParam,
                 motionSearchConfig.level,
                 stream);
         }
@@ -3027,6 +3140,8 @@ RGY_ERR NVEncFilterDegrain::prepareAnalysisStateMotionSearch(const RGYFrameInfo 
                 err = launchNVEncDegrainMotionSearchSpatialRefine(
                     planeCur.ptr[0],
                     refPlanes[dir].ptr[0],
+                    useSubpelPlanes ? reinterpret_cast<const uint8_t *>(ws.subpelLevel0->ptr) : refPlanes[dir].ptr[0],
+                    useSubpelPlanes ? subpelL0Stride : 0,
                     *ws.level0.vectors,
                     *ws.level0.vectorsPrev,
                     *ws.level0.vectorsFinal,

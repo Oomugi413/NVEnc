@@ -1135,6 +1135,7 @@ picture timing SEIを挿入する。
 
 ### --vship-ssimulacra2
 Vshipライブラリを使用してSSIMULACRA2スコアを算出する(GPU加速)。
+終了時に、平均値に加えて標準偏差、中央値、5パーセンタイル、95パーセンタイル、最小値、最大値を1行で表示する。
 
 ### --vship-butteraugli [&lt;param1&gt;=&lt;value1&gt;[,&lt;param2&gt;=&lt;value2&gt;]...]
 Vshipライブラリを使用してButteraugliスコアを算出する(GPU加速)。
@@ -2739,6 +2740,30 @@ decombによるインタレ解除を行う。
 
   - transpose=&lt;bool&gt;
 
+### --vpp-lenscorrection [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+
+Brown-Conrady の放射歪み係数でレンズ歪みを補正します。
+
+- k1=&lt;float&gt;, k2=&lt;float&gt;: 放射歪み係数。
+- cx=&lt;float&gt;, cy=&lt;float&gt;: 補正中心を画像幅・高さに対する 0.0 - 1.0 で指定します (デフォルト: 0.5)。
+
+```
+--vpp-lenscorrection k1=-0.20,k2=0.04
+```
+
+### --vpp-v360 [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+
+equirect、flat、cubemap 間の投影変換を行います。
+
+- in=&lt;string&gt;, out=&lt;string&gt;: 入出力投影。equirect / flat / cubemap。
+- yaw=&lt;float&gt;, pitch=&lt;float&gt;, roll=&lt;float&gt;: 視点回転角度。
+- h_fov=&lt;float&gt;: flat 出力の水平画角。
+- w=&lt;int&gt;, h=&lt;int&gt;: 出力解像度。
+
+```
+--vpp-v360 in=equirect,out=flat,yaw=30,pitch=0,h_fov=90,w=1920,h=1080
+```
+
 ### --vpp-convolution3d [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
 3次元ノイズ除去フィルタ。
 
@@ -3188,6 +3213,10 @@ nppc64_11.dll, nppif64_11.dll, nppig64_11.dllをNVEncC64と同じフォルダに
 - **パラメータ**
     - shader=&lt;string&gt;  
       対象のshaderファイルのパス。(glslファイル)
+    - &lt;name&gt;=&lt;value&gt;
+      シェーダーを解析する前に、シェーダー内の `#define &lt;name&gt; ...` の値を置換します。シェーダーソースに対するコンパイル時パラメータで、複数指定できます。`custom=` で指定するパラメータとは別のものです。
+    - custom=&lt;name&gt;=&lt;value&gt;
+      シェーダー内の `//!PARAM` で宣言された実行時パラメータを設定します。libplaceboによって型と範囲が検証されます。複数指定できます。
     - res=&lt;int&gt;x&lt;int&gt;  
       フィルタの出力解像度。
     - csp=&lt;string&gt;  
@@ -3254,6 +3283,12 @@ nppc64_11.dll, nppif64_11.dll, nppig64_11.dllをNVEncC64と同じフォルダに
     ``` 
     例: カスタムシェーダを使用した 1280x720 -> 2560x1440 へのリサイズ。
     --vpp-libplacebo-shader shader=default-shader-pack-2.1.0\Anime4K_Upscale_CNN_x2_L.glsl,res=2560x1440
+
+    例: シェーダーの //!PARAM を設定。
+    --vpp-libplacebo-shader shader=example.glsl,custom=GAIN=1.5
+
+    例: シェーダーの #define を設定。
+    --vpp-libplacebo-shader shader=example.glsl,GAIN=1.5
     ```
   
 ### --vpp-resize &lt;string&gt; or [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
@@ -4368,8 +4403,10 @@ sudo apt-get install libnvinfer10 libnvonnxparsers10
 - **パラメータ**
   - model=&lt;string&gt;  
     ONNXモデルファイルのパス (必須)。`--vpp-onnx-model-dir` 指定時は、models.json に登録されたモデル名を拡張子なしで指定可能。
-  - provider=&lt;string&gt; (デフォルト: auto)  
+  - provider=&lt;string&gt; (デフォルト: auto)
     推論に使用する実行プロバイダ。auto / cuda / tensorrt (trt)
+  - prec=&lt;string&gt; (デフォルト: auto)
+    TensorRTの演算精度。auto / fp16 (f16) / fp32 (f32)。autoはTensorRTでfp16を使用する。CUDA providerではfp32を使用する。
   - colormatrix=&lt;string&gt; (デフォルト: auto)
     [`--colormatrix`](#--colormatrix-string) と同じ名前を受け付ける。`--vpp-onnx` で対応するのは auto / auto_res / smpte170m / bt470bg / bt709 / bt2020nc。互換性のため、旧指定名の bt601 と bt2020 も smpte170m / bt2020nc の別名として受け付ける。
   - colormatrix_out=&lt;string&gt; (デフォルト: auto)
@@ -4380,6 +4417,10 @@ sudo apt-get install libnvinfer10 libnvonnxparsers10
     3chモデルの色空間。rgb / ycbcr (ArtCNN *_YCbCr 用)
   - noise=&lt;int&gt; (デフォルト: 15, 範囲: 0 - 255)  
     ノイズモデル用のノイズシグマ値。
+  - frames=&lt;int&gt; (デフォルト: 1)  
+    時系列モデルへ渡すフレームウィンドウのサイズ。3ch RGB フレームをチャンネル軸に連結した `T*3` 入力・3ch 出力モデルで使用します。中央フレームを出力するため、1 以上の奇数を指定してください。
+  - mask=&lt;string&gt;  
+    2入力ONNXモデルへ渡すグレースケールマスク画像。白を処理対象、黒を保持領域として渡します。マスクは入力解像度に合わせて読み込まれ、静的なロゴ・ウォーターマークの除去などに使用できます。
   - out_res=&lt;WxH&gt;  
     モデル実行後の最終リサイズ。任意の最終サイズに合わせられる。
     片方の軸に負の値を指定するとアスペクト比を保持 (例: out_res=-2x1080)。
@@ -4450,7 +4491,9 @@ sudo apt-get install libnvinfer10 libnvonnxparsers10
 ### --vpp-onnx-cache-dir &lt;string&gt;
 TensorRTエンジンのキャッシュ先ディレクトリを指定する。
 
-未指定時はキャッシュを無効にする。初回実行ではエンジンを構築し、同じモデル・精度・入力形状・GPUを使用する以降の実行ではキャッシュを読み込んで起動時間を大幅に短縮できる。
+未指定時はキャッシュを無効にする。初回実行ではエンジンを構築し、同じモデル内容・精度・入力形状・実行環境を使用する以降の実行ではキャッシュを読み込んで起動時間を大幅に短縮できる。
+
+キャッシュはNVEncのバージョンとrevision、ONNX Runtimeのバージョン、CUDAドライバAPIのバージョン、GPUごとに別ディレクトリへ保存する。TensorRTのバージョン不一致はTensorRT自身のengine互換性検証で検出し、該当engineを1回だけ自動再構築する。同じ実行環境ではモデル間でtiming cacheを共有する。古い環境用ディレクトリは自動削除しない。
 
 ```
 --vpp-onnx-cache-dir C:\models\HWEnc-onnx-cache
