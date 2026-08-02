@@ -1,5 +1,24 @@
 # NVEnc Release Notes
 
+## 9.28
+
+- Speed up [--vpp-kfm](./NVEncC_Options.en.md#--vpp-kfm-param1value1param2value2) / [--vpp-degrain](./NVEncC_Options.en.md#--vpp-degrain-param1value1).
+- Support frames setting from registered models in [--vpp-onnx](./NVEncC_Options.en.md#--vpp-onnx-param1value1param2value2).
+- Speed up [--vpp-onnx](./NVEncC_Options.en.md#--vpp-onnx-param1value1param2value2) with zero-copy conversion paths.
+- Speed up [--vpp-rife-ov](./NVEncC_Options.en.md#--vpp-rife-ov-param1value1param2value2) CUDA path with zero-copy.
+- Fix libvmaf CUDA implementation and access violation.　( #788 )
+- Update Linux package CUDA to 11.8.
+
+## 9.27
+
+- Support saving/restoring per-project output settings in AviUtl2.
+- Speed up [--vpp-kfm](./NVEncC_Options.en.md#--vpp-kfm-param1value1param2value2) / [--vpp-rtgmc](./NVEncC_Options.en.md#--vpp-rtgmc-param1value1) / [--vpp-degrain](./NVEncC_Options.en.md#--vpp-degrain-param1value1) by adding SAD-threshold early termination for motion search.
+- Speed up [--vpp-kfm](./NVEncC_Options.en.md#--vpp-kfm-param1value1param2value2) by removing redundant processing.
+- Handle mixed RFF sources properly in [--vpp-kfm](./NVEncC_Options.en.md#--vpp-kfm-param1value1param2value2).
+- Fix [--vpp-kfm](./NVEncC_Options.en.md#--vpp-kfm-param1value1param2value2) mode=24 stall and timestamps.
+- Fix chroma degrain analysis in [--vpp-rtgmc](./NVEncC_Options.en.md#--vpp-rtgmc-param1value1). ( #786 )
+- Fix high bit-depth variance calculation in [--vpp-nnedi](./NVEncC_Options.en.md#--vpp-nnedi-param1value1param2value2). ( #779 )
+
 ## 9.26
 
 - Add [--vpp-lenscorrection](./NVEncC_Options.en.md#--vpp-lenscorrection-param1value1param2value2) and [--vpp-v360](./NVEncC_Options.en.md#--vpp-v360-param1value1param2value2).

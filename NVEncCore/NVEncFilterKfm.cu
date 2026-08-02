@@ -321,6 +321,31 @@ __device__ uchar4 kfm_analyze_block(
         kfm_clamp_u8(sum3 >> shift));
 }
 
+// blockを丸ごと(uchar4)返す版。1つのblockからfield 0/1の両方を取り出す場合に使う
+template<typename Type>
+__device__ uchar4 kfm_analyze_super_pair_render4_cuda(
+    const uint8_t *src0,
+    const uint8_t *src1,
+    const int srcPitch,
+    const int bitDepth,
+    const int widthPairs,
+    const int height,
+    const int parity,
+    const int pixelStep,
+    const int pixelOffset,
+    const int x,
+    const int row) {
+    if (x <= 0 || x >= widthPairs || row < 2 || row >= height * 2) {
+        return make_uchar4(0, 0, 0, 0);
+    }
+    const int bx = x - 1;
+    const int by = (row >> 1) - 1;
+    if (bx >= widthPairs - 1 || by < 0 || by >= height - 1) {
+        return make_uchar4(0, 0, 0, 0);
+    }
+    return kfm_analyze_block<Type>(src0, src1, srcPitch, bitDepth, parity, pixelStep, pixelOffset, bx, by);
+}
+
 template<typename Type>
 __device__ uchar2 kfm_analyze_super_pair_render_cuda(
     const uint8_t *src0,
@@ -334,15 +359,8 @@ __device__ uchar2 kfm_analyze_super_pair_render_cuda(
     const int pixelOffset,
     const int x,
     const int row) {
-    if (x <= 0 || x >= widthPairs || row < 2 || row >= height * 2) {
-        return make_uchar2(0, 0);
-    }
-    const int bx = x - 1;
-    const int by = (row >> 1) - 1;
-    if (bx >= widthPairs - 1 || by < 0 || by >= height - 1) {
-        return make_uchar2(0, 0);
-    }
-    const uchar4 v = kfm_analyze_block<Type>(src0, src1, srcPitch, bitDepth, parity, pixelStep, pixelOffset, bx, by);
+    const uchar4 v = kfm_analyze_super_pair_render4_cuda<Type>(
+        src0, src1, srcPitch, bitDepth, widthPairs, height, parity, pixelStep, pixelOffset, x, row);
     return (row & 1) ? make_uchar2(v.z, v.w) : make_uchar2(v.x, v.y);
 }
 
@@ -715,18 +733,21 @@ __global__ void kernel_kfm_merge_uv_coefs(
     const uint8_t *flagU,
     const uint8_t *flagV,
     const int pitchUV,
-    const int width,
-    const int height,
-    const int logUVx,
-    const int logUVy) {
+    const int widthUV,
+    const int heightUV) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
+    if (x >= widthUV || y >= heightUV) return;
 
-    Type *fy = (Type *)(flagY + y * pitchY + x * (int)sizeof(Type));
-    const Type *fu = (const Type *)(flagU + ((y >> logUVy) * pitchUV + (x >> logUVx) * (int)sizeof(Type)));
-    const Type *fv = (const Type *)(flagV + ((y >> logUVy) * pitchUV + (x >> logUVx) * (int)sizeof(Type)));
-    fy[0] = max(fy[0], max(fu[0], fv[0]));
+    const Type *fu = (const Type *)(flagU + y * pitchUV);
+    const Type *fv = (const Type *)(flagV + y * pitchUV);
+    const Type uv = max(fu[x], fv[x]);
+    Type *fy0 = (Type *)(flagY + (y * 2 + 0) * pitchY);
+    Type *fy1 = (Type *)(flagY + (y * 2 + 1) * pitchY);
+    fy0[x * 2 + 0] = max(fy0[x * 2 + 0], uv);
+    fy0[x * 2 + 1] = max(fy0[x * 2 + 1], uv);
+    fy1[x * 2 + 0] = max(fy1[x * 2 + 0], uv);
+    fy1[x * 2 + 1] = max(fy1[x * 2 + 1], uv);
 }
 
 template<typename Type>
@@ -788,7 +809,7 @@ __global__ void kernel_kfm_apply_uv_coefs_420(
     const int pitchUV,
     const int widthUV,
     const int heightUV) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int x = (blockIdx.x * blockDim.x + threadIdx.x) * 2;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= widthUV || y >= heightUV) return;
 
@@ -802,6 +823,15 @@ __global__ void kernel_kfm_apply_uv_coefs_420(
     const Type outv = (Type)((v + 2) >> 2);
     ((Type *)flagU)[x + y * pitchUVt] = outv;
     ((Type *)flagV)[x + y * pitchUVt] = outv;
+    if (x + 1 < widthUV) {
+        const int v1 = fy[(x * 2 + 2) + (y * 2 + 0) * pitchYt]
+            + fy[(x * 2 + 3) + (y * 2 + 0) * pitchYt]
+            + fy[(x * 2 + 2) + (y * 2 + 1) * pitchYt]
+            + fy[(x * 2 + 3) + (y * 2 + 1) * pitchYt];
+        const Type outv1 = (Type)((v1 + 2) >> 2);
+        ((Type *)flagU)[x + 1 + y * pitchUVt] = outv1;
+        ((Type *)flagV)[x + 1 + y * pitchUVt] = outv1;
+    }
 }
 
 template<typename Type>
@@ -913,14 +943,21 @@ __global__ void kernel_kfm_clean_super_direct_max(
     if (x >= widthPairs || y >= height) return;
 
     const int srcField = field & 1;
-    const int curRow = y * 2 + srcField;
-    const int prevRow = (srcField == 0) ? (y * 2 + 1) : (y * 2);
-    const uchar2 vcur = kfm_analyze_super_pair_render_cuda<Type>(
-        curSrc0, curSrc1, curSrcPitch, bitDepth, widthPairs, height, curParity,
-        pixelStep, pixelOffset, x, curRow);
-    const uchar2 vprev = (srcField == 0)
-        ? kfm_analyze_super_pair_render_cuda<Type>(prevSrc0, prevSrc1, prevSrcPitch, bitDepth, widthPairs, height, prevParity, pixelStep, pixelOffset, x, prevRow)
-        : kfm_analyze_super_pair_render_cuda<Type>(curSrc0, curSrc1, curSrcPitch, bitDepth, widthPairs, height, curParity, pixelStep, pixelOffset, x, prevRow);
+    uchar2 vcur;
+    uchar2 vprev;
+    if (srcField == 0) {
+        vcur = kfm_analyze_super_pair_render_cuda<Type>(curSrc0, curSrc1, curSrcPitch, bitDepth, widthPairs, height, curParity,
+            pixelStep, pixelOffset, x, y * 2 + 0);
+        vprev = kfm_analyze_super_pair_render_cuda<Type>(prevSrc0, prevSrc1, prevSrcPitch, bitDepth, widthPairs, height, prevParity,
+            pixelStep, pixelOffset, x, y * 2 + 1);
+    } else {
+        // odd fieldではvcur(row=y*2+1)とvprev(row=y*2)が同じblockを指すため、解析は1回で済む。
+        // row依存の境界判定もy==0のときに両者とも0を返すため、結果は変わらない。
+        const uchar4 v4 = kfm_analyze_super_pair_render4_cuda<Type>(curSrc0, curSrc1, curSrcPitch, bitDepth, widthPairs, height, curParity,
+            pixelStep, pixelOffset, x, y * 2 + 1);
+        vcur = make_uchar2(v4.z, v4.w);
+        vprev = make_uchar2(v4.x, v4.y);
+    }
 
     uchar2 v = vcur;
     if (vprev.y <= cleanThresh && v.y <= cleanThresh) {
@@ -1462,22 +1499,25 @@ RGY_ERR run_kfm_temporal_min_diff5_3_plane(
 }
 
 RGY_ERR run_kfm_merge_uv_coefs_plane(RGYFrameInfo *flagY, const RGYFrameInfo *flagU, const RGYFrameInfo *flagV, int logUVx, int logUVy, cudaStream_t stream) {
-    if (!flagU || !flagV || !flagU->ptr[0] || !flagV->ptr[0]) {
+    if (!flagY || !flagU || !flagV || !flagY->ptr[0] || !flagU->ptr[0] || !flagV->ptr[0]
+        || logUVx != 1 || logUVy != 1
+        || flagU->width != flagV->width || flagU->height != flagV->height || flagU->pitch[0] != flagV->pitch[0]
+        || flagY->width != flagU->width * 2 || flagY->height != flagU->height * 2) {
         return RGY_ERR_INVALID_CALL;
     }
     return dispatch_kfm_depth(flagY,
         [&]() {
             const dim3 block(KFM_PAD_BLOCK_X, KFM_PAD_BLOCK_Y);
-            const dim3 grid(divCeil(flagY->width, (int)block.x), divCeil(flagY->height, (int)block.y));
+            const dim3 grid(divCeil(flagU->width, (int)block.x), divCeil(flagU->height, (int)block.y));
             kernel_kfm_merge_uv_coefs<uint8_t><<<grid, block, 0, stream>>>((uint8_t *)flagY->ptr[0], flagY->pitch[0],
-                (const uint8_t *)flagU->ptr[0], (const uint8_t *)flagV->ptr[0], flagU->pitch[0], flagY->width, flagY->height, logUVx, logUVy);
+                (const uint8_t *)flagU->ptr[0], (const uint8_t *)flagV->ptr[0], flagU->pitch[0], flagU->width, flagU->height);
             return err_to_rgy(cudaGetLastError());
         },
         [&]() {
             const dim3 block(KFM_PAD_BLOCK_X, KFM_PAD_BLOCK_Y);
-            const dim3 grid(divCeil(flagY->width, (int)block.x), divCeil(flagY->height, (int)block.y));
+            const dim3 grid(divCeil(flagU->width, (int)block.x), divCeil(flagU->height, (int)block.y));
             kernel_kfm_merge_uv_coefs<uint16_t><<<grid, block, 0, stream>>>((uint8_t *)flagY->ptr[0], flagY->pitch[0],
-                (const uint8_t *)flagU->ptr[0], (const uint8_t *)flagV->ptr[0], flagU->pitch[0], flagY->width, flagY->height, logUVx, logUVy);
+                (const uint8_t *)flagU->ptr[0], (const uint8_t *)flagV->ptr[0], flagU->pitch[0], flagU->width, flagU->height);
             return err_to_rgy(cudaGetLastError());
         });
 }
@@ -1539,14 +1579,14 @@ RGY_ERR run_kfm_apply_uv_coefs_420_plane(RGYFrameInfo *flagU, RGYFrameInfo *flag
     return dispatch_kfm_depth(flagU,
         [&]() {
             const dim3 block(KFM_PAD_BLOCK_X, KFM_PAD_BLOCK_Y);
-            const dim3 grid(divCeil(flagU->width, (int)block.x), divCeil(flagU->height, (int)block.y));
+            const dim3 grid(divCeil((flagU->width + 1) >> 1, (int)block.x), divCeil(flagU->height, (int)block.y));
             kernel_kfm_apply_uv_coefs_420<uint8_t><<<grid, block, 0, stream>>>((const uint8_t *)flagY->ptr[0], flagY->pitch[0],
                 (uint8_t *)flagU->ptr[0], (uint8_t *)flagV->ptr[0], flagU->pitch[0], flagU->width, flagU->height);
             return err_to_rgy(cudaGetLastError());
         },
         [&]() {
             const dim3 block(KFM_PAD_BLOCK_X, KFM_PAD_BLOCK_Y);
-            const dim3 grid(divCeil(flagU->width, (int)block.x), divCeil(flagU->height, (int)block.y));
+            const dim3 grid(divCeil((flagU->width + 1) >> 1, (int)block.x), divCeil(flagU->height, (int)block.y));
             kernel_kfm_apply_uv_coefs_420<uint16_t><<<grid, block, 0, stream>>>((const uint8_t *)flagY->ptr[0], flagY->pitch[0],
                 (uint8_t *)flagU->ptr[0], (uint8_t *)flagV->ptr[0], flagU->pitch[0], flagU->width, flagU->height);
             return err_to_rgy(cudaGetLastError());

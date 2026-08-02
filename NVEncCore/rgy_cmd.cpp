@@ -120,6 +120,31 @@ static bool is_valid_rtgmc_rep_pad(const int value) {
     return rgy_rtgmc_repair_pad_level_is_valid(value);
 }
 
+static int parse_degrain_search_early_sad(int *dst, const tstring& value, const bool allowAuto) {
+    const auto normalized = tolowercase(trim(value, _T("\"")));
+    if (normalized == _T("off")) {
+        *dst = FILTER_DEFAULT_DEGRAIN_SEARCH_EARLY_SAD;
+        return 0;
+    }
+    if (allowAuto && normalized == _T("auto")) {
+        *dst = FILTER_DEFAULT_KFM_SEARCH_EARLY_SAD_OVERRIDE;
+        return 0;
+    }
+    try {
+        size_t idx = 0;
+        const auto parsed = std::stoll(normalized, &idx);
+        if (idx != normalized.length()
+            || parsed < FILTER_MIN_DEGRAIN_SEARCH_EARLY_SAD
+            || parsed > FILTER_MAX_DEGRAIN_SEARCH_EARLY_SAD) {
+            return 1;
+        }
+        *dst = (int)parsed;
+    } catch (...) {
+        return 1;
+    }
+    return 0;
+}
+
 #if FOR_AUO
 #pragma warning (disable: 4100)
 #else
@@ -493,8 +518,10 @@ int handle_vpp_onnx_list_models(const RGYParamVpp *vpp) {
     for (const auto& [name, entry] : reg.models()) {
         const auto fullPath = PathCombineS(reg.baseDir(), entry.path);
         const bool exists = rgy_file_exists(fullPath);
-        _ftprintf(stdout, _T("  %-24s  %s%s%s\n"), name.c_str(), entry.path.c_str(),
+        const auto frames = entry.frames > 1 ? strsprintf(_T(" [frames=%d]"), entry.frames) : tstring();
+        _ftprintf(stdout, _T("  %-24s  %s%s%s%s\n"), name.c_str(), entry.path.c_str(),
             entry.fp32 ? _T(" [fp32]") : _T(""),
+            frames.c_str(),
             exists ? _T("") : _T(" [not found]"));
     }
 #endif // ENABLE_VPP_FILTER_ONNX
@@ -2775,7 +2802,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
             "rep1-thin", "rep1-pad",
             "rep2-thin", "rep2-pad", "rep_chroma",
             "blksize", "search", "thsad", "thsad1", "thsad2", "thscd1", "thscd2", "pel", "levels", "overlap", "delta",
-            "subpelinterp", "searchparam", "pelsearch",
+            "subpelinterp", "searchparam", "pelsearch", "search_early_sad", "spatial_early_sad",
             "truemotion", "lambda", "lsad", "pnew", "plevel", "globalmotion", "dct", "useflag",
             "delta_analyze", "delta_tr1", "delta_tr2"
         };
@@ -2816,6 +2843,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
             bool pel = false;
             bool searchParam = false;
             bool pelSearch = false;
+            bool searchEarlySad = false;
             bool lambda = false;
             bool noiseProcess = false;
             bool denoiser = false;
@@ -2926,6 +2954,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
             const int bs2 = 32;
             const int blocksize = (p <= (int)VppRtgmcPreset::Fast) ? bs : bs2;
             const int overlap = (p <= (int)VppRtgmcPreset::Faster) ? blocksize / 2 : blocksize / 4;
+            const int searchEarlySad = get_vpp_rtgmc_search_early_sad(preset);
             const auto defaultLambda = [](const VppDegrain& prm) {
                 return ((prm.trueMotion ? 1000 : 100) * prm.blksize * prm.blksize) / (8 * 8);
             };
@@ -3028,6 +3057,9 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                 }
                 if (!override.pelSearch) {
                     stagePrm->pelSearch = pelsearch[p];
+                }
+                if (!override.searchEarlySad) {
+                    stagePrm->searchEarlySad = searchEarlySad;
                 }
                 if (!override.lambda) {
                     stagePrm->lambda = defaultLambda(*stagePrm);
@@ -3645,6 +3677,31 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                     presetOverride.pelSearch = true;
                     continue;
                 }
+                if (param_arg == _T("search_early_sad")) {
+                    int value = 0;
+                    if (parse_degrain_search_early_sad(&value, param_val, false)) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val,
+                            _T("search_early_sad should be off or -1 - 65535."));
+                        return 1;
+                    }
+                    parsedRtgmc.analyze.searchEarlySad = value;
+                    parsedRtgmc.tr1.searchEarlySad = value;
+                    parsedRtgmc.tr2.searchEarlySad = value;
+                    presetOverride.searchEarlySad = true;
+                    continue;
+                }
+                if (param_arg == _T("spatial_early_sad")) {
+                    int value = 0;
+                    if (parse_degrain_search_early_sad(&value, param_val, false)) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val,
+                            _T("spatial_early_sad should be off or -1 - 65535."));
+                        return 1;
+                    }
+                    parsedRtgmc.analyze.spatialEarlySad = value;
+                    parsedRtgmc.tr1.spatialEarlySad = value;
+                    parsedRtgmc.tr2.spatialEarlySad = value;
+                    continue;
+                }
                 if (param_arg == _T("subpelinterp")) {
                     if (check_fixed_int(param_arg, param_val, 2)) return 1;
                     continue;
@@ -3816,7 +3873,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
 
         const auto paramList = std::vector<std::string>{
             "enable", "mode", "preset", "timing", "past_cycles",
-            "thswitch", "ucf", "nr", "is120", "debug", "debug_stage", "timecode"
+            "thswitch", "ucf", "nr", "is120", "rff", "debug", "debug_stage", "timecode", "search_early_sad", "spatial_early_sad"
         };
 
         for (const auto& param : split(strInput[i], _T(","))) {
@@ -3850,6 +3907,22 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                         return 1;
                     }
                     vpp->kfm.preset = (VppRtgmcPreset)value;
+                    continue;
+                }
+                if (param_arg == _T("search_early_sad")) {
+                    if (parse_degrain_search_early_sad(&vpp->kfm.searchEarlySadOverride, param_val, true)) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val,
+                            _T("search_early_sad should be auto, off, or -1 - 65535."));
+                        return 1;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("spatial_early_sad")) {
+                    if (parse_degrain_search_early_sad(&vpp->kfm.spatialEarlySadOverride, param_val, true)) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val,
+                            _T("spatial_early_sad should be auto, off, or -1 - 65535."));
+                        return 1;
+                    }
                     continue;
                 }
                 if (param_arg == _T("timing")) {
@@ -3907,6 +3980,16 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                     bool b = false;
                     if (!cmd_string_to_bool(&b, param_val)) {
                         vpp->kfm.is120 = b;
+                    } else {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                        return 1;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("rff")) {
+                    bool b = false;
+                    if (!cmd_string_to_bool(&b, param_val)) {
+                        vpp->kfm.rff = b;
                     } else {
                         print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
                         return 1;
@@ -6599,7 +6682,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
         i++;
         const auto paramList = std::vector<std::string>{
             "enable", "preset", "mode", "stage", "tr", "blksize", "search", "thsad", "thsadc", "thscd1", "thscd2", "pel", "levels", "overlap", "delta", "tr0", "rep0", "search_refine",
-            "subpelinterp", "searchparam", "pelsearch",
+            "subpelinterp", "searchparam", "pelsearch", "search_early_sad", "spatial_early_sad",
             "truemotion", "lambda", "lsad", "pnew", "plevel", "globalmotion", "dct", "useflag",
             "mv_spatial_refine", "chroma", "binomial", "tv_range"
         };
@@ -6785,6 +6868,22 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                 }
                 if (param_arg == _T("pelsearch")) {
                     if (parse_int(&parsedDegrain.pelSearch, param_arg, param_val)) {
+                        return 1;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("search_early_sad")) {
+                    if (parse_degrain_search_early_sad(&parsedDegrain.searchEarlySad, param_val, false)) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val,
+                            _T("search_early_sad should be off or -1 - 65535."));
+                        return 1;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("spatial_early_sad")) {
+                    if (parse_degrain_search_early_sad(&parsedDegrain.spatialEarlySad, param_val, false)) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val,
+                            _T("spatial_early_sad should be off or -1 - 65535."));
                         return 1;
                     }
                     continue;
@@ -13379,6 +13478,22 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             ADD_BOOL(_T("globalmotion"), rtgmc.analyze.globalMotion);
             ADD_NUM(_T("searchparam"), rtgmc.analyze.searchParam);
             ADD_NUM(_T("pelsearch"), rtgmc.analyze.pelSearch);
+            if (param->rtgmc.analyze.searchEarlySad != defaultPrm->rtgmc.analyze.searchEarlySad) {
+                tmp << _T(",search_early_sad=");
+                if (param->rtgmc.analyze.searchEarlySad < 0) {
+                    tmp << _T("off");
+                } else {
+                    tmp << param->rtgmc.analyze.searchEarlySad;
+                }
+            }
+            if (param->rtgmc.analyze.spatialEarlySad != defaultPrm->rtgmc.analyze.spatialEarlySad) {
+                tmp << _T(",spatial_early_sad=");
+                if (param->rtgmc.analyze.spatialEarlySad < 0) {
+                    tmp << _T("off");
+                } else {
+                    tmp << param->rtgmc.analyze.spatialEarlySad;
+                }
+            }
             ADD_NUM(_T("delta_analyze"), rtgmc.analyze.delta);
             ADD_NUM(_T("delta_tr1"), rtgmc.tr1.delta);
             ADD_NUM(_T("delta_tr2"), rtgmc.tr2.delta);
@@ -13418,9 +13533,30 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             ADD_BOOL(_T("ucf"), kfm.ucf);
             ADD_BOOL(_T("nr"), kfm.nr);
             ADD_BOOL(_T("is120"), kfm.is120);
+            ADD_BOOL(_T("rff"), kfm.rff);
             ADD_BOOL(_T("debug"), kfm.debug);
             ADD_LST(_T("debug_stage"), kfm.debugStage, list_vpp_kfm_debug_stage);
             ADD_PATH(_T("timecode"), kfm.timecode.c_str());
+            if (param->kfm.searchEarlySadOverride != defaultPrm->kfm.searchEarlySadOverride) {
+                tmp << _T(",search_early_sad=");
+                if (param->kfm.searchEarlySadOverride == FILTER_DEFAULT_KFM_SEARCH_EARLY_SAD_OVERRIDE) {
+                    tmp << _T("auto");
+                } else if (param->kfm.searchEarlySadOverride < 0) {
+                    tmp << _T("off");
+                } else {
+                    tmp << param->kfm.searchEarlySadOverride;
+                }
+            }
+            if (param->kfm.spatialEarlySadOverride != defaultPrm->kfm.spatialEarlySadOverride) {
+                tmp << _T(",spatial_early_sad=");
+                if (param->kfm.spatialEarlySadOverride == FILTER_DEFAULT_KFM_SPATIAL_EARLY_SAD_OVERRIDE) {
+                    tmp << _T("auto");
+                } else if (param->kfm.spatialEarlySadOverride < 0) {
+                    tmp << _T("off");
+                } else {
+                    tmp << param->kfm.spatialEarlySadOverride;
+                }
+            }
         }
         if (!tmp.str().empty()) {
             cmd << _T(" --vpp-kfm ") << tmp.str().substr(1);
@@ -13976,6 +14112,22 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             if (degrain.searchRefine != defaultDegrain.searchRefine) tmp << _T(",search_refine=") << degrain.searchRefine;
             if (degrain.searchParam != defaultDegrain.searchParam) tmp << _T(",searchparam=") << degrain.searchParam;
             if (degrain.pelSearch != defaultDegrain.pelSearch) tmp << _T(",pelsearch=") << degrain.pelSearch;
+            if (degrain.searchEarlySad != defaultDegrain.searchEarlySad) {
+                tmp << _T(",search_early_sad=");
+                if (degrain.searchEarlySad < 0) {
+                    tmp << _T("off");
+                } else {
+                    tmp << degrain.searchEarlySad;
+                }
+            }
+            if (degrain.spatialEarlySad != defaultDegrain.spatialEarlySad) {
+                tmp << _T(",spatial_early_sad=");
+                if (degrain.spatialEarlySad < 0) {
+                    tmp << _T("off");
+                } else {
+                    tmp << degrain.spatialEarlySad;
+                }
+            }
             if (degrain.trueMotion != defaultDegrain.trueMotion) tmp << _T(",truemotion=") << (degrain.trueMotion ? _T("true") : _T("false"));
             if (degrain.lambda != defaultDegrain.lambda) tmp << _T(",lambda=") << degrain.lambda;
             if (degrain.lsad != defaultDegrain.lsad) tmp << _T(",lsad=") << degrain.lsad;
@@ -16013,6 +16165,8 @@ tstring gen_cmd_help_vpp() {
         _T("      plevel=<int>           predictor level (default=0)\n")
         _T("      globalmotion=<bool>    enable global motion tuning (default=true)\n")
         _T("      searchparam/pelsearch=<int> preset-expanded motion search params (1 - 2)\n")
+        _T("      search_early_sad=<int|off> level0 early SAD threshold in 8x8 block / 8-bit units (preset default)\n")
+        _T("      spatial_early_sad=<int|off> level1 spatial refine skip threshold in 8x8 block / 8-bit units (default=off)\n")
         _T("      sharpness=<float>      retouch sharpness (default=%.2f, 0.0 - 1.0)\n")
         _T("      limit=<float>          legacy retouch limit (default=%.2f, 0.0 - 1.0)\n")
         _T("      smode=<int>            resharpen mode (default=%d, 0 - 2)\n")
@@ -16036,12 +16190,15 @@ tstring gen_cmd_help_vpp() {
         _T("    params\n")
         _T("      mode=<string>          vfr(default), 60, 24\n")
         _T("      preset=<string>        speed preset (default=faster)\n")
+        _T("      search_early_sad=<int|auto|off> level0 early SAD threshold in 8x8 block / 8-bit units (default=auto)\n")
+        _T("      spatial_early_sad=<int|auto|off> level1 spatial refine skip threshold in 8x8 block / 8-bit units (default=auto)\n")
         _T("      timing=<string>        realtime, realtime+(default), strict\n")
         _T("      past_cycles=<int>      commit delay cycles for realtime+ (default=30)\n")
         _T("      thswitch=<float>       60p switch threshold (default=0.5)\n")
         _T("      ucf=<bool>             use placeholder UCF copy stage (default=false)\n")
         _T("      nr=<bool>              reserve NR path parameter (default=false)\n")
         _T("      is120=<bool>           reserve 120fps duration correction flag (default=true)\n")
+        _T("      rff=<bool>             preserve progressive RFF frames (default=true)\n")
         _T("      debug=<bool>           reserve stage dump flag (default=false)\n")
         _T("      debug_stage=<string>   none(default), switch-flag(-min), contains-combe, combe-mask(-min) for 24p debug output\n")
         _T("      timecode=<path>        reserve timecode v2 dump path\n"));
@@ -16653,6 +16810,8 @@ tstring gen_cmd_help_vpp() {
         _T("      mv_spatial_refine=<int|auto> motion vector spatial refinement count (default=auto)\n")
         _T("      searchparam=<int>      motion search parameter (default=%d)\n")
         _T("      pelsearch=<int>        subpixel search parameter (default=%d)\n")
+        _T("      search_early_sad=<int|off> level0 early SAD threshold in 8x8 block / 8-bit units (default=off)\n")
+        _T("      spatial_early_sad=<int|off> level1 spatial refine skip threshold in 8x8 block / 8-bit units (default=off)\n")
         _T("      truemotion=<bool>      use true-motion tuning (default=%s)\n")
         _T("      lambda=<int>           motion penalty strength (default=%d)\n")
         _T("      lsad=<int>             large SAD threshold (default=%d)\n")

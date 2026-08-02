@@ -840,7 +840,6 @@ endif
 
 rev_data = configuration_data()
 rev_data.set_quoted('ENCODER_REV', rev_count)
-rev_data.set('ENABLE_METRIC_FRAMEWORK', 0)
 configure_file(
   output: 'rgy_rev.h',
   configuration: rev_data,
@@ -1025,6 +1024,7 @@ cuda_sources = files(
   'NVEncCore/NVEncFilterAfsSynthesize.cu',
   'NVEncCore/NVEncFilterBwdif.cu',
   'NVEncCore/NVEncFilterStDeint.cu',
+  'NVEncCore/NVEncFilterOnnx.cu',
   'NVEncCore/NVEncFilterIvtc.cu',
   'NVEncCore/NVEncFilterAnime4k.cu',
   'NVEncCore/NVEncFilterKfm.cu',

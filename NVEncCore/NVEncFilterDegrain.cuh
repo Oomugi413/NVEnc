@@ -1937,7 +1937,8 @@ static __global__ void kernel_degrain_mv_spatial_refine_cuda(
     const int pad,
     const int motionCostScale,
     const int lowSadWeightScale,
-    const int newCandidateCostScale) {
+    const int newCandidateCostScale,
+    const int spatialEarlySadThreshold) {
     const int localThreadId = (int)threadIdx.x;
     const int sadLane = localThreadId % blockSize;
     const int candidateGroupIndex = localThreadId / blockSize;
@@ -1954,6 +1955,7 @@ static __global__ void kernel_degrain_mv_spatial_refine_cuda(
     __shared__ RGYDegrainMotionSearchCandidate candidate[5];
     __shared__ RGYDegrainMotionSearchCandidateCost candidateCosts[DEGRAIN_MOTION_SEARCH_MAX_CANDIDATE_GROUPS];
     __shared__ RGYDegrainMotionSearchCandidateCost bestCandidateCost;
+    __shared__ RGYDegrainMotionSearchVector baseVector;
     __shared__ int reusePreviousSad;
     __shared__ uint32_t candidateLaneSums[DEGRAIN_MOTION_SEARCH_SEARCH_LOCAL_SIZE_MAX];
 
@@ -1965,6 +1967,26 @@ static __global__ void kernel_degrain_mv_spatial_refine_cuda(
         sourceBlockPixels[i] = (TypePixel)degrainPixelLoad<TypePixel>(sourcePlane, pitch, width, height, sourceBaseX + x, sourceBaseY + y);
     }
 
+    if (localThreadId == 0) {
+        baseVector = vectors[degrainMotionSearchVecCurrentIndex(planeBase, blockCount, block)];
+    }
+    __syncthreads();
+    if (spatialEarlySadThreshold >= 0
+        && ((spatialEarlySadThreshold == 0 && baseVector.sad_metric == 0u)
+            || (spatialEarlySadThreshold > 0 && baseVector.sad_metric < (uint32_t)spatialEarlySadThreshold))) {
+        if (localThreadId == 0) {
+            vectorsFinal[degrainMotionSearchVecFinalIndex(finalBase, blockCount, block)] = baseVector;
+        }
+        return;
+    }
+    // 平坦ブロックは検索段階で zero MV と正しい SAD に確定済みなので、近傍 MV を使う再探索を省略する。
+    if (degrainMotionSearchSourceBlockVarianceParallel<TypePixel, blockSize>(sourceBlockPixels, candidateLaneSums, localThreadId) == 0u) {
+        if (localThreadId == 0) {
+            vectorsFinal[degrainMotionSearchVecFinalIndex(finalBase, blockCount, block)] = baseVector;
+        }
+        return;
+    }
+
     const RGYDegrainMotionSearchVector initialSeed = vectorsPrev[degrainMotionSearchVecPrevIndex(planeBase, blockCount, block)];
     if (localThreadId == 0) {
         context = degrainMotionSearchMakeSearchContext(initialSeed, width, height, blockGridX, blockGridY, step,
@@ -1973,7 +1995,7 @@ static __global__ void kernel_degrain_mv_spatial_refine_cuda(
     __syncthreads();
 
     if (localThreadId == 0) {
-        const RGYDegrainMotionSearchVector base = vectors[degrainMotionSearchVecCurrentIndex(planeBase, blockCount, block)];
+        const RGYDegrainMotionSearchVector base = baseVector;
         const RGYDegrainMotionSearchCandidate baseCandidate = degrainMotionSearchSavedVectorToCandidate(base);
         bestCandidateCost.pos_x = base.pos_x;
         bestCandidateCost.pos_y = base.pos_y;
@@ -4221,6 +4243,76 @@ static __global__ void kernel_degrain_mv_export_sad_cuda(
     }
 }
 
+template<typename TypePixel>
+static __global__ void kernel_degrain_mv_add_chroma_sad_cuda(
+    const uint8_t *curU, const uint8_t *curV, const int curPitch,
+    const uint8_t *refU, const uint8_t *refV, const int refPitch,
+    const int width, const int height,
+    RGYDegrainMV *mv, RGYDegrainSAD *sad,
+    const int blocksX, const int blockCount, const int blockSize, const int step,
+    const int planeScaleX, const int planeScaleY,
+    const int referenceDirection, const int refs,
+    const int pel, const int subpelInterp) {
+    const int block = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (block >= blockCount) {
+        return;
+    }
+    const int blockX = block % blocksX;
+    const int blockY = block / blocksX;
+    const int scaleX = max(planeScaleX, 1);
+    const int scaleY = max(planeScaleY, 1);
+    const int originX = (blockX * step) / scaleX;
+    const int originY = (blockY * step) / scaleY;
+    const int sizeX = max(blockSize / scaleX, 1);
+    const int sizeY = max(blockSize / scaleY, 1);
+    uint32_t chromaSad = 0u;
+    for (int y = originY; y < min(originY + sizeY, height); y++) {
+        for (int x = originX; x < min(originX + sizeX, width); x++) {
+            const int curSampleU = degrainPixelLoad<TypePixel>(curU, curPitch, width, height, x, y);
+            const int curSampleV = degrainPixelLoad<TypePixel>(curV, curPitch, width, height, x, y);
+            const int refSampleU = degrainCompensatedSample<TypePixel>(
+                refU, refPitch, width, height, mv, block, referenceDirection,
+                planeScaleX, planeScaleY, x, y, refs, pel, subpelInterp);
+            const int refSampleV = degrainCompensatedSample<TypePixel>(
+                refV, refPitch, width, height, mv, block, referenceDirection,
+                planeScaleX, planeScaleY, x, y, refs, pel, subpelInterp);
+            chromaSad += (uint32_t)(abs(curSampleU - refSampleU) + abs(curSampleV - refSampleV));
+        }
+    }
+    const int index = degrainRefIndex(block, referenceDirection, refs);
+    const uint32_t combinedSad = sad[index].sad + chromaSad;
+    sad[index].sad = combinedSad;
+    sad[index].reserved = combinedSad;
+    mv[index].sad = (uint16_t)min(combinedSad, 65535u);
+    mv[index].reserved = combinedSad;
+}
+
+static RGY_ERR launchNVEncDegrainAddChromaSadImpl(
+    const RGYFrameInfo &curU, const RGYFrameInfo &curV,
+    const RGYFrameInfo &refU, const RGYFrameInfo &refV,
+    CUMemBuf &mv, CUMemBuf &sad, const RGYDegrainBlockLayout &layout,
+    const int planeScaleX, const int planeScaleY, const int referenceDirection,
+    const int refs, const int pel, const int subpelInterp, cudaStream_t stream) {
+    const int block = 128;
+    const int grid = divCeil((int)layout.blockCount(), block);
+    if (RGY_CSP_BIT_DEPTH[curU.csp] > 8) {
+        kernel_degrain_mv_add_chroma_sad_cuda<uint16_t><<<grid, block, 0, stream>>>(
+            curU.ptr[0], curV.ptr[0], curU.pitch[0], refU.ptr[0], refV.ptr[0], refU.pitch[0],
+            curU.width, curU.height,
+            reinterpret_cast<RGYDegrainMV *>(mv.ptr), reinterpret_cast<RGYDegrainSAD *>(sad.ptr),
+            layout.blocksX, (int)layout.blockCount(), layout.blockSize, layout.step,
+            planeScaleX, planeScaleY, referenceDirection, refs, pel, subpelInterp);
+    } else {
+        kernel_degrain_mv_add_chroma_sad_cuda<uint8_t><<<grid, block, 0, stream>>>(
+            curU.ptr[0], curV.ptr[0], curU.pitch[0], refU.ptr[0], refV.ptr[0], refU.pitch[0],
+            curU.width, curU.height,
+            reinterpret_cast<RGYDegrainMV *>(mv.ptr), reinterpret_cast<RGYDegrainSAD *>(sad.ptr),
+            layout.blocksX, (int)layout.blockCount(), layout.blockSize, layout.step,
+            planeScaleX, planeScaleY, referenceDirection, refs, pel, subpelInterp);
+    }
+    return err_to_rgy(cudaGetLastError());
+}
+
 static RGY_ERR launchNVEncDegrainMotionSearchSeedAnchorVectorsImpl(
     CUMemBuf &vectors, const CUMemBuf &frameAverageMV, const int planeBase, const int planeStride,
     const int planeCount, const int pel, cudaStream_t stream) {
@@ -4315,7 +4407,7 @@ static RGY_ERR launchNVEncDegrainMotionSearchSpatialRefineFixed(
     const int pitch, const int width, const int height, const int planeBase, const int finalBase,
     const int blockCount, const RGYDegrainBlockLayout &layout,
     const int pad, const int motionCostScale,
-    const int lowSadWeightScale, const int newCandidateCostScale, cudaStream_t stream) {
+    const int lowSadWeightScale, const int newCandidateCostScale, const int spatialEarlySadThreshold, cudaStream_t stream) {
     const int block = blockSize * DEGRAIN_MOTION_SEARCH_MAX_CANDIDATE_GROUPS;
     const int grid = blockCount;
     kernel_degrain_mv_spatial_refine_cuda<TypePixel, blockSize, pel, subpelInterp><<<grid, block, 0, stream>>>(
@@ -4324,7 +4416,7 @@ static RGY_ERR launchNVEncDegrainMotionSearchSpatialRefineFixed(
         reinterpret_cast<const RGYDegrainMotionSearchVector *>(vectorsPrev.ptr),
         reinterpret_cast<RGYDegrainMotionSearchVector *>(vectorsFinal.ptr),
         pitch, width, height, planeBase, finalBase, blockCount, layout.blocksX, layout.blocksY, layout.step,
-        pad, motionCostScale, lowSadWeightScale, newCandidateCostScale);
+        pad, motionCostScale, lowSadWeightScale, newCandidateCostScale, spatialEarlySadThreshold);
     return err_to_rgy(cudaGetLastError());
 }
 
@@ -4381,14 +4473,14 @@ static RGY_ERR launchNVEncDegrainMotionSearchSpatialRefineBlock(
     const int pitch, const int width, const int height, const int planeBase, const int finalBase,
     const int blockCount, const RGYDegrainBlockLayout &layout,
     const int pel, const int subpelInterp, const int pad, const int motionCostScale,
-    const int lowSadWeightScale, const int newCandidateCostScale, cudaStream_t stream) {
+    const int lowSadWeightScale, const int newCandidateCostScale, const int spatialEarlySadThreshold, cudaStream_t stream) {
     if (layout.blockSize != blockSize) {
         return RGY_ERR_INVALID_PARAM;
     }
 #define NVENC_DEGRAIN_LAUNCH_REFINE(PEL, SUBPEL) \
     return launchNVEncDegrainMotionSearchSpatialRefineFixed<TypePixel, blockSize, PEL, SUBPEL>( \
         sourcePlane, referencePlane, subpelPlanes, subpelPlaneStride, vectors, vectorsPrev, vectorsFinal, pitch, width, height, planeBase, finalBase, \
-        blockCount, layout, pad, motionCostScale, lowSadWeightScale, newCandidateCostScale, stream)
+        blockCount, layout, pad, motionCostScale, lowSadWeightScale, newCandidateCostScale, spatialEarlySadThreshold, stream)
     switch (pel) {
     case 1:
         NVENC_DEGRAIN_LAUNCH_REFINE(1, 0);

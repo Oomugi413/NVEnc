@@ -39,6 +39,9 @@
 
 class NVEncFilterResize; // opt-in end-of-chain resize sub-filter (out_res=/resize=)
 
+RGY_ERR run_onnx_pack_luma(float *dst, const RGYFrameInfo *src, cudaStream_t stream);
+RGY_ERR run_onnx_unpack_luma(RGYFrameInfo *dst, const float *src, cudaStream_t stream);
+
 class NVEncFilterParamOnnx : public NVEncFilterParam {
 public:
     VppOnnx onnx;
@@ -66,10 +69,8 @@ enum class OnnxIO {
 // the network's I/O convention is inferred from its channel count (OnnxIO), so the
 // same load-and-run covers every model family with no per-model code.
 //
-// The host-readback path (copy the input device frame to a host-mapped staging
-// frame, build the input tensor, run the network on CUDA/TensorRT, write the result
-// back to a host staging frame, copy that to the device output) handles all I/O
-// modes. A zero-copy CUDA IoBinding fast path can be added later as an optimisation.
+// ホスト経路は全I/O形式を処理する。単一フレームの対応形式ではCUDA IoBindingと
+// CspCropを使用し、GPU上のテンソルを直接入出力する。
 class NVEncFilterOnnx : public NVEncFilter {
 public:
     NVEncFilterOnnx();
@@ -98,6 +99,11 @@ protected:
     RGY_ERR emitTemporalOutput(int64_t outIdx, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum, cudaStream_t stream);
     RGY_ERR initMask(const std::shared_ptr<NVEncFilterParamOnnx> &prm, int inW, int inH, RGY_CSP inCsp);
     RGY_ERR runMask(const RGYFrameInfo *pInputFrame, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum, cudaStream_t stream);
+    RGY_ERR initCudaPath(cudaStream_t stream);
+    RGY_ERR runCudaRGB(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream);
+    RGY_ERR runCudaGrayNoise(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream);
+    RGY_ERR runCudaYuv444(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream);
+    RGYFrameInfo tensorFrame(float *ptr, int channels, int width, int height, RGY_CSP csp) const;
 
     std::unique_ptr<RGYOnnxRTCUDA> m_ov;
     OnnxIO m_io;                          // I/O convention inferred from channel counts
@@ -118,6 +124,21 @@ protected:
     std::vector<float>           m_inBuf;       // network input tensor  (inC*inW*inH, CHW)
     std::vector<float>           m_outBuf;      // network output tensor (outC*outW*outH, CHW)
     std::vector<float>           m_u444, m_v444;// normalised chroma at output luma res (for 4:2:0 downsample)
+
+    // CUDA IoBinding経路
+    std::unique_ptr<CUMemBuf> m_inputDevice;
+    std::unique_ptr<CUMemBuf> m_outputDevice;
+    std::unique_ptr<NVEncFilterCspCrop> m_cropToRgb;
+    std::unique_ptr<NVEncFilterCspCrop> m_cropFromRgb;
+    std::unique_ptr<NVEncFilterCspCrop> m_cropToYuv444;
+    std::unique_ptr<NVEncFilterCspCrop> m_cropFromYuv444;
+    tstring m_modelPath;
+    RGYOnnxRTProvider m_provider;
+    tstring m_precision;
+    tstring m_cacheDir;
+    int m_deviceID;
+    bool m_cudaPathTried;
+    bool m_cudaPath;
 
     int m_temporalT;
     struct RingFrame {
