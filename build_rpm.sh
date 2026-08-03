@@ -10,6 +10,7 @@ PACKAGE_ROOT=.rpmpkg
 PACKAGE_VERSION=`git describe --tags | cut -f 1 --delim="-"`
 PACKAGE_ARCH=`uname -m`
 PACKAGE_LICENSE=MIT
+PACKAGE_FILE_SUFFIX=${PACKAGE_FILE_SUFFIX:+_${PACKAGE_FILE_SUFFIX}}
 
 if [ -e /etc/os-release ]; then
     PACKAGE_OS_NAME=`cat /etc/os-release | grep ID | cut -f 2 --delim="=" | head -n 1 `
@@ -56,4 +57,7 @@ rm -rf ${WORK_DIR}
 
 rpmbuild --define "_topdir ${RPMBUILD_DIR}" -ba "${PACKAGE_SPEC_DIR}/${PACKAGE_NAME}.spec"
 
-cp ${RPMBUILD_DIR}/RPMS/${PACKAGE_ARCH}/${PACKAGE_NAME}*.rpm .
+for RPM_FILE in ${RPMBUILD_DIR}/RPMS/${PACKAGE_ARCH}/${PACKAGE_NAME}*.rpm; do
+    RPM_BASENAME=`basename "${RPM_FILE}" .rpm`
+    cp "${RPM_FILE}" "./${RPM_BASENAME}${PACKAGE_FILE_SUFFIX}.rpm"
+done
