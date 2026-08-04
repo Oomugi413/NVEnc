@@ -8,6 +8,10 @@ on:
     tags:
       - '*'
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   get_version_name:
     name: Get version name
