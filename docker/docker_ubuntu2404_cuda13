@@ -1,10 +1,12 @@
 # syntax=docker/dockerfile:1
 
-# CUDA 13.3 generates native sm_120 code for the GeForce RTX 50 series.
+# Keep the CUDA 13.3 toolchain for native sm_120 code, while pinning the
+# runtime NVRTC used by NVEncC to the CUDA 12.9 series.
 ARG NVENCC_CUDA_VERSION=13.3.0
 FROM nvidia/cuda:${NVENCC_CUDA_VERSION}-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive \
+    NVENCC_NVRTC_VERSION=12.9.86-1 \
     FFMPEG_DLL_REPO=https://github.com/rigaya/build_scripts.git \
     FFMPEG_DLL_REF=master \
     FFMPEG_DLL_REV=unknown \
@@ -56,6 +58,8 @@ RUN apt-get update \
       xxd \
       xz-utils \
       yasm \
+      cuda-nvrtc-12-9=${NVENCC_NVRTC_VERSION} \
+      cuda-nvrtc-dev-12-9=${NVENCC_NVRTC_VERSION} \
     && python3 -m pip install --break-system-packages --no-cache-dir --upgrade meson \
     && test -f /usr/local/cuda/include/npp.h \
     && test -f /usr/local/cuda/include/nvrtc.h \
@@ -67,6 +71,8 @@ RUN apt-get update \
     && test -f /usr/local/cuda/lib64/libnppc_static.a \
     && test -f /usr/local/cuda/lib64/libculibos.a \
     && test -f /usr/local/cuda/lib64/stubs/libcuda.so \
+    && test -e /usr/local/cuda-12.9/targets/x86_64-linux/lib/libnvrtc.so.12.9 \
+    && test -e /usr/local/cuda-12.9/targets/x86_64-linux/lib/libnvrtc-builtins.so.12.9 \
     && rm -rf /var/lib/apt/lists/*
 
 # Pin cargo-c to the version already proven by the RTX 50 standalone build.
@@ -145,5 +151,6 @@ RUN mkdir -p "${NVENC_HEADER_DIR}" \
 ENV FFMPEG_PREFIX=${FFMPEG_PREFIX}
 ENV VMAF_PREFIX=${VMAF_PREFIX}
 ENV NVENC_HEADER_DIR=${NVENC_HEADER_DIR}
+ENV LD_LIBRARY_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64
 
 WORKDIR /work
