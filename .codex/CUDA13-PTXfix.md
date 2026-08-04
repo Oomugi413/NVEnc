@@ -11,7 +11,7 @@
 結論は次のとおり。
 
 1. `--vpp-colorspace` の失敗原因は、NVRTC 13.3が生成したPTXを実行時のCUDAドライバが受け付けない `CUDA_ERROR_UNSUPPORTED_PTX_VERSION` だった。
-2. NVEncCが実行時に動的ロードするNVRTCを12.9.86へ切り替えると、同じcolorspace処理が成功した。
+2. NVEncCが実行時に動的ロードするNVRTCを12.9系へ切り替えると、同じcolorspace処理が成功した。検証時のパッケージは12.9.86だった。
 3. CUDA 13.3のコンパイラはRTX 50シリーズ向け `sm_120` 生成に必要なため、ビルドツールチェーンは維持し、NVRTCランタイムだけ12.9系にする構成とした。
 4. `--vpp-libplacebo-tonemapping` はNVRTCではなくVulkan/shaderc経路であり、NVRTC 12.9/13.3のどちらでも動作した。ただし、配備済みNVEncC 9.29.1では別のSPIR-V不整合が発生するため、9.30.1以降が必要になる。
 
@@ -122,15 +122,14 @@ Invalid SPIR-V binary version 1.6 for target environment SPIR-V 1.0
 
 ### `docker/docker_ubuntu2404_cuda13`
 
-CUDA 13.3のツールチェーンを維持したまま、NVRTC 12.9.86-1を導入するように変更した。
+CUDA 13.3のツールチェーンを維持したまま、NVRTC 12.9系を導入するように変更した。APTのパッケージ名だけを指定し、パッチ番号は固定していない。
 
 ```dockerfile
 ARG NVENCC_CUDA_VERSION=13.3.0
 ...
-NVENCC_NVRTC_VERSION=12.9.86-1
 ...
-cuda-nvrtc-12-9=${NVENCC_NVRTC_VERSION}
-cuda-nvrtc-dev-12-9=${NVENCC_NVRTC_VERSION}
+cuda-nvrtc-12-9
+cuda-nvrtc-dev-12-9
 ```
 
 12.9のライブラリをCUDA 13.3側より先にロードするため、次のパスも設定した。
@@ -143,7 +142,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib:/usr/local/nvi
 
 ```text
 コンパイル: CUDA 13.3（sm_120を含むネイティブコード生成）
-NVRTC実行: CUDA 12.9.86
+NVRTC実行: CUDA 12.9系
 ```
 
 ### `NVEncCore/rgy_version.h`
@@ -163,7 +162,7 @@ VER_STR_FILEVERSION_TCHAR: 9.30.2
 完了した検証:
 
 - Docker BuildKitのDockerfile構文チェック成功。
-- CUDA 13.3ベースの一時コンテナへNVRTC 12.9.86をインストール。
+- CUDA 13.3ベースの一時コンテナへNVRTC 12.9系（検証時12.9.86）をインストール。
 - `LD_LIBRARY_PATH`を変更したPython `ctypes`ロード試験で `NVRTC 12.9` を確認。
 - NVRTC 12.9/13.3のcolorspace対照エンコード。
 - libplaceboトーンマッピング単体およびリサイズ併用試験。
@@ -189,6 +188,6 @@ Linuxの `nvencc` パッケージはNVRTCライブラリ自体を同梱してお
 ```text
 NVEncC: 9.30.2以降
 ビルドツールチェーン: CUDA 13.3
-実行時NVRTC: 12.9.86系
+実行時NVRTC: 12.9系
 GPUドライバ: 595.84（今回の試験環境）
 ```

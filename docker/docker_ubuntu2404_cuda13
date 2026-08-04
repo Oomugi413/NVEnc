@@ -6,7 +6,6 @@ ARG NVENCC_CUDA_VERSION=13.3.0
 FROM nvidia/cuda:${NVENCC_CUDA_VERSION}-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive \
-    NVENCC_NVRTC_VERSION=12.9.86-1 \
     FFMPEG_DLL_REPO=https://github.com/rigaya/build_scripts.git \
     FFMPEG_DLL_REF=master \
     FFMPEG_DLL_REV=unknown \
@@ -58,8 +57,8 @@ RUN apt-get update \
       xxd \
       xz-utils \
       yasm \
-      cuda-nvrtc-12-9=${NVENCC_NVRTC_VERSION} \
-      cuda-nvrtc-dev-12-9=${NVENCC_NVRTC_VERSION} \
+      cuda-nvrtc-12-9 \
+      cuda-nvrtc-dev-12-9 \
     && python3 -m pip install --break-system-packages --no-cache-dir --upgrade meson \
     && test -f /usr/local/cuda/include/npp.h \
     && test -f /usr/local/cuda/include/nvrtc.h \
@@ -71,8 +70,8 @@ RUN apt-get update \
     && test -f /usr/local/cuda/lib64/libnppc_static.a \
     && test -f /usr/local/cuda/lib64/libculibos.a \
     && test -f /usr/local/cuda/lib64/stubs/libcuda.so \
-    && test -e /usr/local/cuda-12.9/targets/x86_64-linux/lib/libnvrtc.so.12.9 \
-    && test -e /usr/local/cuda-12.9/targets/x86_64-linux/lib/libnvrtc-builtins.so.12.9 \
+    && test -e /usr/local/cuda-12.9/targets/x86_64-linux/lib/libnvrtc.so \
+    && test -e /usr/local/cuda-12.9/targets/x86_64-linux/lib/libnvrtc-builtins.so \
     && rm -rf /var/lib/apt/lists/*
 
 # Pin cargo-c to the version already proven by the RTX 50 standalone build.
