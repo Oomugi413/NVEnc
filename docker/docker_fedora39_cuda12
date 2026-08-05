@@ -3,7 +3,7 @@ FROM fedora:39
 ARG OSVER=fc39 \
     LOCAL_USER_ID=1000 \
     LOCAL_GROUP_ID=1000 \
-    FFMPEG_DLL_REPO=https://github.com/rigaya/build_scripts.git \
+    FFMPEG_DLL_REPO=https://github.com/Oomugi413/build_scripts.git \
     FFMPEG_DLL_REF=master \
     FFMPEG_DLL_REV=unknown \
     BUILD_SCRIPTS_DIR=/opt/build_scripts \

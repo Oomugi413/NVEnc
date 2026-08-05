@@ -118,6 +118,44 @@ Invalid SPIR-V binary version 1.6 for target environment SPIR-V 1.0
 
 これはNVRTC/PTXとは別の問題で、9.29.1に含まれるlibplacebo 7.351.0とshaderc/SPIR-Vターゲットの組み合わせに起因する。libplaceboトーンマッピングを使用する場合は、9.30.1以降を使用する必要がある。
 
+## 9.26.1のエンコードが成功した理由
+
+次のエンコードログについて、NVEncC 9.26.1が成功した理由をNVEncのGit履歴と対照試験結果から整理した。
+
+```text
+/mnt/recording/20260804_＜アニメギルド＞最強出涸らし皇子の暗躍帝位争い　#5-enc.log
+```
+
+このコマンドラインには`--vpp-colorspace`が含まれておらず、使用しているのは次のlibplacebo系フィルタだった。
+
+```text
+--vpp-resize libplacebo-ewa-lanczos
+--vpp-libplacebo-tonemapping src_csp=hlg,dst_csp=sdr
+```
+
+ログにも次が記録されており、NVRTCではなくVulkan/libplacebo経路で処理されたことが確認できる。
+
+```text
+libplacebo: Initialized libplacebo v7.360.1
+libplacebo: shaderc SPIR-V version 1.6
+libplacebo: Driver info: 595.84
+encoded 43633 frames
+```
+
+NVRTCは`--vpp-colorspace`のCUDAカスタムフィルタ生成時に使用される。一方、libplaceboフィルタはVulkanデバイス上でshadercによりSPIR-Vを生成する。このため、このエンコードの成功はNVRTC 13.3のPTX問題を解決したことを意味しない。
+
+バイナリに組み込まれた依存ライブラリにも差があった。
+
+| 構成 | libplacebo | shaderc/SPIR-V | 結果 |
+|---|---:|---:|---|
+| NVEncC 9.26.1の実エンコード | v7.360.1 | 1.6 | 成功 |
+| 配備済みNVEncC 9.29.1の対照試験 | v7.351.0 | 1.6 | SPIR-Vターゲット不整合で失敗 |
+| NVEncC 9.30.1の対照試験 | v7.360.1 | 1.6 | 成功 |
+
+shadercについては、ログ上のSPIR-Vバージョンは両方とも1.6であり、shadercのバージョン番号そのものが異なるとは断定できない。正確には、libplaceboとshadercを含むビルド済みツールチェーンの組み合わせが異なり、9.29.1ではSPIR-V 1.6を生成した後にSPIR-V 1.0向けとして検証される不整合が発生した。
+
+Git履歴上、9.26.1から9.29.1の間で`NVEncFilterLibplacebo`と`rgy_libplacebo`に差分はなく、9.29.1から9.30.1でも関連するNVEncソースとDockerfileに差分はない。公式Linuxビルドはlibplaceboをstatic linkし、外部の`rigaya/build_scripts`を`master`から取得してビルドするため、libplaceboの具体的なバージョンはNVEncのGitタグだけでは再現できない。
+
 ## リポジトリに加えた変更
 
 ### `docker/docker_ubuntu2404_cuda13`
@@ -190,4 +228,10 @@ NVEncC: 9.30.2以降
 ビルドツールチェーン: CUDA 13.3
 実行時NVRTC: 12.9系
 GPUドライバ: 595.84（今回の試験環境）
+```
+
+## セッション情報
+
+```text
+Codex session ID: 019fceed-24b2-7c83-ac28-4068c31a6bb0
 ```

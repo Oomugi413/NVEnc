@@ -6,7 +6,7 @@ ARG NVENCC_CUDA_VERSION=13.3.0
 FROM nvidia/cuda:${NVENCC_CUDA_VERSION}-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive \
-    FFMPEG_DLL_REPO=https://github.com/rigaya/build_scripts.git \
+    FFMPEG_DLL_REPO=https://github.com/Oomugi413/build_scripts.git \
     FFMPEG_DLL_REF=master \
     FFMPEG_DLL_REV=unknown \
     NVENCC_FFMPEG_VERSION=8.1.2 \

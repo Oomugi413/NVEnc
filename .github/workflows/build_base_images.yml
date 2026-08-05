@@ -23,7 +23,7 @@ jobs:
 
     env:
       DOCKER_FILE: docker/docker_${{ matrix.dockerimg }}
-      FFMPEG_DLL_REPO: https://github.com/rigaya/build_scripts.git
+      FFMPEG_DLL_REPO: https://github.com/Oomugi413/build_scripts.git
       FFMPEG_DLL_REF: master
       NVENC_HEADER_DIR: /opt/nvenc_headers
       AVISYNTH_HEADERS_URL: https://github.com/AviSynth/AviSynthPlus/archive/refs/tags/v3.7.5.tar.gz
