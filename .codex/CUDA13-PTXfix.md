@@ -230,6 +230,42 @@ NVEncC: 9.30.2以降
 GPUドライバ: 595.84（今回の試験環境）
 ```
 
+## 前回の記録以降に判明したこと・追加変更
+
+### Vulkan stub版libplaceboの原因確定
+
+GitHub Actionsのbase imageログと生成された`.deb`を追加確認した結果、stub版libplaceboはNVEncのリンク時に偶然混入したものではなく、base imageのlibplaceboビルド時点で生成されていたことが判明した。
+
+`libplacebo 7.360.1`に対して、Vulkan Loader/Headerが`1.3.295`、shadercが`2023.8.1`のままだったため、libplaceboの次の検査が失敗していた。
+
+```text
+shaderc_env_version_vulkan_1_4: NO
+VK_VERSION_1_4: NO
+vk-proc-addr: NO
+vulkan: NO
+Compiling .../vulkan_stubs.c.o
+```
+
+このため、NVEnc側のMesonが`Vulkan: true`、`libplacebo: true`と表示されても、実際に静的リンクされたlibplaceboはVulkan stub版となった。生成された9.30.2パッケージでも、`pl_vulkan_create`のサイズが`0x22`で、`libplacebo compiled without Vulkan support!`が含まれることを確認した。
+
+### build_scriptsの依存ライブラリ更新
+
+原因に対応するため、`Oomugi413/build_scripts`の`ffmpeg_dll/build_ffmpeg_dll.sh`を更新した。
+
+- shaderc: `v2024.1` → `v2026.2`
+- Vulkan Loader/Header: `v1.3.295` → `v1.4.356`
+- libplacebo: `v7.360.1`を継続使用
+
+libplacebo 7.360.1が要求するVulkan 1.4およびshaderc対応環境を揃え、Vulkan stub版ではなく実装版を生成できる構成にした。変更は`Oomugi413/build_scripts`のcommit `faa2498`としてpush済み。
+
+詳細な変更記録は次を参照。
+
+- [Oomugi413/build_scripts/.codex/libplacebo_update.md](https://github.com/Oomugi413/build_scripts/blob/master/.codex/libplacebo_update.md)
+
+### base imageタグの再現性に関する追加確認
+
+base image作成時にpushされたdigestは`sha256:fbbd5c56...`だったが、パッケージ作成時の`docker pull`では`sha256:169ec670...`が取得されていた。同じmutableなタグを使用しているため、base image作成ジョブとパッケージ作成ジョブで異なるimageを使用する可能性がある。今後はbase image digestを固定してパッケージを作成する必要がある。
+
 ## セッション情報
 
 ```text
