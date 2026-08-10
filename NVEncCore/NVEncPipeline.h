@@ -191,7 +191,7 @@ struct CUFrameEnc : public CUFrameBufBase {
         return std::make_pair(RGY_ERR_UNSUPPORTED, nullptr);
     }
     virtual RGY_ERR map() = 0;
-    virtual void unmap() = 0;
+    virtual RGY_ERR unmap() = 0;
     EncodeBuffer *encBuffer() { return m_encBuffer; }
 protected:
     CUFrameEnc(const CUFrameEnc &) = delete;
@@ -201,7 +201,10 @@ protected:
     }
     virtual RGY_ERR memfree(uint8_t **mem) override {
         if (mem[0]) {
-            unmap();
+            const auto sts = unmap();
+            if (sts != RGY_ERR_NONE) {
+                return sts;
+            }
             mem[0] = nullptr;
         }
         return RGY_ERR_NONE;
@@ -228,27 +231,44 @@ struct CUFrameEncDevWrap : public CUFrameEnc {
         clear();
     }
     virtual RGY_ERR map() override {
+        if (m_encBuffer->stInputBfr.hInputSurface != nullptr
+            || m_encBuffer->stInputBfrAlpha.hInputSurface != nullptr) {
+            return RGY_ERR_INVALID_CALL;
+        }
         auto nvencret = m_encoder->NvEncMapInputResource(m_encBuffer->stInputBfr.nvRegisteredResource, &m_encBuffer->stInputBfr.hInputSurface);
         if (nvencret != NV_ENC_SUCCESS) {
             return err_to_rgy(nvencret);
         }
         if (m_encBuffer->stInputBfrAlpha.nvRegisteredResource) {
             nvencret = m_encoder->NvEncMapInputResource(m_encBuffer->stInputBfrAlpha.nvRegisteredResource, &m_encBuffer->stInputBfrAlpha.hInputSurface);
-                if (nvencret != NV_ENC_SUCCESS) {
-                    return err_to_rgy(nvencret);
+            if (nvencret != NV_ENC_SUCCESS) {
+                m_encoder->NvEncUnmapInputResource(m_encBuffer->stInputBfr.hInputSurface);
+                m_encBuffer->stInputBfr.hInputSurface = nullptr;
+                return err_to_rgy(nvencret);
             }
         }
         frame.ptr[0] = (uint8_t *)m_encBuffer->stInputBfr.pNV12devPtr;
         frame.pitch[0] = m_encBuffer->stInputBfr.uNV12Stride;
         return RGY_ERR_NONE;
     }
-    virtual void unmap() override {
-        m_encoder->NvEncUnmapInputResource(m_encBuffer->stInputBfr.hInputSurface);
-        if (m_encBuffer->stInputBfrAlpha.nvRegisteredResource) {
-            m_encoder->NvEncUnmapInputResource(m_encBuffer->stInputBfrAlpha.hInputSurface);
+    virtual RGY_ERR unmap() override {
+        auto sts = RGY_ERR_NONE;
+        if (m_encBuffer->stInputBfr.hInputSurface != nullptr) {
+            sts = err_to_rgy(m_encoder->NvEncUnmapInputResource(m_encBuffer->stInputBfr.hInputSurface));
+            if (sts == RGY_ERR_NONE) {
+                m_encBuffer->stInputBfr.hInputSurface = nullptr;
+            }
         }
-        frame.ptr[0] = nullptr;
-        frame.pitch[0] = 0;
+        if (m_encBuffer->stInputBfrAlpha.hInputSurface != nullptr) {
+            const auto alphaSts = err_to_rgy(m_encoder->NvEncUnmapInputResource(m_encBuffer->stInputBfrAlpha.hInputSurface));
+            if (alphaSts == RGY_ERR_NONE) {
+                m_encBuffer->stInputBfrAlpha.hInputSurface = nullptr;
+            }
+            if (sts == RGY_ERR_NONE) {
+                sts = alphaSts;
+            }
+        }
+        return sts;
     }
 protected:
     CUFrameEncDevWrap(const CUFrameEncDevWrap &) = delete;
@@ -278,11 +298,15 @@ struct CUFrameEncHostWrap : public CUFrameEnc {
         frame.pitch[0] = lockedPitch;
         return RGY_ERR_NONE;
     }
-    virtual void unmap() override {
-        m_encoder->NvEncUnlockInputBuffer(m_encBuffer->stInputBfr.hInputSurface);
+    virtual RGY_ERR unmap() override {
+        auto sts = err_to_rgy(m_encoder->NvEncUnlockInputBuffer(m_encBuffer->stInputBfr.hInputSurface));
         if (m_encBuffer->stInputBfrAlpha.nvRegisteredResource) {
-            m_encoder->NvEncUnlockInputBuffer(m_encBuffer->stInputBfrAlpha.hInputSurface);
+            const auto alphaSts = err_to_rgy(m_encoder->NvEncUnlockInputBuffer(m_encBuffer->stInputBfrAlpha.hInputSurface));
+            if (sts == RGY_ERR_NONE) {
+                sts = alphaSts;
+            }
         }
+        return sts;
     }
 protected:
     CUFrameEncHostWrap(const CUFrameEncHostWrap &) = delete;
@@ -918,6 +942,7 @@ class PipelineTask {
 protected:
     PipelineTaskType m_type;
     NVGPUInfo *m_dev;
+    PipelineTask *m_nextTask = nullptr;
     std::deque<std::unique_ptr<PipelineTaskOutput>> m_outQeueue;
     PipelineTaskSurfaces m_workSurfs;
     int m_inFrames;
@@ -1040,6 +1065,13 @@ public:
     int workSurfacesAllocPriority() const {
         return getPipelineTaskAllocPriority(m_type);
     }
+    //隣接タスクの対はinitPipeline()で先に構築しておく。isPassThroughなタスクはスキップ済みのものが渡される
+    void setNextTask(PipelineTask *next) {
+        m_nextTask = next;
+    }
+    PipelineTask *nextTask() const {
+        return m_nextTask;
+    }
     size_t workSurfacesCount() const {
         return m_workSurfs.bufCount();
     }
@@ -1080,6 +1112,53 @@ protected:
         return RGY_ERR_NONE;
     }
 public:
+    //自身(t0)と次のタスク(t1)の間で共有するワークサーフェスを確保する。
+    //元はNVEncCore::allocatePiplelineFrames()にタスク種別ごとの分岐として書かれていたが、
+    //タスク固有の事情(デコーダ管理のサーフェスは確保不要など)はタスク側のoverrideで表現できるようにここへ内部化した。
+    virtual RGY_ERR allocWorkSurfaces(const int asyncDepth) {
+        if (m_nextTask == nullptr) {
+            PrintMes(RGY_LOG_ERROR, _T("AllocFrames: invalid pipeline, next task not found!\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+
+        const auto t0Alloc = requiredSurfOut();
+        const auto t1Alloc = m_nextTask->requiredSurfIn();
+        int t0RequestNumFrame = 0;
+        int t1RequestNumFrame = 0;
+        RGYFrameInfo allocateFrameInfo;
+        if (t0Alloc.has_value() && t1Alloc.has_value()) {
+            t0RequestNumFrame = t0Alloc.value().second;
+            t1RequestNumFrame = t1Alloc.value().second;
+            allocateFrameInfo = (workSurfacesAllocPriority() >= m_nextTask->workSurfacesAllocPriority()) ? t0Alloc.value().first : t1Alloc.value().first;
+            allocateFrameInfo.width = std::max(t0Alloc.value().first.width, t1Alloc.value().first.width);
+            allocateFrameInfo.height = std::max(t0Alloc.value().first.height, t1Alloc.value().first.height);
+        } else if (t0Alloc.has_value()) {
+            allocateFrameInfo = t0Alloc.value().first;
+            t0RequestNumFrame = t0Alloc.value().second;
+        } else if (t1Alloc.has_value()) {
+            allocateFrameInfo = t1Alloc.value().first;
+            t1RequestNumFrame = t1Alloc.value().second;
+        } else {
+            PrintMes(RGY_LOG_ERROR, _T("AllocFrames: invalid pipeline: cannot get request from either t0 or t1!\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+
+        const int requestNumFrames = std::max(1, t0RequestNumFrame + t1RequestNumFrame + asyncDepth + 1);
+        PrintMes(RGY_LOG_DEBUG, _T("AllocFrames: %s-%s, type: CL, %s %dx%d, request %d frames\n"),
+            print().c_str(), m_nextTask->print().c_str(), RGY_CSP_NAMES[allocateFrameInfo.csp],
+            allocateFrameInfo.width, allocateFrameInfo.height, requestNumFrames);
+        const auto allocStart = std::chrono::steady_clock::now();
+        auto sts = workSurfacesAllocCUBuf(requestNumFrames, allocateFrameInfo);
+        if (sts != RGY_ERR_NONE) {
+            PrintMes(RGY_LOG_ERROR, _T("AllocFrames:   Failed to allocate frames for %s-%s: %s."), print().c_str(), m_nextTask->print().c_str(), get_err_mes(sts));
+            return sts;
+        }
+        CUDA_DEBUG_SYNC_ERR;
+        const auto allocMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - allocStart).count();
+        PrintMes(RGY_LOG_DEBUG, _T("AllocFrames: %s-%s, type: CL, request %d frames, %lld ms\n"),
+            print().c_str(), m_nextTask->print().c_str(), requestNumFrames, (lls)allocMs);
+        return RGY_ERR_NONE;
+    }
     virtual RGY_ERR workSurfacesAllocCUBuf(const int numFrames, const RGYFrameInfo &frame) {
         auto sts = workSurfacesClear();
         if (sts != RGY_ERR_NONE) {
@@ -1197,7 +1276,10 @@ public:
     }
     virtual std::optional<std::pair<RGYFrameInfo, int>> requiredSurfIn() override { return std::nullopt; };
     virtual std::optional<std::pair<RGYFrameInfo, int>> requiredSurfOut() override {
-        const auto inputFrameInfo = m_input->GetInputFrameInfo();
+        //可変解像度avswでは、現在の実解像度ではなく--adapt-resolutionで指定した上限を使って初期確保する。
+        //ここをGetInputFrameInfo()のままにすると、readerが後で上限内の大きいAVFrameを検出できても、
+        //その書き込み先は開始時の小さいサイズのままなので、変換時点でバッファオーバーランする。
+        const auto inputFrameInfo = m_input->GetInputFrameInfoForAlloc();
         RGYFrameInfo info(inputFrameInfo.srcWidth, inputFrameInfo.srcHeight, inputFrameInfo.csp, inputFrameInfo.bitdepth, inputFrameInfo.picstruct, RGY_MEM_TYPE_GPU);
         return std::make_pair(info, m_outMaxQueueSize);
     };
@@ -1265,6 +1347,21 @@ public:
             return err;
         }
         if (m_stopwatch) m_stopwatch->add(0, 3);
+        //入力途中の解像度変更(--avsw / avhwのsw decode時)への追従。
+        //サーフェス自体は設定上限の解像度で確保されたものを使い回すが(そのため新解像度は設定上限以下であることが前提)、
+        //width/heightを実際の解像度に更新しないと、下流のフィルタが確保時の解像度で処理してしまう。
+        //hostFrame側も更新するのは、readerがhostFrameに対して書き込みを行うため。
+        //確保容量はCUFrameBuf内部に残るので、ここでframe.width/heightを小さくしても再確保や容量縮小は発生しない。
+        const auto inputFrameInfo = m_input->GetInputFrameInfo();
+        if (   cuframe->frame.width != inputFrameInfo.srcWidth || cuframe->frame.height != inputFrameInfo.srcHeight
+            || cuframe->refFrameHost->frame.width != inputFrameInfo.srcWidth || cuframe->refFrameHost->frame.height != inputFrameInfo.srcHeight) {
+            PrintMes(RGY_LOG_DEBUG, _T("input frame surface resolution updated from %dx%d to %dx%d.\n"),
+                cuframe->frame.width, cuframe->frame.height, inputFrameInfo.srcWidth, inputFrameInfo.srcHeight);
+            cuframe->frame.width = inputFrameInfo.srcWidth;
+            cuframe->frame.height = inputFrameInfo.srcHeight;
+            cuframe->refFrameHost->frame.width = inputFrameInfo.srcWidth;
+            cuframe->refFrameHost->frame.height = inputFrameInfo.srcHeight;
+        }
         hostFrame->setInputFrameId(m_inFrames++);
         if (m_endPts >= 0
             && (int64_t)hostFrame->timestamp() != AV_NOPTS_VALUE // timestampが設定されていない場合は無視
@@ -1351,6 +1448,17 @@ public:
         RGYFrameInfo info(inputFrameInfo.srcWidth, inputFrameInfo.srcHeight, inputFrameInfo.csp, inputFrameInfo.bitdepth, inputFrameInfo.picstruct, RGY_MEM_TYPE_GPU);
         return std::make_pair(info, 0);
     };
+    //cuvidデコーダのサーフェスはデコーダ自身が管理しているため、ここでの確保は不要
+    virtual RGY_ERR allocWorkSurfaces(const int asyncDepth) override {
+        UNREFERENCED_PARAMETER(asyncDepth);
+        if (m_nextTask == nullptr) {
+            PrintMes(RGY_LOG_ERROR, _T("AllocFrames: invalid pipeline, next task not found!\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        PrintMes(RGY_LOG_DEBUG, _T("AllocFrames: %s-%s, allocation skipped (decoder-managed surfaces)\n"),
+            print().c_str(), m_nextTask->print().c_str());
+        return RGY_ERR_NONE;
+    }
     virtual bool isDrainingAfterInputEOF() const override {
         return m_state == RGY_STATE_RUNNING && m_dec->frameQueue()->isEndOfDecode() && !m_dec->frameQueue()->isEmpty();
     }
@@ -1507,6 +1615,15 @@ protected:
                 if (m_frameReleaseData) {
                     m_frameReleaseData->waitFrameSingleThread(0);
                     m_workSurfs.deleteFreedSurface(); // これを呼ばないとフレームが解放されず、デコードが止まってしまうことがある
+                }
+                //デコーダから解像度変更に伴うリセット要求が出ている場合、デコーダのフレームを誰も参照していない状態
+                //(フレームキューが空 && ワークサーフェスがすべて解放済み)になったらリセットを許可する。
+                //デコーダの再作成/reconfigureはデコーダの保持するフレームを無効化するため、参照が残ったまま行うと絵が壊れる。
+                //ここに来るのはフレームが取り出せなかったとき、つまり解放待ちの状態なので、リセット待ちで進まなくなることはない。
+                if (m_dec->formatChangeReq()
+                    && m_dec->frameQueue()->isEmpty()
+                    && m_workSurfs.isAllFree()) {
+                    m_dec->allowFormatChange();
                 }
                 m_dec->frameQueue()->waitForQueueUpdate();
 #if THREAD_DEC_USE_FUTURE
@@ -2317,8 +2434,15 @@ public:
         if (m_tsPrev >= outPtsSource) {
             if (m_tsPrev - outPtsSource >= MAX_FORCECFR_INSERT_FRAMES * m_outFrameDuration) {
                 PrintMes(RGY_LOG_DEBUG, _T("check_pts: previous pts %lld, current pts %lld, estimated pts %lld, m_tsOutFirst %lld, changing offset.\n"), m_tsPrev, outPtsSource, m_tsOutEstimated, m_tsOutFirst);
-                m_tsOutFirst += (outPtsSource - m_tsOutEstimated); //今後の位置合わせのための補正
-                outPtsSource = m_tsOutEstimated;
+                //m_tsOutEstimatedはCFR仮定でoutDurationを積み上げた値のため、vfrや長尺では
+                //実際の出力pts(m_tsPrev)から徐々にずれていく(長尺TSで数十フレーム分遅れる例あり)。
+                //そのままm_tsOutEstimatedを採用すると出力ptsが直前のフレームより前に戻ってしまい、
+                //muxerに "non monotonically increasing dts" で拒否されて出力が破綻するため、
+                //必ず直前のフレームより後になる位置を選ぶ
+                const auto tsOutNext = std::max(m_tsOutEstimated, m_tsPrev + m_outFrameDuration);
+                m_tsOutFirst += (outPtsSource - tsOutNext); //今後の位置合わせのための補正
+                outPtsSource = tsOutNext;
+                m_tsOutEstimated = tsOutNext; //ずれをここで解消しておかないと、以降のフレームでも同じ逆行が起こる
                 PrintMes(RGY_LOG_DEBUG, _T("check_pts:   changed to m_tsOutFirst %lld, outPtsSource %lld.\n"), m_tsOutFirst, outPtsSource);
             } else {
                 if (m_avsync & RGY_AVSYNC_FORCE_CFR) {
@@ -2985,7 +3109,24 @@ public:
             const auto getOutputMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - getOutputStart).count();
             outputBitstreamWaitMsTotal += getOutputMs;
             outputBitstreamWaitMsMax = (std::max)(outputBitstreamWaitMsMax, getOutputMs);
+            const bool devFrame = frameEnc->bufType() == CUFrameBufType::EncDevWrap;
+            if (outBs.first == RGY_ERR_NONE && devFrame) {
+                // NVENCが入力surfaceを使い終えた後、free queueへ戻す前に必ずmapを解除する。
+                // 同じ登録resourceをmapしたまま再利用すると、ドライバ側の管理情報が長時間蓄積する。
+                NVEncCtxAutoLock(ctxlock(m_dev->vidCtxLock()));
+                const auto unmapSts = frameEnc->unmap();
+                if (unmapSts != RGY_ERR_NONE) {
+                    PrintMes(RGY_LOG_ERROR, _T("Failed to unmap input frame: %s.\n"), get_err_mes(unmapSts));
+                    // map状態が不明なsurfaceをfree queueへ戻さず、パイプライン停止後の破棄時に再解放する。
+                    frameEnc.release();
+                    return unmapSts;
+                }
+            }
             if (outBs.first != RGY_ERR_NONE) {
+                if (devFrame) {
+                    // NVENCの完了を確認できないsurfaceは再利用しない。
+                    frameEnc.release();
+                }
                 if (outBs.first == RGY_ERR_MORE_DATA) {
                     if (!getOneFrame) {
                         const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - outputStart).count();
@@ -3283,7 +3424,11 @@ public:
                     return sts;
                 }
             } else if (surfEncodeIn->bufType() == CUFrameBufType::EncHostWrap) {
-                surfEncodeIn->unmap();
+                const auto sts = surfEncodeIn->unmap();
+                if (sts != RGY_ERR_NONE) {
+                    PrintMes(RGY_LOG_ERROR, _T("Failed to unlock input frame: %s.\n"), get_err_mes(sts));
+                    return sts;
+                }
             }
             if (m_stopwatch) m_stopwatch->add(0, 0);
         }
@@ -3291,6 +3436,13 @@ public:
         if (surfEncodeIn) {
             auto sts = encodeFrame(surfEncodeIn->encBuffer(), m_inFrames++, surfEncodeIn->timestamp(), surfEncodeIn->duration(), surfEncodeIn->inputFrameId(), surfEncodeIn->dataList());
             if (sts != RGY_ERR_NONE) {
+                if (surfEncodeIn->bufType() == CUFrameBufType::EncDevWrap) {
+                    NVEncCtxAutoLock(ctxlock(m_dev->vidCtxLock()));
+                    const auto unmapSts = surfEncodeIn->unmap();
+                    if (unmapSts != RGY_ERR_NONE) {
+                        PrintMes(RGY_LOG_ERROR, _T("Failed to unmap input frame after encode error: %s.\n"), get_err_mes(unmapSts));
+                    }
+                }
                 PrintMes(RGY_LOG_ERROR, _T("Failed to encode frame: %s.\n"), get_err_mes(sts));
                 return sts;
             }
@@ -3328,12 +3480,230 @@ protected:
     cudaStream_t m_streamDownload;
     std::unique_ptr<PipelineTaskOutput> m_cuvidPrev;
     PipelineTaskNVEncode *m_encode;
+    //以下6つは入力途中の解像度変更対応用。解像度変更を下流に伝播させないため、チェーン先頭を新解像度で作り直した直後に元の解像度へ戻す正規化resizeを挿入する
+    RGYFrameInfo m_normalizeTargetFrame;                              //初期化時のチェーン先頭の出力フレーム情報。正規化resizeはここへ戻す(=下流から見た解像度は不変)
+    std::shared_ptr<NVEncFilterParamResize> m_normalizeResizeParam;   //正規化resizeのパラメータ雛形。NVEncCore::InitFilters()で生成されsetNormalizeResizeParam()で渡される
+    RGY_CSP m_normalizeFilterCsp;                                     //フィルタチェーンで使用するplanarのcsp。vppなし構成でチェーンを組み立てる際に必要
+    int m_inputCropOffsetW;                                           //入力サーフェスとフィルタ入力の解像度差(=cropで削られる分)。新解像度からフィルタ入力解像度を求めるのに使う
+    int m_inputCropOffsetH;
+    int m_normalizeResizeIdx;                                         //挿入済みの正規化resizeのm_vpFilters内index。-1なら未挿入(=まだ解像度変更が起きていない)
+
+    //入力途中の解像度変更対応の本丸。チェーン先頭のcropを新解像度で作り直し、その直後に元の解像度へ戻す正規化resizeを挿入する。
+    //これにより2段目以降のフィルタとエンコーダは解像度変更を一切知らずに済む(=下流の再初期化が不要になる)。
+    //呼び出し前にチェーンのdrain(内部に溜まったフレームの吐き出し)が完了していることが前提。
+    RGY_ERR reconstructFilterChain(const RGYFrameInfo& newInputFrame) {
+        if (m_vpFilters.empty()) {
+            PrintMes(RGY_LOG_ERROR, _T("resolution change is not supported for an empty filter configuration.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        const auto *firstFilterParam = m_vpFilters.front()->GetFilterParam();
+        if (firstFilterParam == nullptr) {
+            PrintMes(RGY_LOG_ERROR, _T("resolution change is not supported because the first filter has no parameters.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        if (newInputFrame.csp != firstFilterParam->frameIn.csp) {
+            PrintMes(RGY_LOG_ERROR, _T("resolution change with colorspace change is not supported: %s -> %s.\n"),
+                RGY_CSP_NAMES[firstFilterParam->frameIn.csp], RGY_CSP_NAMES[newInputFrame.csp]);
+            return RGY_ERR_UNSUPPORTED;
+        }
+        //想定するチェーン構成は2通り。
+        //  reconstructSingleFilter: vppなし構成。チェーンはcsp変換のcrop 1個だけで、出力はエンコーダに渡すNV12等(<3plane)。
+        //    この構成ではresizeを差し込む場所がないので、[新解像度crop(→planar)] + [正規化resize] + [既存cropをplanar→NV12に再init] の3段に組み替える。
+        //  reconstructPlanarChain: vppあり構成。チェーン先頭のcropがplanarを出力しているので、その直後にresizeを挿入するだけでよい。
+        const bool reconstructSingleFilter = m_vpFilters.size() == 1 && RGY_CSP_PLANES[firstFilterParam->frameOut.csp] < 3;
+        const bool reconstructPlanarChain = m_vpFilters.size() >= 2 && RGY_CSP_PLANES[firstFilterParam->frameOut.csp] >= 3;
+        if (!reconstructSingleFilter && !reconstructPlanarChain) {
+            PrintMes(RGY_LOG_ERROR, _T("resolution change is not supported for this filter configuration yet (filters: %d, first frameOut csp: %s).\n"),
+                (int)m_vpFilters.size(), RGY_CSP_NAMES[firstFilterParam->frameOut.csp]);
+            return RGY_ERR_UNSUPPORTED;
+        }
+        const auto *oldCropParam = dynamic_cast<const NVEncFilterParamCrop *>(firstFilterParam);
+        if (oldCropParam == nullptr) {
+            PrintMes(RGY_LOG_ERROR, _T("resolution change is not supported because the first filter is not CspCrop.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        if (m_normalizeResizeParam == nullptr || m_normalizeTargetFrame.width <= 0 || m_normalizeTargetFrame.height <= 0) {
+            PrintMes(RGY_LOG_ERROR, _T("resolution change is not supported because the normalization resize parameters are not initialized.\n"));
+            return RGY_ERR_INVALID_OPERATION;
+        }
+        if (reconstructSingleFilter) {
+            if (m_normalizeFilterCsp == RGY_CSP_NA || RGY_CSP_PLANES[m_normalizeFilterCsp] < 3) {
+                PrintMes(RGY_LOG_ERROR, _T("resolution change is not supported because the normalization planar colorspace is invalid: %s.\n"),
+                    RGY_CSP_NAMES[m_normalizeFilterCsp]);
+                return RGY_ERR_INVALID_OPERATION;
+            }
+
+            //1段目: 新解像度を入力とするcrop。出力はplanar(m_normalizeFilterCsp)にして、次段のresizeが扱えるようにする。
+            //cropのパラメータ(--crop指定分)は元のものをそのまま引き継ぐ = 新解像度に対しても同じ画素数だけ削られる。
+            auto firstCropParam = std::make_shared<NVEncFilterParamCrop>(*oldCropParam);
+            firstCropParam->frameIn.width = newInputFrame.width;
+            firstCropParam->frameIn.height = newInputFrame.height;
+            firstCropParam->frameIn.picstruct = newInputFrame.picstruct;
+            for (int i = 0; i < (int)_countof(firstCropParam->frameIn.pitch); i++) {
+                firstCropParam->frameIn.pitch[i] = newInputFrame.pitch[i];
+            }
+            firstCropParam->frameOut.csp = m_normalizeFilterCsp;
+            firstCropParam->frameOut.bitdepth = RGY_CSP_BIT_DEPTH[m_normalizeFilterCsp];
+            auto firstCropFilter = std::make_unique<NVEncFilterCspCrop>();
+            {
+                NVEncCtxAutoLock(ctxlock(m_dev->vidCtxLock()));
+                const auto sts = firstCropFilter->init(firstCropParam, m_log);
+                if (sts != RGY_ERR_NONE) {
+                    PrintMes(RGY_LOG_ERROR, _T("Failed to initialize the first CspCrop on resolution change (%dx%d): %s.\n"),
+                        newInputFrame.width, newInputFrame.height, get_err_mes(sts));
+                    return sts;
+                }
+            }
+
+            //2段目: 正規化resize。1段目のcrop後の解像度を、初期化時のチェーン先頭出力(=下流が期待する解像度)へ戻す。
+            //csp/bitdepthはm_normalizeTargetFrameのものではなく1段目の出力(planar)に合わせる必要がある(csp変換は3段目のcropの仕事)。
+            auto resizeParam = std::make_shared<NVEncFilterParamResize>(*m_normalizeResizeParam);
+            resizeParam->frameIn = firstCropParam->frameOut;
+            resizeParam->frameOut = m_normalizeTargetFrame;
+            resizeParam->frameOut.csp = resizeParam->frameIn.csp;
+            resizeParam->frameOut.bitdepth = RGY_CSP_BIT_DEPTH[resizeParam->frameOut.csp];
+            //m_normalizeTargetFrameは解像度変更前のpicstructを保持しているため、変更後のものに合わせる
+            resizeParam->frameOut.picstruct = resizeParam->frameIn.picstruct;
+            resizeParam->baseFps = m_normalizeResizeParam->baseFps;
+            auto resizeFilter = std::make_unique<NVEncFilterResize>();
+            {
+                NVEncCtxAutoLock(ctxlock(m_dev->vidCtxLock()));
+                const auto sts = resizeFilter->init(resizeParam, m_log);
+                if (sts != RGY_ERR_NONE) {
+                    PrintMes(RGY_LOG_ERROR, _T("Failed to initialize the normalization resize on resolution change: %s.\n"), get_err_mes(sts));
+                    return sts;
+                }
+            }
+
+            //3段目: 既存のcropフィルタをplanar -> エンコーダ入力cspの変換専用として再init。
+            //frameOutは元のまま(=下流から見た出力は不変)。
+            auto lastCropParam = std::make_shared<NVEncFilterParamCrop>(*oldCropParam);
+            lastCropParam->frameIn = resizeParam->frameOut;
+            lastCropParam->frameOut = oldCropParam->frameOut;
+            // cropは新しい先頭フィルタで適用済みのため、末尾フィルタでは二重適用しない。
+            lastCropParam->crop = initCrop();
+            {
+                NVEncCtxAutoLock(ctxlock(m_dev->vidCtxLock()));
+                const auto sts = m_vpFilters.front()->init(lastCropParam, m_log);
+                if (sts != RGY_ERR_NONE) {
+                    PrintMes(RGY_LOG_ERROR, _T("Failed to reinitialize the last CspCrop on resolution change: %s.\n"), get_err_mes(sts));
+                    return sts;
+                }
+            }
+
+            //すべてのinitが成功してから差し替える(途中で失敗した場合に既存チェーンを壊さないため)
+            m_vpFilters.insert(m_vpFilters.begin(), std::move(firstCropFilter));
+            m_vpFilters.insert(m_vpFilters.begin() + 1, std::move(resizeFilter));
+            m_normalizeResizeIdx = 1;
+            PrintMes(RGY_LOG_DEBUG, _T("resolution change: first CspCrop inserted (frameIn: %dx%d %s, frameOut: %dx%d %s).\n"),
+                firstCropParam->frameIn.width, firstCropParam->frameIn.height, RGY_CSP_NAMES[firstCropParam->frameIn.csp],
+                firstCropParam->frameOut.width, firstCropParam->frameOut.height, RGY_CSP_NAMES[firstCropParam->frameOut.csp]);
+            PrintMes(RGY_LOG_DEBUG, _T("resolution change: normalization resize inserted (frameIn: %dx%d %s, frameOut: %dx%d %s).\n"),
+                resizeParam->frameIn.width, resizeParam->frameIn.height, RGY_CSP_NAMES[resizeParam->frameIn.csp],
+                resizeParam->frameOut.width, resizeParam->frameOut.height, RGY_CSP_NAMES[resizeParam->frameOut.csp]);
+            PrintMes(RGY_LOG_DEBUG, _T("resolution change: last CspCrop reinitialized (frameIn: %dx%d %s, frameOut: %dx%d %s).\n"),
+                lastCropParam->frameIn.width, lastCropParam->frameIn.height, RGY_CSP_NAMES[lastCropParam->frameIn.csp],
+                lastCropParam->frameOut.width, lastCropParam->frameOut.height, RGY_CSP_NAMES[lastCropParam->frameOut.csp]);
+
+            //degrainやrtgmcなど前後フレームを内部に保持するフィルタは、解像度変更をまたいだ状態が無効になるためリセットする。
+            //先頭のcropと正規化resizeはたった今initしたばかりなので対象外。
+            int temporalStateResetCount = 0;
+            for (int i = 0; i < (int)m_vpFilters.size(); i++) {
+                if (i != 0 && i != m_normalizeResizeIdx) {
+                    m_vpFilters[i]->resetTemporalState();
+                    temporalStateResetCount++;
+                }
+            }
+            PrintMes(RGY_LOG_DEBUG, _T("resolution change: reset temporal state for %d filters.\n"), temporalStateResetCount);
+            PrintMes(RGY_LOG_DEBUG, _T("resolution change: filter chain reconstruction completed.\n"));
+            return RGY_ERR_NONE;
+        }
+
+        //ここからはreconstructPlanarChain(vppあり構成)の処理。
+        //先頭のcropを新解像度で再initし、その出力を正規化resizeで元の解像度へ戻す。2段目以降は触らない。
+        auto newCropParam = std::make_shared<NVEncFilterParamCrop>(*oldCropParam);
+        newCropParam->frameIn.width = newInputFrame.width;
+        newCropParam->frameIn.height = newInputFrame.height;
+        newCropParam->frameIn.picstruct = newInputFrame.picstruct;
+        for (int i = 0; i < (int)_countof(newCropParam->frameIn.pitch); i++) {
+            newCropParam->frameIn.pitch[i] = newInputFrame.pitch[i];
+        }
+        {
+            NVEncCtxAutoLock(ctxlock(m_dev->vidCtxLock()));
+            const auto sts = m_vpFilters.front()->init(newCropParam, m_log);
+            if (sts != RGY_ERR_NONE) {
+                PrintMes(RGY_LOG_ERROR, _T("Failed to reinitialize the first CspCrop on resolution change (%dx%d): %s.\n"),
+                    newInputFrame.width, newInputFrame.height, get_err_mes(sts));
+                return sts;
+            }
+        }
+        const auto& cropParam = *m_vpFilters.front()->GetFilterParam();
+        PrintMes(RGY_LOG_DEBUG, _T("resolution change: first CspCrop reinitialized (frameIn: %dx%d %s, frameOut: %dx%d %s).\n"),
+            cropParam.frameIn.width, cropParam.frameIn.height, RGY_CSP_NAMES[cropParam.frameIn.csp],
+            cropParam.frameOut.width, cropParam.frameOut.height, RGY_CSP_NAMES[cropParam.frameOut.csp]);
+
+        auto resizeParam = std::make_shared<NVEncFilterParamResize>(*m_normalizeResizeParam);
+        resizeParam->frameIn = cropParam.frameOut;
+        resizeParam->frameOut = m_normalizeTargetFrame;
+        resizeParam->frameOut.csp = resizeParam->frameIn.csp;
+        resizeParam->frameOut.bitdepth = RGY_CSP_BIT_DEPTH[resizeParam->frameOut.csp];
+        //m_normalizeTargetFrameは解像度変更前のpicstructを保持しているため、変更後のものに合わせる
+        //(実際のpicstructはrun_filter内で入力フレームのものに上書きされるが、パラメータ間で不整合を残さないようにする)
+        resizeParam->frameOut.picstruct = resizeParam->frameIn.picstruct;
+        resizeParam->baseFps = m_normalizeResizeParam->baseFps;
+        //初回の解像度変更なら正規化resizeを挿入し、2回目以降は既に挿入済みのものをre-initして解像度だけ更新する。
+        //毎回挿入するとチェーンにresizeが積み上がってしまうので、m_normalizeResizeIdxで挿入済みかを管理する。
+        const bool insertResize = m_normalizeResizeIdx < 0;
+        if (insertResize) {
+            auto resizeFilter = std::make_unique<NVEncFilterResize>();
+            {
+                NVEncCtxAutoLock(ctxlock(m_dev->vidCtxLock()));
+                const auto sts = resizeFilter->init(resizeParam, m_log);
+                if (sts != RGY_ERR_NONE) {
+                    PrintMes(RGY_LOG_ERROR, _T("Failed to initialize the normalization resize on resolution change: %s.\n"), get_err_mes(sts));
+                    return sts;
+                }
+            }
+            m_vpFilters.insert(m_vpFilters.begin() + 1, std::move(resizeFilter));
+            m_normalizeResizeIdx = 1;
+        } else {
+            if (m_normalizeResizeIdx >= (int)m_vpFilters.size()) {
+                PrintMes(RGY_LOG_ERROR, _T("Invalid normalization resize filter index: %d.\n"), m_normalizeResizeIdx);
+                return RGY_ERR_INVALID_OPERATION;
+            }
+            NVEncCtxAutoLock(ctxlock(m_dev->vidCtxLock()));
+            const auto sts = m_vpFilters[m_normalizeResizeIdx]->init(resizeParam, m_log);
+            if (sts != RGY_ERR_NONE) {
+                PrintMes(RGY_LOG_ERROR, _T("Failed to reinitialize the normalization resize on resolution change: %s.\n"), get_err_mes(sts));
+                return sts;
+            }
+        }
+        PrintMes(RGY_LOG_DEBUG, _T("resolution change: normalization resize %s (frameIn: %dx%d %s, frameOut: %dx%d %s).\n"),
+            insertResize ? _T("inserted") : _T("updated"),
+            resizeParam->frameIn.width, resizeParam->frameIn.height, RGY_CSP_NAMES[resizeParam->frameIn.csp],
+            resizeParam->frameOut.width, resizeParam->frameOut.height, RGY_CSP_NAMES[resizeParam->frameOut.csp]);
+
+        //degrainやrtgmcなど前後フレームを内部に保持するフィルタは、解像度変更をまたいだ状態が無効になるためリセットする。
+        //先頭のcropと正規化resizeはたった今initしたばかりなので対象外。
+        int temporalStateResetCount = 0;
+        for (int i = 0; i < (int)m_vpFilters.size(); i++) {
+            if (i != 0 && i != m_normalizeResizeIdx) {
+                m_vpFilters[i]->resetTemporalState();
+                temporalStateResetCount++;
+            }
+        }
+        PrintMes(RGY_LOG_DEBUG, _T("resolution change: reset temporal state for %d filters.\n"), temporalStateResetCount);
+        PrintMes(RGY_LOG_DEBUG, _T("resolution change: filter chain reconstruction completed.\n"));
+        return RGY_ERR_NONE;
+    }
 public:
     PipelineTaskCUDAVpp(NVGPUInfo *dev, std::vector<std::unique_ptr<NVEncFilter>>& vppfilters, NVEncFilterSsim *videoMetric,
     RGYQueueMPMP<CUFrameEnc *>& qEncodeBufferFree, bool rgbAsYUV444, int cudaStreamOpt, int cudaMT, int outMaxQueueSize, RGYParamThread threadParam, std::shared_ptr<RGYLog> log) :
         PipelineTask(PipelineTaskType::CUDA, dev, outMaxQueueSize, false, threadParam, log), m_vpFilters(vppfilters), m_videoMetric(videoMetric),
         m_frameReleaseData(dev->vidCtxLock(), 4, threadParam), m_inFrameUseFinEvent(), m_qEncodeBufferFree(qEncodeBufferFree), m_rgbAsYUV444(rgbAsYUV444),
-        m_cudaStreamOpt(cudaStreamOpt), m_cudaMT(cudaMT), m_eventDefaultToFilter(nullptr),m_streamFilter(nullptr), m_streamDownload(nullptr), m_cuvidPrev(), m_encode(nullptr) {
+        m_cudaStreamOpt(cudaStreamOpt), m_cudaMT(cudaMT), m_eventDefaultToFilter(nullptr),m_streamFilter(nullptr), m_streamDownload(nullptr), m_cuvidPrev(), m_encode(nullptr),
+        m_normalizeTargetFrame(), m_normalizeResizeParam(), m_normalizeFilterCsp(RGY_CSP_NA),
+        m_inputCropOffsetW(0), m_inputCropOffsetH(0), m_normalizeResizeIdx(-1) {
 
         NVEncCtxAutoLock(ctxlock(m_dev->vidCtxLock()));
         if (cudaStreamOpt > 1) {
@@ -3394,6 +3764,24 @@ public:
         m_videoMetric = videoMetric;
     }
 
+    //以下4つは入力途中の解像度変更対応用のパラメータ設定。NVEncCore::initPipeline()から呼ばれる
+    void setNormalizeTargetFrame(const RGYFrameInfo& targetFrame) {
+        m_normalizeTargetFrame = targetFrame;
+    }
+
+    void setNormalizeResizeParam(const std::shared_ptr<NVEncFilterParamResize>& resizeParam) {
+        m_normalizeResizeParam = resizeParam;
+    }
+
+    void setNormalizeFilterCsp(const RGY_CSP filterCsp) {
+        m_normalizeFilterCsp = filterCsp;
+    }
+
+    void setInputCropOffset(const int cropOffsetW, const int cropOffsetH) {
+        m_inputCropOffsetW = cropOffsetW;
+        m_inputCropOffsetH = cropOffsetH;
+    }
+
     FrameReleaseData<cudaEvent_t> *cuvidFrameReleaseData() {
         return &m_frameReleaseData;
     }
@@ -3430,9 +3818,11 @@ public:
                 PrintMes(RGY_LOG_ERROR, _T("Invalid task surface.\n"));
                 return RGY_ERR_NULL_PTR;
             }
+            auto surfVppInCuvid = taskSurf->surf().cuvid();
+            const bool isCuvidInput = (surfVppInCuvid != nullptr);
             // cudaをマルチスレッドで使用しない場合(cudaMT=0)は、ここで待機する (cudaMTが1のときはこれはなにもしない)
             m_frameReleaseData.waitFrameSingleThread(0);
-            if (auto surfVppInCuvid = taskSurf->surf().cuvid(); surfVppInCuvid != nullptr) {
+            if (isCuvidInput) {
                 // cuvidでは、cuvidのmap/unmapが同時に多重にできないので、まず前のフレームを解放を待つ (cudaMTがtrueのとき)
                 m_frameReleaseData.waitUntilEmptyMultiThread();
                 PrintMes(RGY_LOG_TRACE, _T("filter_frame: map video frame: %d, %lld.\n"), surfVppInCuvid->dispInfo()->picture_index, surfVppInCuvid->dispInfo()->timestamp);
@@ -3455,6 +3845,48 @@ public:
             } else {
                 PrintMes(RGY_LOG_ERROR, _T("Invalid task surface (not opencl or amf).\n"));
                 return RGY_ERR_NULL_PTR;
+            }
+            //入力途中の解像度変更の検出。上流(reader/デコーダ)は既に新解像度で出力してきているので、ここでチェーンを組み替える。
+            //読み込み時にcrop済みの構成では入力サーフェスの解像度はcrop前(srcWidth/Height)のままなので、
+            //その差分(m_inputCropOffsetW/H)を引いてフィルタチェーンの入力解像度と比較する。
+            if (frame && !filterframes.empty() && !m_vpFilters.empty() && filterframes.front().first.ptr[0] != nullptr) {
+                auto inputFrame = filterframes.front().first;
+                inputFrame.width -= m_inputCropOffsetW;
+                inputFrame.height -= m_inputCropOffsetH;
+                const auto& expectedFrame = m_vpFilters.front()->GetFilterParam()->frameIn;
+                if (inputFrame.width != expectedFrame.width || inputFrame.height != expectedFrame.height) {
+                    PrintMes(RGY_LOG_DEBUG, _T("resolution change detected in CUDA filter input: %dx%d -> %dx%d.\n"),
+                        expectedFrame.width, expectedFrame.height, inputFrame.width, inputFrame.height);
+                    //チェーンを組み替える前に、フィルタ内部に溜まっている旧解像度のフレームをすべて吐き出させる。
+                    //nullフレームを渡すのがdrain要求で、RGY_ERR_MORE_DATAが返るまで繰り返す(=これ以上出るものがない)。
+                    //ここで得られた出力はm_outQeueueに積まれ、組み替え後のフレームより先に下流へ流れる。
+                    //回数上限を設けているのは、フィルタの不具合等でMORE_DATAが返らない場合に無限ループするのを防ぐため。
+                    const size_t queueSizeBefore = m_outQeueue.size();
+                    int drainLoops = 0;
+                    for (;;) {
+                        if (drainLoops >= 1024) {
+                            PrintMes(RGY_LOG_ERROR, _T("Failed to drain filter chain on resolution change: too many iterations.\n"));
+                            return RGY_ERR_UNKNOWN;
+                        }
+                        drainLoops++;
+                        std::unique_ptr<PipelineTaskOutput> nullFrame;
+                        const auto sts = sendFrame(nullFrame);
+                        if (sts == RGY_ERR_MORE_DATA) {
+                            break;
+                        }
+                        if (sts != RGY_ERR_NONE) {
+                            PrintMes(RGY_LOG_ERROR, _T("Failed to drain filter chain on resolution change: %s.\n"), get_err_mes(sts));
+                            return sts;
+                        }
+                    }
+                    PrintMes(RGY_LOG_DEBUG, _T("resolution change: filter chain drained (loops: %d, frames queued: %d).\n"),
+                        drainLoops, (int)(m_outQeueue.size() - queueSizeBefore));
+                    const auto sts = reconstructFilterChain(inputFrame);
+                    if (sts != RGY_ERR_NONE) {
+                        return sts;
+                    }
+                    PrintMes(RGY_LOG_DEBUG, _T("resolution change: resuming filter processing.\n"));
+                }
             }
         }
         if (m_stopwatch) m_stopwatch->add(0, 0);

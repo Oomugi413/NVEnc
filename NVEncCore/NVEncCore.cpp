@@ -86,7 +86,7 @@
 #include "NVEncFilterNGX.h"
 #include "NVEncFilterOnnx.h"
 #include "NVEncFilterRifeOV.h"
-#include "NVEncFilterStDeint.h"
+#include "NVEncFilterOnnxDeint.h"
 #include "NVEncFilterAnime4k.h"
 #include "NVEncFilterLibplacebo.h"
 #include "NVEncFilterDeband.h"
@@ -178,7 +178,7 @@ static int vpp_deinterlacer_filter_count_wo_vppnv(const InEncodeVideoParam *inpu
     if (inputParam->vpp.kfm.enable) deinterlacer++;
     if (inputParam->vpp.yadif.enable) deinterlacer++;
     if (inputParam->vpp.decomb.enable) deinterlacer++;
-    if (inputParam->vpp.stdeint.enable) deinterlacer++;
+    if (inputParam->vpp.onnxDeint.enable) deinterlacer++;
     if (inputParam->vpp.bwdif.enable) deinterlacer++;
     if (inputParam->vpp.ivtc.enable) deinterlacer++;
     return deinterlacer;
@@ -385,6 +385,10 @@ NVEncCore::NVEncCore() :
     m_videoIgnoreTimestampError(DEFAULT_VIDEO_IGNORE_TIMESTAMP_ERROR),
     m_vpFilters(),
     m_pLastFilterParam(),
+    m_normalizeResizeParam(),
+    m_normalizeFilterCsp(RGY_CSP_NA),
+    m_inputCropOffsetW(0),
+    m_inputCropOffsetH(0),
 #if ENABLE_SSIM
     m_videoQualityMetric(),
 #endif //#if ENABLE_SSIM
@@ -1734,7 +1738,9 @@ RGY_ERR NVEncCore::InitDecoder(const InEncodeVideoParam *inputParam) {
 
         m_pDecoder.reset(new CuvidDecode());
 
-        auto result = m_pDecoder->InitDecode(m_dev->vidCtxLock(), &inputParam->input, &inputParam->vppnv, streamIn->time_base, m_pLog, inputParam->nHWDecType, enableCuvidResize(inputParam), inputParam->ctrl.lowLatency);
+        //--adapt-resolutionは表示解像度で受け取り、CUVID側でcoded size向けにアラインして初期上限へ変換する。
+        //input.srcWidth/Height自体は現在の入力解像度として下流の固定出力設計に使うため、ここで上書きしない。
+        auto result = m_pDecoder->InitDecode(m_dev->vidCtxLock(), &inputParam->input, &inputParam->vppnv, streamIn->time_base, m_pLog, inputParam->nHWDecType, enableCuvidResize(inputParam), inputParam->ctrl.lowLatency, inputParam->common.adaptResolution);
         if (result != CUDA_SUCCESS) {
             PrintMes(RGY_LOG_ERROR, _T("failed to init decoder.\n"));
             return RGY_ERR_UNSUPPORTED;
@@ -2183,10 +2189,24 @@ RGY_ERR NVEncCore::SetInputParam(InEncodeVideoParam *inputParam) {
             }
         }
     }
+    if (inputParam->brefMode == NV_ENC_BFRAME_REF_MODE_HIERARCHICAL) {
+        if (!m_dev->encoder()->checkAPIver(13, 1)) {
+            PrintMes(RGY_LOG_ERROR, _T("bref-mode hierarchical requires NVENC API 13.1 or later.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        if (inputParam->codec_rgy != RGY_CODEC_AV1) {
+            PrintMes(RGY_LOG_ERROR, _T("bref-mode hierarchical is supported only with AV1.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+    }
     if (inputParam->brefMode > NV_ENC_BFRAME_REF_MODE_DISABLED) {
         const int cap = codecFeature->getCapLimit(NV_ENC_CAPS_SUPPORT_BFRAME_REF_MODE);
         if ((cap & inputParam->brefMode) != inputParam->brefMode) {
-            error_feature_unsupported(RGY_LOG_WARN, strsprintf(_T("B Ref Mode %s"), get_chr_from_value(list_bref_mode, inputParam->brefMode)).c_str());
+            const bool hierarchical = inputParam->brefMode == NV_ENC_BFRAME_REF_MODE_HIERARCHICAL;
+            error_feature_unsupported(hierarchical ? RGY_LOG_ERROR : RGY_LOG_WARN, strsprintf(_T("B Ref Mode %s"), get_chr_from_value(list_bref_mode, inputParam->brefMode)).c_str());
+            if (hierarchical) {
+                return RGY_ERR_UNSUPPORTED;
+            }
             inputParam->brefMode = NV_ENC_BFRAME_REF_MODE_DISABLED;
         }
     }
@@ -2514,7 +2534,9 @@ RGY_ERR NVEncCore::SetInputParam(InEncodeVideoParam *inputParam) {
         m_stCreateEncodeParams.presetGUID = get_guid_from_value(inputParam->preset, list_nvenc_preset_names_ver9_2);
     }
     //Bフレーム数が3以下では強制的に無効
-    if (m_stEncConfig.frameIntervalP - 1 < 3 && inputParam->brefMode != NV_ENC_BFRAME_REF_MODE_DISABLED) {
+    if (m_stEncConfig.frameIntervalP - 1 < 3
+        && inputParam->brefMode != NV_ENC_BFRAME_REF_MODE_DISABLED
+        && inputParam->brefMode != NV_ENC_BFRAME_REF_MODE_HIERARCHICAL) {
         const auto loglevel = (inputParam->brefMode != NV_ENC_BFRAME_REF_MODE_AUTO && m_stEncConfig.frameIntervalP - 1 > 0) ? RGY_LOG_WARN : RGY_LOG_DEBUG;
         PrintMes(loglevel, _T("bref-mode will be disabled as B-frames is smaller than 3.\n"));
         inputParam->brefMode = NV_ENC_BFRAME_REF_MODE_DISABLED;
@@ -2649,7 +2671,7 @@ RGY_ERR NVEncCore::SetInputParam(InEncodeVideoParam *inputParam) {
     set_bitDepth(m_stCreateEncodeParams.encodeConfig->encodeCodecConfig, inputParam->codec_rgy, m_dev->encoder()->getAPIver(), (NV_ENC_BIT_DEPTH)clamp(inputParam->outputDepth, 8, 10));
 
     if (inputParam->codec_rgy == RGY_CODEC_HEVC || inputParam->codec_rgy == RGY_CODEC_AV1) {
-        if (!m_dev->encoder()->checkAPIver(13, 0)) {
+        if (m_dev->encoder()->checkAPIver(13, 0)) {
             set_enableTemporalSVC(m_stCreateEncodeParams.encodeConfig->encodeCodecConfig, inputParam->codec_rgy, inputParam->temporalSVC ? 1 : 0);
         }
     }
@@ -2666,6 +2688,33 @@ RGY_ERR NVEncCore::SetInputParam(InEncodeVideoParam *inputParam) {
 
     if (inputParam->temporalLayers.has_value()) {
         set_temporalLayers(m_stCreateEncodeParams.encodeConfig->encodeCodecConfig, inputParam->codec_rgy, inputParam->temporalLayers.value(), m_dev->encoder()->getAPIver());
+    }
+
+    if (inputParam->brefMode == NV_ENC_BFRAME_REF_MODE_HIERARCHICAL) {
+        const uint32_t frameIntervalP = m_stEncConfig.frameIntervalP;
+        if (frameIntervalP == 0 || frameIntervalP > 32 || (frameIntervalP & (frameIntervalP - 1)) != 0) {
+            PrintMes(RGY_LOG_ERROR, _T("bref-mode hierarchical requires --bframes 0, 1, 3, 7, 15, or 31.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        if (m_stEncConfig.rcParams.enableLookahead
+            && m_stEncConfig.rcParams.lookaheadLevel != NV_ENC_LOOKAHEAD_LEVEL_0) {
+            PrintMes(RGY_LOG_ERROR, _T("bref-mode hierarchical requires lookahead disabled or --lookahead-level 0.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        if (m_stEncConfig.rcParams.enableLookahead
+            && (!m_stEncConfig.rcParams.disableIadapt || !m_stEncConfig.rcParams.disableBadapt)) {
+            PrintMes(RGY_LOG_ERROR, _T("bref-mode hierarchical with lookahead requires --no-i-adapt and --no-b-adapt.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        if (m_stEncConfig.rcParams.multiPass != NV_ENC_MULTI_PASS_DISABLED) {
+            PrintMes(RGY_LOG_ERROR, _T("bref-mode hierarchical requires --multipass none.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        if (m_stCreateEncodeParams.splitEncodeMode != NV_ENC_SPLIT_AUTO_MODE
+            && m_stCreateEncodeParams.splitEncodeMode != NV_ENC_SPLIT_DISABLE_MODE) {
+            PrintMes(RGY_LOG_ERROR, _T("bref-mode hierarchical requires --split-enc auto or disable.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
     }
 
     auto require_repeat_headers = [this, inputParam]() {
@@ -2960,7 +3009,7 @@ std::vector<VppType> NVEncCore::InitFiltersCreateVppList(const InEncodeVideoPara
     if (inputParam->vpp.rtgmc_edi.enable && !degrainLegacy) filterPipeline.push_back(VppType::CL_RTGMC_EDI);
     if (inputParam->vpp.yadif.enable)         filterPipeline.push_back(VppType::CL_YADIF);
     if (inputParam->vpp.decomb.enable)        filterPipeline.push_back(VppType::CL_DECOMB);
-    if (inputParam->vpp.stdeint.enable)       filterPipeline.push_back(VppType::CL_STDEINT);
+    if (inputParam->vpp.onnxDeint.enable)    filterPipeline.push_back(VppType::CL_ONNX_DEINT);
     if (inputParam->vpp.bwdif.enable)         filterPipeline.push_back(VppType::CL_BWDIF);
     if (inputParam->vpp.ivtc.enable)          filterPipeline.push_back(VppType::CL_IVTC);
     if (inputParam->vpp.decimate.enable)      filterPipeline.push_back(VppType::CL_DECIMATE);
@@ -3102,6 +3151,10 @@ RGY_ERR NVEncCore::InitFilters(const InEncodeVideoParam *inputParam) {
         inputFrame.width = croppedWidth;
         inputFrame.height = croppedHeight;
     }
+    //入力サーフェスの解像度はcrop前(srcWidth/Height)のままなので、読み込み時にcrop済みの構成では
+    //フィルタチェーンの入力解像度との間に差が生じる。解像度変更の検出時にこの差分を補正するため保持しておく。
+    m_inputCropOffsetW = inputParam->input.srcWidth - inputFrame.width;
+    m_inputCropOffsetH = inputParam->input.srcHeight - inputFrame.height;
     // 読み込み時に同時にGPUに転送されるので、スタートは常にGPU
     inputFrame.mem_type = RGY_MEM_TYPE_GPU;
     m_encFps = rgy_rational<int>(inputParam->input.fpsN, inputParam->input.fpsD);
@@ -3346,6 +3399,30 @@ RGY_ERR NVEncCore::InitFilters(const InEncodeVideoParam *inputParam) {
     }
     m_uEncWidth = inputFrame.width;
     m_uEncHeight = inputFrame.height;
+    //入力途中の解像度変更が起きた際に挿入する、元の解像度へ戻す正規化resizeのパラメータ雛形を作っておく。
+    //実際にフィルタを生成するのはPipelineTaskCUDAVpp::reconstructFilterChain()で、解像度が変わるまで生成はされない。
+    m_normalizeResizeParam = std::make_shared<NVEncFilterParamResize>();
+    if (inputParam->vpp.resize_algo == RGY_VPP_RESIZE_AUTO) {
+        //autoは拡大/縮小の比率から実際のアルゴリズムを決めるが、ここでは比率が事前に決まらないのでbicubic固定とする
+        m_normalizeResizeParam->interp = RGY_VPP_RESIZE_BICUBIC;
+        PrintMes(RGY_LOG_DEBUG, _T("resolution change: normalization resize uses bicubic for auto resize mode.\n"));
+    //nvvfx/ngx/libplaceboのresizeは初期化時の解像度に固定された外部ライブラリのモデル/コンテキストを持つため、
+    //解像度が動的に変わる正規化resizeには使えない。bicubicへフォールバックする(警告を出してユーザーに知らせる)。
+    } else if (isNvvfxResizeFiter(inputParam->vpp.resize_algo)
+        || isNgxResizeFiter(inputParam->vpp.resize_algo)
+        || isLibplaceboResizeFiter(inputParam->vpp.resize_algo)) {
+        m_normalizeResizeParam->interp = RGY_VPP_RESIZE_BICUBIC;
+        PrintMes(RGY_LOG_WARN, _T("resolution change: normalization resize falls back from %s to bicubic.\n"),
+            get_chr_from_value(list_vpp_resize, inputParam->vpp.resize_algo));
+    } else {
+        m_normalizeResizeParam->interp = inputParam->vpp.resize_algo;
+    }
+    m_normalizeResizeParam->fsr1 = inputParam->vpp.resize_fsr1;
+    m_normalizeResizeParam->nis = inputParam->vpp.resize_nis;
+    m_normalizeResizeParam->bicubic = inputParam->vpp.resize_bicubic;
+    m_normalizeResizeParam->baseFps = m_encFps; //baseFpsが0だとフィルタのinitに失敗するので必ず設定する
+    m_normalizeResizeParam->bOutOverwrite = false;
+    m_normalizeFilterCsp = filterCsp;
     m_stPicStruct = picstruct_rgy_to_enc(inputFrame.picstruct);
     m_encVUI = inputParam->common.out_vui;
     if (m_rgbAsYUV444) {
@@ -3698,17 +3775,17 @@ RGY_ERR NVEncCore::AddFilterCUDA(std::vector<std::unique_ptr<NVEncFilter>>& cufi
         m_encFps = param->baseFps;
         return RGY_ERR_NONE;
     }
-    if (vppType == VppType::CL_STDEINT) {
-        unique_ptr<NVEncFilter> filter(new NVEncFilterStDeint());
-        shared_ptr<NVEncFilterParamStDeint> param(new NVEncFilterParamStDeint());
-        param->modelFile = inputParam->vpp.stdeint.modelFile;
+    if (vppType == VppType::CL_ONNX_DEINT) {
+        unique_ptr<NVEncFilter> filter(new NVEncFilterOnnxDeint());
+        shared_ptr<NVEncFilterParamOnnxDeint> param(new NVEncFilterParamOnnxDeint());
+        param->modelFile = inputParam->vpp.onnxDeint.modelFile;
         param->modelDir = inputParam->vpp.onnxModelDir;
-        param->provider = inputParam->vpp.stdeint.provider;
-        param->precision = inputParam->vpp.stdeint.precision;
+        param->provider = _T("auto");
+        param->precision = inputParam->vpp.onnxDeint.precision;
         param->cacheDir = inputParam->vpp.onnx.cacheDir;
-        param->mode = inputParam->vpp.stdeint.mode;
-        param->colormatrix = inputParam->vpp.stdeint.colormatrix;
-        param->colorrange = inputParam->vpp.stdeint.colorrange;
+        param->mode = inputParam->vpp.onnxDeint.mode;
+        param->colormatrix = inputParam->vpp.onnxDeint.colormatrix;
+        param->colorrange = inputParam->vpp.onnxDeint.colorrange;
         param->deviceID = m_dev->id();
         param->frameIn = inputFrame;
         param->frameOut = inputFrame;
@@ -5854,9 +5931,15 @@ RGY_ERR NVEncCore::initPipeline(const InEncodeVideoParam *prm) {
         m_pipelineTasks.push_back(std::make_unique<PipelineTaskCUDAVpp>(m_dev.get(), vppblock.vppnv, m_videoQualityMetric.get(),
             m_encRunCtx->qEncodeBufferFree(), m_rgbAsYUV444, prm->cudaStreamOpt, prm->cudaMT, 1, prm->ctrl.threadParams.get(RGYThreadType::FILTER), m_pLog));
         auto taskCudaVpp = dynamic_cast<PipelineTaskCUDAVpp *>(m_pipelineTasks.back().get());
+        //解像度変更時の正規化resizeの戻し先は、そのフィルタブロックの先頭フィルタの出力解像度(=下流が期待する解像度)
+        taskCudaVpp->setNormalizeTargetFrame(vppblock.vppnv.front()->GetFilterParam()->frameOut);
+        taskCudaVpp->setNormalizeResizeParam(m_normalizeResizeParam);
+        taskCudaVpp->setNormalizeFilterCsp(m_normalizeFilterCsp);
         taskLastCudaVpp = taskCudaVpp;
         if (taskFirstCudaVpp == nullptr) {
             taskFirstCudaVpp = taskCudaVpp;
+            //入力サーフェスとフィルタ入力の解像度差(crop分)が生じるのは先頭のフィルタブロックのみ
+            taskCudaVpp->setInputCropOffset(m_inputCropOffsetW, m_inputCropOffsetH);
         }
     }
     if (m_pipelineTasks.size() > 0 && taskNVDec) {
@@ -5920,6 +6003,29 @@ RGY_ERR NVEncCore::initPipeline(const InEncodeVideoParam *prm) {
         return RGY_ERR_INVALID_OPERATION;
     }
 
+    // 各タスクに次のタスクを教えておく。ワークサーフェスの確保は隣接タスクの要求の両方を見る必要があり、
+    // それを各タスク自身(PipelineTask::allocWorkSurfaces())で行えるようにするため、確保前にここでチェーンを張る。
+    PipelineTask *t0 = m_pipelineTasks[0].get();
+    for (size_t ip = 1; ip < m_pipelineTasks.size(); ip++) {
+        if (t0->isPassThrough()) {
+            PrintMes(RGY_LOG_ERROR, _T("setNextTask: t0 cannot be path through task!\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        PipelineTask *t1 = nullptr;
+        for (; ip < m_pipelineTasks.size(); ip++) {
+            if (!m_pipelineTasks[ip]->isPassThrough()) { // isPassThroughがtrueなtaskはスキップ
+                t1 = m_pipelineTasks[ip].get();
+                break;
+            }
+        }
+        if (t1 == nullptr) {
+            PrintMes(RGY_LOG_ERROR, _T("setNextTask: invalid pipeline, t1 not found!\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
+        t0->setNextTask(t1);
+        t0 = t1;
+    }
+
     PrintMes(RGY_LOG_DEBUG, _T("Created pipeline.\n"));
     for (auto& p : m_pipelineTasks) {
         PrintMes(RGY_LOG_DEBUG, _T("  %s\n"), p->print().c_str());
@@ -5941,48 +6047,28 @@ RGY_ERR NVEncCore::allocatePiplelineFrames(const InEncodeVideoParam *prm) {
     const int asyncdepth = 3;
     PrintMes(RGY_LOG_DEBUG, _T("allocFrames: m_nAsyncDepth - %d frames\n"), asyncdepth);
 
-    PipelineTask *t0 = m_pipelineTasks[0].get();
-    for (size_t ip = 1; ip < m_pipelineTasks.size(); ip++) {
-        if (t0->isPassThrough()) {
-            PrintMes(RGY_LOG_ERROR, _T("allocFrames: t0 cannot be path through task!\n"));
-            return RGY_ERR_UNSUPPORTED;
-        }
-        // 次のtaskを見つける
-        PipelineTask *t1 = nullptr;
-        for (; ip < m_pipelineTasks.size(); ip++) {
-            if (!m_pipelineTasks[ip]->isPassThrough()) { // isPassThroughがtrueなtaskはスキップ
-                t1 = m_pipelineTasks[ip].get();
-                break;
-            }
-        }
-        if (t1 == nullptr) {
-            PrintMes(RGY_LOG_ERROR, _T("AllocFrames: invalid pipeline, t1 not found!\n"));
-            return RGY_ERR_UNSUPPORTED;
-        }
+    // 隣接タスクの対はinitPipeline()で構築済みのm_nextTaskチェーンをたどる
+    // (isPassThroughなタスクのスキップはinitPipeline()側で処理済み)
+    for (PipelineTask *t0 = m_pipelineTasks[0].get(); t0->nextTask() != nullptr; t0 = t0->nextTask()) {
+        PipelineTask *t1 = t0->nextTask();
         PrintMes(RGY_LOG_DEBUG, _T("AllocFrames: %s-%s\n"), t0->print().c_str(), t1->print().c_str());
 
-        const auto t0Alloc = t0->requiredSurfOut();
-        const auto t1Alloc = t1->requiredSurfIn();
-        int t0RequestNumFrame = 0;
-        int t1RequestNumFrame = 0;
-        RGYFrameInfo allocateFrameInfo;
-        if (t0Alloc.has_value() && t1Alloc.has_value()) {
-            t0RequestNumFrame = t0Alloc.value().second;
-            t1RequestNumFrame = t1Alloc.value().second;
-            allocateFrameInfo = (t0->workSurfacesAllocPriority() >= t1->workSurfacesAllocPriority()) ? t0Alloc.value().first : t1Alloc.value().first;
-            allocateFrameInfo.width = std::max(t0Alloc.value().first.width, t1Alloc.value().first.width);
-            allocateFrameInfo.height = std::max(t0Alloc.value().first.height, t1Alloc.value().first.height);
-        } else if (t0Alloc.has_value()) {
-            allocateFrameInfo = t0Alloc.value().first;
-            t0RequestNumFrame = t0Alloc.value().second;
-        } else if (t1Alloc.has_value()) {
-            allocateFrameInfo = t1Alloc.value().first;
-            t1RequestNumFrame = t1Alloc.value().second;
-        } else {
-            PrintMes(RGY_LOG_ERROR, _T("AllocFrames: invalid pipeline: cannot get request from either t0 or t1!\n"));
-            return RGY_ERR_UNSUPPORTED;
-        }
         if (t1->taskType() == PipelineTaskType::NVENC) {
+            const auto t0Alloc = t0->requiredSurfOut();
+            const auto t1Alloc = t1->requiredSurfIn();
+            int t0RequestNumFrame = 0;
+            int t1RequestNumFrame = 0;
+            if (t0Alloc.has_value() && t1Alloc.has_value()) {
+                t0RequestNumFrame = t0Alloc.value().second;
+                t1RequestNumFrame = t1Alloc.value().second;
+            } else if (t0Alloc.has_value()) {
+                t0RequestNumFrame = t0Alloc.value().second;
+            } else if (t1Alloc.has_value()) {
+                t1RequestNumFrame = t1Alloc.value().second;
+            } else {
+                PrintMes(RGY_LOG_ERROR, _T("AllocFrames: invalid pipeline: cannot get request from either t0 or t1!\n"));
+                return RGY_ERR_UNSUPPORTED;
+            }
             const int requestNumFrames = m_encodeBufferCount + t0RequestNumFrame + t1RequestNumFrame + asyncdepth + 1;
             const auto allocStart = std::chrono::steady_clock::now();
             auto sts = m_encRunCtx->allocEncodeBuffer(m_uEncWidth, m_uEncHeight, GetEncBufferFormat(prm), m_stPicStruct, rgy_csp_has_alpha(prm->outputCsp), requestNumFrames);
@@ -5993,25 +6079,13 @@ RGY_ERR NVEncCore::allocatePiplelineFrames(const InEncodeVideoParam *prm) {
             PrintMes(RGY_LOG_DEBUG, _T("AllocFrames: %s-%s, type: NVENC, %dx%d, request %d frames, %lld ms\n"),
                 t0->print().c_str(), t1->print().c_str(), m_uEncWidth, m_uEncHeight, requestNumFrames, (lls)elapsed_ms(allocStart));
             t0->setWorkSurfaces(m_encRunCtx->stEncodeBuffer(), m_encRunCtx->qEncodeBufferFree(), m_dev->encoder(), m_rgbAsYUV444);
-        } else if (t0->taskType() != PipelineTaskType::NVDEC) {
-            const int requestNumFrames = std::max(1, t0RequestNumFrame + t1RequestNumFrame + asyncdepth + 1);
-            PrintMes(RGY_LOG_DEBUG, _T("AllocFrames: %s-%s, type: CL, %s %dx%d, request %d frames\n"),
-                t0->print().c_str(), t1->print().c_str(), RGY_CSP_NAMES[allocateFrameInfo.csp],
-                allocateFrameInfo.width, allocateFrameInfo.height, requestNumFrames);
-            const auto allocStart = std::chrono::steady_clock::now();
-            auto sts = t0->workSurfacesAllocCUBuf(requestNumFrames, allocateFrameInfo);
+        } else {
+            auto sts = t0->allocWorkSurfaces(asyncdepth);
             if (sts != RGY_ERR_NONE) {
                 PrintMes(RGY_LOG_ERROR, _T("AllocFrames:   Failed to allocate frames for %s-%s: %s."), t0->print().c_str(), t1->print().c_str(), get_err_mes(sts));
                 return sts;
             }
-            CUDA_DEBUG_SYNC_ERR;
-            PrintMes(RGY_LOG_DEBUG, _T("AllocFrames: %s-%s, type: CL, request %d frames, %lld ms\n"),
-                t0->print().c_str(), t1->print().c_str(), requestNumFrames, (lls)elapsed_ms(allocStart));
-        } else {
-            PrintMes(RGY_LOG_DEBUG, _T("AllocFrames: %s-%s, allocation skipped (decoder-managed surfaces)\n"),
-                t0->print().c_str(), t1->print().c_str());
         }
-        t0 = t1;
     }
     // 最後がエンコーダでない場合の特例
     if (   m_pipelineTasks.back()->taskType() != PipelineTaskType::NVENC
@@ -6799,8 +6873,15 @@ NVENCSTATUS NVEncCore::Encode() {
         if (nLastPts >= outPtsSource) {
             if (nLastPts - outPtsSource >= 32 * nOutFrameDuration) {
                 PrintMes(RGY_LOG_DEBUG, _T("check_pts: previous pts %lld, current pts %lld, estimated pts %lld, nOutFirstPts %lld, changing offset.\n"), nLastPts, outPtsSource, nOutEstimatedPts, nOutFirstPts);
-                nOutFirstPts += (outPtsSource - nOutEstimatedPts); //今後の位置合わせのための補正
-                outPtsSource = nOutEstimatedPts;
+                //nOutEstimatedPtsはCFR仮定でoutDurationを積み上げた値のため、vfrや長尺では
+                //実際の出力pts(nLastPts)から徐々にずれていく(長尺TSで数十フレーム分遅れる例あり)。
+                //そのままnOutEstimatedPtsを採用すると出力ptsが直前のフレームより前に戻ってしまい、
+                //muxerに "non monotonically increasing dts" で拒否されて出力が破綻するため、
+                //必ず直前のフレームより後になる位置を選ぶ
+                const auto tsOutNext = std::max(nOutEstimatedPts, nLastPts + nOutFrameDuration);
+                nOutFirstPts += (outPtsSource - tsOutNext); //今後の位置合わせのための補正
+                outPtsSource = tsOutNext;
+                nOutEstimatedPts = tsOutNext; //ずれをここで解消しておかないと、以降のフレームでも同じ逆行が起こる
                 PrintMes(RGY_LOG_DEBUG, _T("check_pts:   changed to nOutFirstPts %lld, outPtsSource %lld.\n"), nOutFirstPts, outPtsSource);
                 ignoreVideoTimestampErrorCount = 0;
             } else {

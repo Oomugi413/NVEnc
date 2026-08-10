@@ -190,6 +190,7 @@
   - [--tcfile-in \<string\>](#--tcfile-in-string)
   - [--timebase \<int\>/\<int\>](#--timebase-intint)
   - [--input-hevc-bsf \<string\>](#--input-hevc-bsf-string)
+  - [--adapt-resolution \<int\>x\<int\>](#--adapt-resolution-intxint)
   - [--input-pixel-format \<string\>](#--input-pixel-format-string)
   - [--offset-video-dts-advance](#--offset-video-dts-advance)
   - [--allow-other-negative-pts](#--allow-other-negative-pts)
@@ -265,10 +266,10 @@
   - [--vpp-fruc \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-fruc-param1value1param2value2)
   - [--vpp-anime4k-shader \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-anime4k-shader-param1value1param2value2)
   - [--vpp-onnx \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-onnx-param1value1param2value2)
+  - [--vpp-onnx-deint \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-onnx-deint-param1value1param2value2)
   - [--vpp-onnx-model-dir \<string\>](#--vpp-onnx-model-dir-string)
   - [--vpp-onnx-cache-dir \<string\>](#--vpp-onnx-cache-dir-string)
   - [--vpp-rife-ov \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-rife-ov-param1value1param2value2)
-  - [--vpp-stdeint \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-stdeint-param1value1param2value2)
   - [--vpp-perf-monitor](#--vpp-perf-monitor)
   - [--vpp-nvvfx-model-dir \<string\>](#--vpp-nvvfx-model-dir-string)
 - [制御系のオプション](#制御系のオプション)
@@ -818,6 +819,15 @@ Bフレームの参照モードを指定する。
 - disabled
 - each ... すべてのBフレームを参照フレームとして利用する  
 - middle ... 偶数番目のBフレームのみが参照フレームとして利用できる  
+- hierarchical ... 階層型Bフレーム参照を使用する (AV1、NVENC API 13.1以降)
+
+`hierarchical` には次の制約があります。
+
+- `--bframes` は 0、1、3、7、15、31 のいずれかにする必要があります。
+- Lookaheadは無効にする必要があります。有効にする場合は、`--lookahead-level 0`、`--no-i-adapt`、`--no-b-adapt` をすべて指定してください。
+- `--multipass` は `none` にする必要があります。
+- `--split-enc` は `auto` (推奨) または `disable` にする必要があります。
+- PTDを有効にする必要があります。NVEncCではPTDを常に有効にしています。
 
 ### --temporal-layers &lt;int&gt;  
 hierarchialフレームの階層数を指定する。
@@ -1274,6 +1284,7 @@ avcodec映像エンコーダのパラメータをkey=value形式でカンマ区�
 tsなどでエラーが出るなどしてうまく動作しない場合は、[--audio-codec](#--audio-codec-intstring)で一度エンコードしたほうが安定動作するかもしれない。
 
 [&lt;int&gt;[,&lt;int&gt;]...]で、抽出する音声トラック(1,2,...)を指定したり、[&lt;string&gt;]で指定した言語の音声トラックをコピーすることもできる。
+言語の先頭に `!` を付けると、それらの言語以外のすべてのトラックを選択する (例: `!eng,!jpn`)。
 
 - 使用例
   ```
@@ -1291,6 +1302,7 @@ tsなどでエラーが出るなどしてうまく動作しない場合は、[--
 音声をエンコードして映像とともに出力する。使用可能なコーデックは[--check-encoders](#--check-codecs---check-decoders---check-encoders)で確認できる。
 
 [&lt;int&gt;]で音声トラック(1,2,...)を選択したり、[&lt;string&gt;]で指定した言語の音声トラックを選択することもできる。
+言語の先頭に `!` を付けると、それらの言語以外のすべてのトラックを選択する (例: `--audio-codec !eng,!jpn?copy`)。
 
 さらに、":"以降に音声エンコーダのオプションを指定したり、"#"以降に音声デコーダのオプションを指定することもできる。
 
@@ -1663,6 +1675,7 @@ nero形式、apple形式、matroska形式に対応する。--chapter-copyとは�
 字幕をコピーする。avhw/avswリーダー使用時のみ有効。
 
 [&lt;int&gt;[,&lt;int&gt;]...]で、抽出する字幕トラック(1,2,...)を指定したり、[&lt;string&gt;[,&lt;string&gt;]...]で指定した言語の字幕トラックをコピーすることもできる。
+言語の先頭に `!` を付けると、それらの言語以外のすべてのトラックを選択する (例: `!eng,!jpn`)。
 
 対応する字幕は、PGS/srt/txt/ttxtなど。
 
@@ -1810,6 +1823,13 @@ switch hevc bitstream filter used for hw decoder input. (for debug purpose)
   - libavcodec  
     libavcodec の hevc_mp4toannexb bitstream filter を使用する。
 
+### --adapt-resolution &lt;int&gt;x&lt;int&gt;
+入力途中の解像度変更で許容する最大解像度を指定する。
+
+avhwではCUVIDデコーダの最大解像度、avswでは入力サーフェスの確保解像度として使用する。指定値は入力開始時の解像度以上である必要がある。未指定時はコンテナが宣言している入力解像度を上限として使用する。
+
+上限を大きくするとデコードサーフェスや入力サーフェスのメモリ使用量が増加する。
+
 ### --input-pixel-format &lt;string&gt;
 avdeviceで使用する "pixel_format" の設定。(それ以外での用途での使用は想定していません)
 
@@ -1892,6 +1912,7 @@ vppフィルタの適用順は固定で、コマンドラインの順序によ�
 - [--vpp-fruc](#--vpp-overlay-param1value1param2value2)
 - [--vpp-anime4k-shader](#--vpp-anime4k-shader-param1value1param2value2)
 - [--vpp-onnx](#--vpp-onnx-param1value1param2value2)
+- [--vpp-onnx-deint](#--vpp-onnx-deint-param1value1param2value2)
 - [--vpp-onnx-model-dir](#--vpp-onnx-model-dir-string)
 - [--vpp-onnx-cache-dir](#--vpp-onnx-cache-dir-string)
 - [--vpp-rife-ov](#--vpp-rife-ov-param1value1param2value2)
@@ -4478,12 +4499,43 @@ sudo apt-get install libnvinfer10 libnvonnxparsers10
   --vpp-onnx model=hdrtvnetpp_agcm_dynamic,colormatrix=bt709 --output-depth 10 --colormatrix bt2020nc --colorprim bt2020 --transfer smpte2084
   ```
 
+### --vpp-onnx-deint [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+ONNXモデルを使うデインターレースフィルタ。モデルは `onnx_deint_models.json` に登録された名前で選択し、ONNXファイルの直接パスは受け付けない。マニフェストの `architecture` は内部メタデータであり、コマンドラインからは選択できない。
+
+`stdeint` と `stdeint_fast` は ST-DeInt（3ch入力、半分の高さの6ch出力）、`DDD` は DDD（3フィールドを転置した9ch入力、3ch出力）の登録名。`mode=bob` は入力1フレームから2枚のプログレッシブフレームを出力してフレームレートを2倍にし、`mode=normal` は表示順で先のフィールドを基準に1枚出力する。TFF/BFFのフィールド順を維持し、プログレッシブ入力はニューラル推論せずパススルーする。
+
+入力は8bit YUV420のみで、高さは4以上の偶数である必要がある。推論にはONNX RuntimeのCUDAまたはTensorRT execution providerを使用する。DDDはテンソルのpackと出力weaveをホストメモリで行い、推論自体はGPUで実行する。
+
+- **パラメータ**
+  - enable=&lt;bool&gt; (このオプション指定時のデフォルト: true)  
+    フィルタを有効または無効にする。
+  - model=&lt;string&gt; (必須)  
+    [`--vpp-onnx-model-dir`](#--vpp-onnx-model-dir-string) 配下の `onnx_deint_models.json` に登録された名前。`stdeint`、`stdeint_fast`、`DDD` などを指定し、ファイルパスは指定しない。
+  - precision=&lt;string&gt; (デフォルト: fp32)  
+    推論精度。fp32 / auto。`auto` ではTensorRT fp16を使用できる。
+  - mode=&lt;string&gt; (デフォルト: bob)  
+    出力方式。bob / normal。
+  - colormatrix=&lt;string&gt; (デフォルト: auto)  
+    入力色行列。auto / auto_res / bt709 / smpte170m / bt470bg / bt2020nc。
+  - colorrange=&lt;string&gt; (デフォルト: auto)  
+    入力色域。auto / limited (tv) / full (pc)。
+
+ST-DeIntとDDDのモデルファイルはNVEncにもHWEnc-onnx-modelsのリリースアーカイブにも含まれない。権利条件とライセンスを確認してモデルを別途生成または配置し、[HWEnc-onnx-models リポジトリ](https://github.com/rigaya/HWEnc-onnx-models)の `run_all.py` で `onnx_deint_models.json` を生成すること。
+
+```
+--vpp-onnx-model-dir C:\models\HWEnc-onnx-models
+--vpp-onnx-deint model=stdeint,mode=bob,precision=fp32
+--vpp-onnx-deint model=DDD,mode=normal,precision=auto
+```
+
 ### --vpp-onnx-model-dir &lt;string&gt;
 登録済みONNXモデルのmodels.jsonおよびモデルファイルが格納されたディレクトリを指定する。
 
 `--vpp-onnx model=<モデル名>` で短縮名を使用する場合、または `--vpp-onnx list` で登録モデル一覧を表示する場合は、このオプションの指定が必要。
 
 モデルファイルは [https://github.com/rigaya/HWEnc-onnx-models/releases](https://github.com/rigaya/HWEnc-onnx-models/releases) からダウンロードできる。zipファイルを任意のディレクトリに展開し、そのディレクトリを指定する。
+
+リリースアーカイブにはST-DeInt/DDDのモデルファイルとデインターレース用マニフェストは含まれない。これらは別途生成・配置し、権利条件とライセンスを確認したうえで、`run_all.py` で `onnx_deint_models.json` を生成してから `--vpp-onnx-deint` を使用すること。
 
 このオプションはモデルファイルの場所のみを指定する。ONNX Runtime GPU版、CUDA runtime、cuDNN、TensorRTなどのDLLは、別途 `PATH` または `NVEncC64.exe` と同じフォルダから見えるようにする必要がある。
 

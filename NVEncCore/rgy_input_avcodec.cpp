@@ -66,6 +66,8 @@ static inline void extend_array_size(VideoFrameData *dataset) {
 
 AVDemuxFormat::AVDemuxFormat() :
     formatCtx(nullptr),
+    programId(-1),
+    pmtVersion(-1),
     analyzeSec(0.0),
     isPipe(false),
     lowLatency(false),
@@ -127,6 +129,10 @@ AVDemuxVideo::AVDemuxVideo() :
     codecCtxDecode(nullptr),
     frame(nullptr),
     index(-1),
+    pmtTrackPos(-1),
+    pmtNoSuccessorWarned(false),
+    waitKeyAfterSwitch(false),
+    pmtSwitchDropCount(0),
     streamFirstKeyPts(0),
     beforeSeekStreamFirstKeyPts(0),
     firstPkt(nullptr),
@@ -279,6 +285,7 @@ RGYInputAvcodecPrm::RGYInputAvcodecPrm(RGYInputPrm base) :
     qpTableListRef(nullptr),
     inputOpt(),
     hevcbsf(RGYHEVCBsf::INTERNAL),
+    adaptResolution({ 0, 0 }),
     avswDecoder() {
 
 }
@@ -288,6 +295,8 @@ RGYInputAvcodec::RGYInputAvcodec() :
     m_logFramePosList(),
     m_fpPacketList(),
     m_hevcMp42AnnexbBuffer(),
+    m_maxSrcWidth(0),
+    m_maxSrcHeight(0),
     m_suppressPulldownDetect(false),
     m_pulldownDetected(false) {
     m_readerName = _T("av" DECODER_NAME "/avsw");
@@ -675,6 +684,11 @@ bool RGYInputAvcodec::isSelectedLangTrack(const std::string &lang, const AVStrea
     const auto &streamLang = getTrackLang(stream);
     if (streamLang.length() == 0) return false;
     return rgy_lang_equal(lang, streamLang);
+}
+
+bool RGYInputAvcodec::isNotExcludedLangTrack(const std::string &langs, const AVStream *stream) {
+    const auto langList = split(langs, ",");
+    return std::none_of(langList.begin(), langList.end(), [&](const auto& lang) { return isSelectedLangTrack(lang, stream); });
 }
 
 bool RGYInputAvcodec::isSelectedCodecTrack(const std::string &selectCodec, const AVStream *stream) {
@@ -1857,6 +1871,7 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
                 for (int i = 0; !useStream && i < input_prm->nSubtitleSelectCount; i++) {
                     if ((input_prm->ppSubtitleSelect[i]->trackID == 0 && input_prm->ppSubtitleSelect[i]->encCodec.length() > 0) //特に指定なし = 全指定かどうか
                         || (input_prm->ppSubtitleSelect[i]->trackID == TRACK_SELECT_BY_LANG && isSelectedLangTrack(input_prm->ppSubtitleSelect[i]->lang, srcStream))
+                        || (input_prm->ppSubtitleSelect[i]->trackID == TRACK_SELECT_BY_LANG_EXCLUDE && isNotExcludedLangTrack(input_prm->ppSubtitleSelect[i]->lang, srcStream))
                         || (input_prm->ppSubtitleSelect[i]->trackID == TRACK_SELECT_BY_CODEC && isSelectedCodecTrack(input_prm->ppSubtitleSelect[i]->selectCodec, srcStream))
                         || input_prm->ppSubtitleSelect[i]->trackID - 1 == (iTrack - m_Demux.format.audioTracks)) {
                         useStream = true;
@@ -1876,6 +1891,7 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
                 //音声の場合
                 for (int i = 0; !useStream && i < input_prm->nAudioSelectCount; i++) {
                     if ((input_prm->ppAudioSelect[i]->trackID == TRACK_SELECT_BY_LANG && isSelectedLangTrack(input_prm->ppAudioSelect[i]->lang, srcStream))
+                        || (input_prm->ppAudioSelect[i]->trackID == TRACK_SELECT_BY_LANG_EXCLUDE && isNotExcludedLangTrack(input_prm->ppAudioSelect[i]->lang, srcStream))
                         || (input_prm->ppAudioSelect[i]->trackID == TRACK_SELECT_BY_CODEC && isSelectedCodecTrack(input_prm->ppAudioSelect[i]->selectCodec, srcStream))
                         || (input_prm->ppAudioSelect[i]->trackID - 1 == (iTrack))) {
                         useStream = true;
@@ -1956,6 +1972,14 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
                 }
             }
         }
+    }
+
+    //merge_pmt_versionsが明示指定されている場合、PMT変更追従は行わない (ユーザー指定を尊重する)
+    const bool mergePmtVersions = std::any_of(input_prm->inputOpt.begin(), input_prm->inputOpt.end(),
+        [](const auto& opt) { return tchar_to_string(opt.first) == "merge_pmt_versions" && tchar_to_string(opt.second) != "0"; });
+    const auto pmtFollowErr = initPmtFollow(mergePmtVersions);
+    if (pmtFollowErr != RGY_ERR_NONE) {
+        return pmtFollowErr;
     }
 
     if (input_prm->readChapter) {
@@ -2290,6 +2314,26 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
         //情報を格納
         m_inputVideoInfo.srcWidth    = m_Demux.video.stream->codecpar->width;
         m_inputVideoInfo.srcHeight   = m_Demux.video.stream->codecpar->height;
+        // avcodec readerは--avswだけでなく、--avhwへ圧縮パケットを供給する経路でも使われる。
+        // ここではヘッダ解析後の実際の初期解像度を基準に、入力中に許可する物理上限を固定する。
+        // m_inputVideoInfo.srcWidth/Heightはフレームごとに変化する現在の論理解像度、m_maxSrcWidth/Heightは
+        // pipelineが先行確保したサーフェスと一致させる不変の上限で、両者を兼用してはいけない。
+        // 初期値より小さい指定は処理開始前に失敗させる。pipeline側でも同じ検査を行うのは、
+        // avcodec以外のreaderも共通パラメータを通るため。未指定時は初期解像度を上限とし、従来のメモリ使用量を保つ。
+        if (input_prm->adaptResolution.first > 0 && input_prm->adaptResolution.second > 0) {
+            if (input_prm->adaptResolution.first < m_inputVideoInfo.srcWidth
+                || input_prm->adaptResolution.second < m_inputVideoInfo.srcHeight) {
+                AddMessage(RGY_LOG_ERROR, _T("--adapt-resolution %dx%d is smaller than the initial input resolution %dx%d.\n"),
+                    input_prm->adaptResolution.first, input_prm->adaptResolution.second,
+                    m_inputVideoInfo.srcWidth, m_inputVideoInfo.srcHeight);
+                return RGY_ERR_INVALID_PARAM;
+            }
+            m_maxSrcWidth = input_prm->adaptResolution.first;
+            m_maxSrcHeight = input_prm->adaptResolution.second;
+        } else {
+            m_maxSrcWidth = m_inputVideoInfo.srcWidth;
+            m_maxSrcHeight = m_inputVideoInfo.srcHeight;
+        }
         m_inputVideoInfo.sar[0]      = (bAspectRatioUnknown) ? 0 : m_Demux.video.stream->codecpar->sample_aspect_ratio.num;
         m_inputVideoInfo.sar[1]      = (bAspectRatioUnknown) ? 0 : m_Demux.video.stream->codecpar->sample_aspect_ratio.den;
         m_inputVideoInfo.frames      = 0;
@@ -2831,7 +2875,352 @@ bool RGYInputAvcodec::checkStreamPacketToAdd(AVPacket *pkt, AVDemuxStream *strea
     return result;
 }
 
+//追従対象program内で、codec_typeが一致するnth番目のstream indexを返す (見つからなければ-1)
+//initPmtFollow()が記録したpmtTrackPos(=nth)を、いまのPMTでのstream indexに引き直すための関数。
+//PMT変更でPIDもstream indexも変わるため、program内の序数だけが切替前後をつなぐ手がかりになる
+int RGYInputAvcodec::findStreamInProgram(const AVProgram *prog, AVMediaType type, int nth) const {
+    if (prog == nullptr || nth < 0 || m_Demux.format.formatCtx == nullptr) {
+        return -1;
+    }
+    int count = 0;
+    for (uint32_t i = 0; i < prog->nb_stream_indexes; i++) {
+        const uint32_t streamIndex = prog->stream_index[i];
+        if (streamIndex >= m_Demux.format.formatCtx->nb_streams) {
+            continue;
+        }
+        const auto *stream = m_Demux.format.formatCtx->streams[streamIndex];
+        if (stream != nullptr && stream->codecpar != nullptr && stream->codecpar->codec_type == type) {
+            if (count == nth) {
+                return static_cast<int>(streamIndex);
+            }
+            count++;
+        }
+    }
+    return -1;
+}
+
+//追従対象のAVProgramを返す (追従しない場合や見つからない場合はnullptr)
+const AVProgram *RGYInputAvcodec::getFollowProgram() const {
+    if (m_Demux.format.programId < 0 || m_Demux.format.formatCtx == nullptr) {
+        return nullptr;
+    }
+    for (uint32_t i = 0; i < m_Demux.format.formatCtx->nb_programs; i++) {
+        const auto *program = m_Demux.format.formatCtx->programs[i];
+        if (program != nullptr && program->id == m_Demux.format.programId) {
+            return program;
+        }
+    }
+    return nullptr;
+}
+
+//PMT変更追従の初期化。オープン直後に一度だけ呼ぶ
+//
+//【何をするか】
+//  (1) 追従対象とするprogram(番組)を1つ決めて m_Demux.format.programId に記録する
+//  (2) 各トラックが「そのprogram内で同じcodec_typeの何番目か」を pmtTrackPos に記録する
+//  この2つ以外は何も変えない(挙動を変えるのは checkPmtChange() 側)。
+//
+//【なぜ「何番目か」を覚えるのか】
+//  TSのPMTが変更されると(サブチャンネル分割など)、PIDが変わり、libavformatは
+//  新しいAVStreamを追加する。このとき stream index も PID も別物になるので、
+//  それらでは切替前後のトラックを同一視できない。
+//  一方「このprogramのn番目の映像/音声」という位置はPMTをまたいでも保たれるため、
+//  これを唯一の手がかりとして後継ストリームを引き当てる。
+//
+//  disableFollow: merge_pmt_versionsが指定されている場合はtrue(追従しない)
+RGY_ERR RGYInputAvcodec::initPmtFollow(const bool disableFollow) {
+    //シーク時などに呼び直されても状態が残らないよう、まず全部リセットする
+    m_Demux.format.programId = -1;
+    m_Demux.format.pmtVersion = -1;
+    m_Demux.video.pmtTrackPos = -1;
+    m_Demux.video.pmtNoSuccessorWarned = false;
+    m_Demux.video.pmtSwitchDropCount = 0;
+    for (auto& stream : m_Demux.stream) {
+        stream.indexCurrent = stream.index;
+        stream.pmtTrackPos = -1;
+    }
+
+    //以下のいずれかならprogramId = -1のままにして追従を行わない
+    //(getFollowProgram()がnullptrを返すので checkPmtChange() は即returnする)
+    const auto *formatCtx = m_Demux.format.formatCtx;
+    if (formatCtx == nullptr || formatCtx->nb_programs == 0) {
+        return RGY_ERR_NONE; //programの概念がない入力(mp4等)。そもそもPMT変更は起きない
+    }
+    if (disableFollow) {
+        //merge_pmt_versionsはPMT変更後のストリームを既存AVStreamに合流させる指定なので、
+        //追従と併用すると二重に切り替わってしまう。ユーザー指定を優先して追従は行わない
+        AddMessage(RGY_LOG_INFO, _T("pmt follow: disabled by merge_pmt_versions.\n"));
+        return RGY_ERR_NONE;
+    }
+    if (m_Demux.video.stream == nullptr) {
+        return RGY_ERR_NONE; //映像なし。追従対象programを決める起点がない
+    }
+
+    //(1) 追従対象programを決める: 現在の映像ストリームが属するprogramを集める
+    std::vector<const AVProgram *> candidates;
+    for (uint32_t i = 0; i < formatCtx->nb_programs; i++) {
+        const auto *program = formatCtx->programs[i];
+        if (program == nullptr) {
+            continue;
+        }
+        for (uint32_t j = 0; j < program->nb_stream_indexes; j++) {
+            if (program->stream_index[j] == static_cast<uint32_t>(m_Demux.video.index)) {
+                candidates.push_back(program);
+                break;
+            }
+        }
+    }
+    if (candidates.empty()) {
+        AddMessage(RGY_LOG_DEBUG, _T("pmt follow: video stream %d does not belong to any program, disabled.\n"), m_Demux.video.index);
+        return RGY_ERR_NONE;
+    }
+
+    //分割前のマルチ編成TSでは、複数のprogramが同じ映像PIDを共有していることがあり、
+    //候補が複数になる。どちらを追うかは入力からは決められないので先頭を採用する
+    //(選択結果は候補が複数のときだけ後段でINFOに出す)
+    const auto *followProgram = candidates.front();
+    m_Demux.format.programId = followProgram->id;
+    //以降 checkPmtChange() はこの値との差分でPMT変更を検出する
+    m_Demux.format.pmtVersion = followProgram->pmt_version;
+    AddMessage(RGY_LOG_DEBUG, _T("pmt follow: program %d (pmt_version %d), video stream %d\n"),
+        m_Demux.format.programId, m_Demux.format.pmtVersion, m_Demux.video.index);
+
+    //(2-a) 映像: 採用programの映像ストリームを先頭から数えて、現在のストリームが何番目かを求める
+    //  input_prm->videoTrackは「ファイル全体の映像中の序数」でありprogram内の序数ではないため使えない
+    int videoTrackPos = 0;
+    for (uint32_t i = 0; i < followProgram->nb_stream_indexes; i++) {
+        const uint32_t streamIndex = followProgram->stream_index[i];
+        if (streamIndex >= formatCtx->nb_streams) {
+            continue;
+        }
+        const auto *programStream = formatCtx->streams[streamIndex];
+        if (programStream == nullptr || programStream->codecpar == nullptr
+            || programStream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) {
+            continue;
+        }
+        if (streamIndex == static_cast<uint32_t>(m_Demux.video.index)) {
+            m_Demux.video.pmtTrackPos = videoTrackPos;
+            break;
+        }
+        videoTrackPos++;
+    }
+
+    if (candidates.size() > 1) {
+        tstring candidateIds;
+        for (const auto *program : candidates) {
+            if (!candidateIds.empty()) {
+                candidateIds += _T(", ");
+            }
+            candidateIds += strsprintf(_T("%d"), program->id);
+        }
+        AddMessage(RGY_LOG_INFO, _T("pmt follow: video stream %d belongs to multiple programs [%s], selected program %d.\n"),
+            m_Demux.video.index, candidateIds.c_str(), m_Demux.format.programId);
+    }
+
+    //(2-b) 音声・字幕など: 同じ要領で、採用program内の同じcodec_typeの中での序数を求める
+    //  採用programに属さないトラック(別番組の音声など)は pmtTrackPos = -1 のままとなり、追従対象外になる
+    for (auto& stream : m_Demux.stream) {
+        if (stream.stream == nullptr || stream.stream->codecpar == nullptr) {
+            continue;
+        }
+        int trackPos = 0;
+        for (uint32_t i = 0; i < followProgram->nb_stream_indexes; i++) {
+            const uint32_t streamIndex = followProgram->stream_index[i];
+            if (streamIndex >= formatCtx->nb_streams) {
+                continue;
+            }
+            const auto *programStream = formatCtx->streams[streamIndex];
+            if (programStream == nullptr || programStream->codecpar == nullptr
+                || programStream->codecpar->codec_type != stream.stream->codecpar->codec_type) {
+                continue;
+            }
+            if (streamIndex == static_cast<uint32_t>(stream.index)) {
+                stream.pmtTrackPos = trackPos;
+                break;
+            }
+            trackPos++;
+        }
+    }
+    return RGY_ERR_NONE;
+}
+
+//PMT変更を検出し、同じprogram内の後継ストリームへ追従する
+//av_read_frame()の直後に呼ぶこと
+//
+//【流れ】
+//  1. 追従対象programのpmt_versionが前回と違えば「PMTが変わった」とみなす
+//  2. initPmtFollow()で覚えたpmtTrackPos(program内の序数)を、いまのPMTで引き直す
+//  3. 引き直した結果が現在と違うストリームなら、そちらへ切り替える
+//
+//【切替時に何を書き換えるか】
+//  映像: m_Demux.video.index (パケットの振り分けにもav_seek_frameにも使われる生のindex)
+//  音声/字幕: stream.indexCurrent のみ。stream.index は変えない
+//    -> indexが下流(キュー・muxer)との突合に使う論理IDで、
+//       indexCurrentが「いまパケットが流れてくる生のindex」という二段構えになっている。
+//       パケットは振り分け後に stream_index を index へ書き戻すので、下流は変更に気づかない
+//
+//【AVStreamそのものは差し替えないこと】
+//  PMT変更で現れた新しいAVStreamは avformat_find_stream_info() を通っていないため、
+//  信用できるのは codec_id (PMTのstream_type由来)と time_base (mpegtsが1/90000固定)だけ。
+//  width/height/sample_rate/ch_layout/extradata は 0 または未設定のままなので、
+//  m_Demux.video.stream / stream.stream を差し替えると下流が壊れる。
+//  同じ理由で、適用前チェックも「新旧どちらも有効な値を持つとき」しか比較していない
+//
+//【性能】
+//  パケット1個ごとに呼ばれる。変化がない場合は getFollowProgram() の線形探索とint比較だけで抜ける
+void RGYInputAvcodec::checkPmtChange() {
+    const AVProgram *program = getFollowProgram();
+    if (program == nullptr) {
+        return; //追従無効(initPmtFollow()参照)、またはprogramが消えた
+    }
+    //pmt_versionは5bitの巡回カウンタで、23->16のように減ることもあるため!=で判定する
+    if (program->pmt_version == m_Demux.format.pmtVersion) {
+        return;
+    }
+    m_Demux.format.pmtVersion = program->pmt_version;
+    //ここから先はPMTが変わったときだけ通る。
+    //ただしPIDが変わらない更新でも版数は上がる(実測で先頭6700packet中8回)ので、
+    //以降の再解決が現在と同じ結果になる空振りは頻繁に起きる。空振り時は何もログを出さない
+
+    auto *formatCtx = m_Demux.format.formatCtx;
+    //--- 映像の追従 ---
+    if (m_Demux.video.stream != nullptr && m_Demux.video.pmtTrackPos >= 0) {
+        const int newIndex = findStreamInProgram(program, AVMEDIA_TYPE_VIDEO, m_Demux.video.pmtTrackPos);
+        if (newIndex < 0) {
+            //後継が見つからない。映像はindexを-1にできない(av_seek_frameの引数やstreams[]の添字に使うため)ので、
+            //従来どおり現在のindexのまま読み続ける。専用フラグで同一状態の重複WARNだけ抑制する
+            if (!m_Demux.video.pmtNoSuccessorWarned) {
+                AddMessage(RGY_LOG_WARN, _T("pmt follow: video stream %d has no successor in program %d.\n"),
+                    m_Demux.video.index, m_Demux.format.programId);
+                m_Demux.video.pmtNoSuccessorWarned = true;
+            }
+        } else {
+            m_Demux.video.pmtNoSuccessorWarned = false; //後継が復活したので、次に消えたらまた警告する
+            if (newIndex != m_Demux.video.index) {
+                //別ストリームに移った。ただし中身が別物になっていないか確認してから適用する
+                const auto *newStream = formatCtx->streams[newIndex];
+                const auto *oldCodec = m_Demux.video.stream->codecpar;
+                const auto *newCodec = newStream->codecpar;
+                if (newCodec->codec_id != oldCodec->codec_id) {
+                    AddMessage(RGY_LOG_WARN, _T("pmt follow: video stream %d -> %d rejected because codec changed from %s to %s.\n"),
+                        m_Demux.video.index, newIndex,
+                        char_to_tstring(avcodec_get_name(oldCodec->codec_id)).c_str(),
+                        char_to_tstring(avcodec_get_name(newCodec->codec_id)).c_str());
+                } else if (newStream->time_base.num != m_Demux.video.stream->time_base.num
+                    || newStream->time_base.den != m_Demux.video.stream->time_base.den) {
+                    AddMessage(RGY_LOG_WARN, _T("pmt follow: video stream %d -> %d rejected because time base changed from %d/%d to %d/%d.\n"),
+                        m_Demux.video.index, newIndex,
+                        m_Demux.video.stream->time_base.num, m_Demux.video.stream->time_base.den,
+                        newStream->time_base.num, newStream->time_base.den);
+                } else {
+                    //新しいAVStreamはextradataが未解析で空のことがあるため、
+                    //両方に中身があるときだけ比較する(空は「不明」であって「変化した」ではない)
+                    const bool extradataDiffers = oldCodec->extradata_size > 0 && newCodec->extradata_size > 0
+                        && oldCodec->extradata != nullptr && newCodec->extradata != nullptr
+                        && (oldCodec->extradata_size != newCodec->extradata_size
+                            || memcmp(oldCodec->extradata, newCodec->extradata, oldCodec->extradata_size) != 0);
+                    if (extradataDiffers) {
+                        AddMessage(RGY_LOG_WARN, _T("pmt follow: video extradata differs between stream %d and %d.\n"),
+                            m_Demux.video.index, newIndex);
+                    }
+                    const auto *oldCurrentStream = formatCtx->streams[m_Demux.video.index];
+                    AddMessage(RGY_LOG_INFO, _T("pmt follow: video stream %d (pid 0x%x) -> %d (pid 0x%x).\n"),
+                        m_Demux.video.index, oldCurrentStream->id, newIndex, newStream->id);
+                    m_Demux.video.index = newIndex;
+                    //新ストリームの途中から読み始めることになるため、先頭がIピクチャとは限らない。
+                    //次のキーフレームが来るまでパケットを捨てる(実際の破棄は getSample() 側)
+                    m_Demux.video.waitKeyAfterSwitch = true;
+                    m_Demux.video.pmtSwitchDropCount = 0;
+                }
+            }
+        }
+    }
+
+    //--- 音声・字幕などの追従 ---
+    for (auto& stream : m_Demux.stream) {
+        if (stream.pmtTrackPos < 0 || stream.stream == nullptr || stream.stream->codecpar == nullptr) {
+            continue; //追従対象program外のトラック
+        }
+        const auto mediaType = stream.stream->codecpar->codec_type;
+        const int newIndex = findStreamInProgram(program, mediaType, stream.pmtTrackPos);
+        if (newIndex < 0) {
+            //後継が見つからない = このトラックは消えた。従来動作と同じくここで終端させる。
+            //映像と違いindexCurrentは-1にできるので、それを重複WARN抑制も兼ねたフラグとして使う
+            if (stream.indexCurrent >= 0) {
+                AddMessage(RGY_LOG_WARN, _T("pmt follow: %s stream %d has no successor in program %d.\n"),
+                    char_to_tstring(av_get_media_type_string(mediaType)).c_str(), stream.indexCurrent, m_Demux.format.programId);
+                stream.indexCurrent = -1;
+            }
+            continue;
+        }
+        if (newIndex == stream.indexCurrent) {
+            continue; //PID据え置きのPMT更新。空振り
+        }
+
+        //映像と同様、適用前に中身が別物になっていないか確認する。
+        //弾いた場合はindexCurrentを据え置くので、従来どおり古いストリームを読み続ける
+        const auto *newStream = formatCtx->streams[newIndex];
+        const auto *oldCodec = stream.stream->codecpar;
+        const auto *newCodec = newStream->codecpar;
+        const auto mediaTypeName = char_to_tstring(av_get_media_type_string(mediaType));
+        if (newCodec->codec_id != oldCodec->codec_id) {
+            AddMessage(RGY_LOG_WARN, _T("pmt follow: %s stream %d -> %d rejected because codec changed from %s to %s.\n"),
+                mediaTypeName.c_str(), stream.indexCurrent, newIndex,
+                char_to_tstring(avcodec_get_name(oldCodec->codec_id)).c_str(),
+                char_to_tstring(avcodec_get_name(newCodec->codec_id)).c_str());
+            continue;
+        }
+        if (newStream->time_base.num != stream.stream->time_base.num
+            || newStream->time_base.den != stream.stream->time_base.den) {
+            AddMessage(RGY_LOG_WARN, _T("pmt follow: %s stream %d -> %d rejected because time base changed from %d/%d to %d/%d.\n"),
+                mediaTypeName.c_str(), stream.indexCurrent, newIndex,
+                stream.stream->time_base.num, stream.stream->time_base.den,
+                newStream->time_base.num, newStream->time_base.den);
+            continue;
+        }
+        if (mediaType == AVMEDIA_TYPE_AUDIO) {
+            //新しいAVStreamはavformat_find_stream_info()を通っていないため、
+            //PMTから判別できないsample_rate/ch_layoutは0/未設定のことがある。
+            //これらは「不明」であって「変化した」ではないので、両方が有効なときだけ比較する
+            if (newCodec->sample_rate > 0 && oldCodec->sample_rate > 0
+                && newCodec->sample_rate != oldCodec->sample_rate) {
+                AddMessage(RGY_LOG_WARN, _T("pmt follow: audio stream %d -> %d rejected because sample rate changed from %d to %d.\n"),
+                    stream.indexCurrent, newIndex, oldCodec->sample_rate, newCodec->sample_rate);
+                continue;
+            }
+            if (newCodec->ch_layout.nb_channels > 0 && oldCodec->ch_layout.nb_channels > 0
+                && av_channel_layout_compare(&newCodec->ch_layout, &oldCodec->ch_layout) != 0) {
+                AddMessage(RGY_LOG_WARN, _T("pmt follow: audio stream %d -> %d rejected because channel layout changed.\n"),
+                    stream.indexCurrent, newIndex);
+                continue;
+            }
+        }
+
+        //oldIndexは上の「後継なし」分岐で-1になっている場合がある(トラックが一度消えて復活したケース)ため、
+        //ログ用のstreams[]参照は範囲チェックしてから行う
+        const int oldIndex = stream.indexCurrent;
+        const auto *oldCurrentStream = (oldIndex >= 0 && oldIndex < static_cast<int>(formatCtx->nb_streams))
+            ? formatCtx->streams[oldIndex] : nullptr;
+        AddMessage(RGY_LOG_INFO, _T("pmt follow: %s stream %d (pid 0x%x) -> %d (pid 0x%x).\n"),
+            mediaTypeName.c_str(), oldIndex, (oldCurrentStream != nullptr) ? oldCurrentStream->id : -1,
+            newIndex, newStream->id);
+        stream.indexCurrent = newIndex;
+    }
+}
+
+//demux直後の生パケット用: 現在パケットが流れてきているstream indexで突合する
 AVDemuxStream *RGYInputAvcodec::getPacketStreamData(const AVPacket *pkt) {
+    int streamIndex = pkt->stream_index;
+    for (int i = 0; i < (int)m_Demux.stream.size(); i++) {
+        if (m_Demux.stream[i].indexCurrent == streamIndex) {
+            return &m_Demux.stream[i];
+        }
+    }
+    return nullptr;
+}
+
+//キューに積んだ後のパケット用: stream_indexは既に論理index(オープン時のindex)に書き戻されている
+AVDemuxStream *RGYInputAvcodec::getStreamDataByLogicalIndex(const AVPacket *pkt) {
     int streamIndex = pkt->stream_index;
     for (int i = 0; i < (int)m_Demux.stream.size(); i++) {
         if (m_Demux.stream[i].index == streamIndex) {
@@ -2902,6 +3291,7 @@ std::tuple<int, std::unique_ptr<AVPacket, RGYAVDeleter<AVPacket>>> RGYInputAvcod
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
+        checkPmtChange(); //PMT変更があれば追従先のstream indexを更新する
         if (m_fpPacketList) {
             fprintf(m_fpPacketList.get(), "stream %2d, %12s, %s, %s,%5lld,%2d, %12lld\n",
                 pkt->stream_index, avcodec_get_name(m_Demux.format.formatCtx->streams[pkt->stream_index]->codecpar->codec_id),
@@ -2923,6 +3313,23 @@ std::tuple<int, std::unique_ptr<AVPacket, RGYAVDeleter<AVPacket>>> RGYInputAvcod
             }
         }
         if (pkt->stream_index == m_Demux.video.index) {
+            //PMT変更で切り替えた直後は、新ストリームの先頭がIピクチャとは限らないため、
+            //次のキーフレームが来るまでパケットを捨てる
+            if (m_Demux.video.waitKeyAfterSwitch) {
+                if ((pkt->flags & AV_PKT_FLAG_KEY) == 0) {
+                    m_Demux.video.pmtSwitchDropCount++;
+                    //キーフレームがいつまでも来ない場合、映像が出ないまま終わってしまうため痕跡を残す
+                    if (m_Demux.video.pmtSwitchDropCount == 600) {
+                        AddMessage(RGY_LOG_WARN, _T("pmt follow: no keyframe found in video stream %d after %d packets.\n"),
+                            m_Demux.video.index, m_Demux.video.pmtSwitchDropCount);
+                    }
+                    pkt.reset();
+                    continue;
+                }
+                AddMessage(RGY_LOG_DEBUG, _T("pmt follow: video resumed at keyframe (dropped %d packets).\n"),
+                    m_Demux.video.pmtSwitchDropCount);
+                m_Demux.video.waitKeyAfterSwitch = false;
+            }
             if (pkt->flags & AV_PKT_FLAG_CORRUPT) {
                 const auto timestamp = (pkt->pts == AV_NOPTS_VALUE) ? pkt->dts : pkt->pts;
                 AddMessage(RGY_LOG_WARN, _T("corrupt packet in video: %lld (%s)\n"), (long long int)timestamp, getTimestampString(timestamp, m_Demux.video.stream->time_base).c_str());
@@ -3042,6 +3449,8 @@ std::tuple<int, std::unique_ptr<AVPacket, RGYAVDeleter<AVPacket>>> RGYInputAvcod
                 const auto timestamp = (pkt->pts == AV_NOPTS_VALUE) ? pkt->dts : pkt->pts;
                 AddMessage(RGY_LOG_WARN, _T("corrupt packet in stream %d: %lld (%s)\n"), pkt->stream_index, (long long int)timestamp, getTimestampString(timestamp, stream->stream->time_base).c_str());
             }
+            //PMT変更で追従した場合、以降(キュー処理・muxer)はオープン時のstream_indexで突合するため書き戻す
+            pkt->stream_index = stream->index;
             if (stream->stream->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
                 // 字幕パケットの場合、パケットのタイムスタンプの順序が入れ替わっている場合がある
                 // これを修正するため、いったんバッファにためておき、一定期間すぎたらソートして出力するようにする
@@ -3188,7 +3597,7 @@ void RGYInputAvcodec::GetAudioDataPacketsWhenNoVideoRead(int inputFrame) {
     auto move_pkt = [this](double vidEstDurationSec) {
         while (!m_Demux.qStreamPktL1.empty()) {
             auto pkt2 = m_Demux.qStreamPktL1.front();
-            AVDemuxStream *pStream2 = getPacketStreamData(pkt2);
+            AVDemuxStream *pStream2 = getStreamDataByLogicalIndex(pkt2);
             // 比較する時は、最初のptsを引いて比較する (pkt自体のptsは出力側で調整するのでここでは変更しない)
             const auto firstPts = pStream2->pktSample->pts;
             const double pkt2timeSec = (pkt2->pts - firstPts) * (double)pStream2->stream->time_base.num / (double)pStream2->stream->time_base.den;
@@ -3205,6 +3614,7 @@ void RGYInputAvcodec::GetAudioDataPacketsWhenNoVideoRead(int inputFrame) {
     //およそ1フレーム分のパケットを取得する
     auto pkt = m_poolPkt->getFree();
     for (; av_read_frame(m_Demux.format.formatCtx, pkt.get()) >= 0; pkt = m_poolPkt->getFree()) {
+        checkPmtChange(); //PMT変更があれば追従先のstream indexを更新する
         const auto codec_type = m_Demux.format.formatCtx->streams[pkt->stream_index]->codecpar->codec_type;
         if (codec_type != AVMEDIA_TYPE_AUDIO && codec_type != AVMEDIA_TYPE_SUBTITLE) {
             pkt.reset();
@@ -3215,6 +3625,8 @@ void RGYInputAvcodec::GetAudioDataPacketsWhenNoVideoRead(int inputFrame) {
                 pkt.reset();
                 continue;
             }
+            //PMT変更で追従した場合、以降(キュー処理・muxer)はオープン時のstream_indexで突合するため書き戻す
+            pkt->stream_index = pStream->index;
             const auto delay_ts = (int64_t)(pStream->addDelayMs * 0.001 / av_q2d(pStream->timebase) + 0.5);
             if (pkt->pts != AV_NOPTS_VALUE) pkt->pts += delay_ts;
             if (pkt->dts != AV_NOPTS_VALUE) pkt->dts += delay_ts;
@@ -3312,7 +3724,7 @@ void RGYInputAvcodec::CheckAndMoveStreamPacketList() {
     //出力するパケットを選択する
     while (!m_Demux.qStreamPktL1.empty()) {
         auto pkt = m_Demux.qStreamPktL1.front();
-        AVDemuxStream *pStream = getPacketStreamData(pkt);
+        AVDemuxStream *pStream = getStreamDataByLogicalIndex(pkt);
         const auto delay_ts = (int64_t)(pStream->addDelayMs * 0.001 / av_q2d(pStream->timebase) + 0.5);
         if (!m_Demux.frames.isEof() // 最後まで読み込んでいたらすべて転送するようにする
             && 0 < av_compare_ts(pkt->pts + delay_ts, pStream->timebase, m_Demux.frames.getMaxPts() + audioReadOffsetPTS, vid_pkt_timebase)) { //音声のptsが映像の終わりのptsを行きすぎたらやめる
@@ -3557,8 +3969,9 @@ RGY_ERR RGYInputAvcodec::LoadNextFrameInternal(RGYFrame *pSurface) {
             #pragma warning(pop)
             if (qp_table != nullptr) {
                 auto table = m_Demux.video.qpTableListRef->get();
-                const int qpw = (qp_stride) ? qp_stride : (pSurface->width() + 15) / 16;
-                const int qph = (qp_stride) ? (pSurface->height() + 15) / 16 : 1;
+                //qpテーブルのサイズはデコード結果のフレームから求める。解像度変更後はpSurfaceが確保時(=初期)解像度のままのことがあり、pSurfaceからでは大きさが合わない
+                const int qpw = (qp_stride) ? qp_stride : (m_Demux.video.frame->width + 15) / 16;
+                const int qph = (qp_stride) ? (m_Demux.video.frame->height + 15) / 16 : 1;
                 table->setQPTable(qp_table, qpw, qph, qp_stride, qscale_type, m_Demux.video.frame->pict_type, m_Demux.video.frame->pts);
                 pSurface->dataList().push_back(table);
             }
@@ -3577,6 +3990,36 @@ RGY_ERR RGYInputAvcodec::LoadNextFrameInternal(RGYFrame *pSurface) {
             }
         }
 
+        //入力ファイル途中での解像度変更の検出 (--avsw / avhwのsw decode時)
+        //ARIBのマルチ編成TSなどでHD(1440x1080)とSD(720x480)が切り替わる場合にここに来る。
+        //追従する場合はm_inputVideoInfo.srcWidth/Heightを更新して継続し、以降のフレームは新解像度でサーフェスへ書き込まれる。
+        //解像度変更を下流へ伝播させない処理(正規化resizeの挿入)はPipelineTaskOpenCL側で行う。
+        if (   m_Demux.video.frame->width  != m_inputVideoInfo.srcWidth
+            || m_Demux.video.frame->height != m_inputVideoInfo.srcHeight) {
+            const int newWidth = m_Demux.video.frame->width;
+            const int newHeight = m_Demux.video.frame->height;
+            // この判定は、現在解像度を更新したりフレームをサーフェスへコピーしたりする前に行う。
+            // 下流の入力プールはこの上限で先行確保され、途中での再確保は行わない。上限超過を通すと
+            // LoadNextFrameのコピーが確保範囲を超えるため、安全に継続できない。通過後に更新するのは
+            // m_inputVideoInfoの論理解像度だけで、後続のMFX/OpenCL VPPが変更を検出して初期出力解像度へ正規化する。
+            if (newWidth > m_maxSrcWidth || newHeight > m_maxSrcHeight) {
+                AddMessage(RGY_LOG_ERROR, _T("input resolution changed from %dx%d to %dx%d, exceeding the configured resolution limit %dx%d, which is not supported.\n"),
+                    m_inputVideoInfo.srcWidth, m_inputVideoInfo.srcHeight, newWidth, newHeight,
+                    m_maxSrcWidth, m_maxSrcHeight);
+                AddMessage(RGY_LOG_ERROR, _T("  Please split the input file at the resolution change point.\n"));
+                return RGY_ERR_UNSUPPORTED;
+            }
+            if (m_inputVideoInfo.crop.e.left + m_inputVideoInfo.crop.e.right >= newWidth
+                || m_inputVideoInfo.crop.e.up + m_inputVideoInfo.crop.e.bottom >= newHeight) {
+                AddMessage(RGY_LOG_ERROR, _T("input crop is too large for the changed resolution %dx%d.\n"), newWidth, newHeight);
+                return RGY_ERR_INVALID_PARAM;
+            }
+            AddMessage(RGY_LOG_DEBUG, _T("input resolution changed from %dx%d to %dx%d; updating software decoder output.\n"),
+                m_inputVideoInfo.srcWidth, m_inputVideoInfo.srcHeight, newWidth, newHeight);
+            m_inputVideoInfo.srcWidth = newWidth;
+            m_inputVideoInfo.srcHeight = newHeight;
+        }
+
         //実際には初期化時と異なるcspの場合があるので、ここで再度チェック
         m_inputCsp = csp_avpixfmt_to_rgy((AVPixelFormat)m_Demux.video.frame->format);
         if (m_convert->getFunc(m_inputCsp, m_inputVideoInfo.csp, m_Demux.video.simdCsp) == nullptr) {
@@ -3586,12 +4029,22 @@ RGY_ERR RGYInputAvcodec::LoadNextFrameInternal(RGYFrame *pSurface) {
         }
 
         //フレームデータをコピー
+        //pSurface->ptrArray()は使えない。pSurfaceは確保時(=初期)解像度のままのことがあり、
+        //その場合planarでは各プレーンの先頭オフセットが確保時解像度基準となり、新解像度でのプレーン配置とずれてしまうため、
+        //新解像度で作り直したdstFrameInfoからプレーンのポインタとpitchを求める。
         void *dst_array[RGY_MAX_PLANES];
-        pSurface->ptrArray(dst_array);
+        auto dstFrameInfo = pSurface->frameInfo();
+        dstFrameInfo.width = m_inputVideoInfo.srcWidth;
+        dstFrameInfo.height = m_inputVideoInfo.srcHeight;
+        for (int i = 0; i < RGY_MAX_PLANES; i++) {
+            dst_array[i] = (void *)getPlane(&dstFrameInfo, (RGY_PLANE)i).ptr[0];
+        }
+        const auto dstPlaneY = getPlane(&dstFrameInfo, RGY_PLANE_Y);
+        const auto dstPlaneC = getPlane(&dstFrameInfo, RGY_PLANE_C);
         m_convert->run(rgy_avframe_interlaced(m_Demux.video.frame),
             dst_array, (const void **)m_Demux.video.frame->data,
-            m_inputVideoInfo.srcWidth, m_Demux.video.frame->linesize[0], m_Demux.video.frame->linesize[1], pSurface->pitch(), pSurface->pitch(RGY_PLANE_C),
-            m_inputVideoInfo.srcHeight, m_inputVideoInfo.srcHeight, m_inputVideoInfo.crop.c);
+            m_Demux.video.frame->width, m_Demux.video.frame->linesize[0], m_Demux.video.frame->linesize[1], dstPlaneY.pitch[0], dstPlaneC.pitch[0],
+            m_Demux.video.frame->height, m_inputVideoInfo.srcHeight, m_inputVideoInfo.crop.c);
         if (got_frame) {
             av_frame_unref(m_Demux.video.frame);
         }

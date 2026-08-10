@@ -35,6 +35,9 @@
 #pragma warning(disable: 4201)
 #include "dynlink_nvcuvid.h"
 #pragma warning(pop)
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include "FrameQueue.h"
 #include "NVEncParam.h"
 #include "rgy_log.h"
@@ -60,7 +63,9 @@ public:
     CuvidDecode();
     ~CuvidDecode();
 
-    CUresult InitDecode(CUvideoctxlock ctxLock, const VideoInfo *input, const VppParam *vpp, AVRational streamtimebase, shared_ptr<RGYLog> pLog, int nDecType, bool bCuvidResize, bool lowLatency = false, bool ignoreDynamicFormatChange = false);
+    //adaptResolutionは表示解像度で指定された初回作成上限。実際のcoded sizeへのアラインとcaps検証はInitDecode内で行う。
+    //既存の内部デコーダ呼び出しを変えないため末尾の省略可能引数とし、未指定時は従来のコンテナ宣言解像度を使う。
+    CUresult InitDecode(CUvideoctxlock ctxLock, const VideoInfo *input, const VppParam *vpp, AVRational streamtimebase, shared_ptr<RGYLog> pLog, int nDecType, bool bCuvidResize, bool lowLatency = false, const std::pair<int, int>& adaptResolution = { 0, 0 });
     RGY_ERR CloseDecoder();
     CUresult DecodePacket(uint8_t *data, size_t nSize, int64_t timestamp, AVRational streamtimebase);
     CUresult FlushParser();
@@ -82,6 +87,12 @@ public:
     FrameQueue *frameQueue() {
         return m_pFrameQueue;
     }
+    //入力途中の解像度変更に伴うデコーダリセットの待ち合わせ用。デコードスレッドがformatChangeReq()を立てて待機するので、
+    //パイプライン側は下流のフレームがすべて解放されたことを確認してallowFormatChange()で解除する。
+    bool formatChangeReq() const {
+        return m_formatChangeReq.load();
+    }
+    void allowFormatChange();
 protected:
     void AddMessage(RGYLogLevel log_level, const tstring& str) {
         if (m_pPrintMes == nullptr || log_level < m_pPrintMes->getLogLevel(RGY_LOGT_DEC)) {
@@ -110,7 +121,9 @@ protected:
     }
 
     CUresult CreateDecoder();
+    void SetDecodeCreateInfo(CUVIDEOFORMAT *pFormat);
     CUresult CreateDecoder(CUVIDEOFORMAT *pFormat);
+    CUresult ReconfigureDecoder(CUVIDEOFORMAT *pFormat);
 
     FrameQueue                  *m_pFrameQueue;
     int64_t                      m_decodedFrames;
@@ -119,13 +132,18 @@ protected:
     CUvideodecoder               m_videoDecoder;
     CUvideoctxlock               m_ctxLock;
     CUVIDDECODECREATEINFO        m_videoDecodeCreateInfo;
+    CUVIDDECODECAPS              m_videoDecodeCaps;    //デコーダの対応解像度範囲。解像度変更時の上限clampに使用(bIsSupported=falseなら未取得)
     CUVIDEOFORMATEX              m_videoFormatEx;
     shared_ptr<RGYLog>           m_pPrintMes;  //ログ出力
-    bool                         m_bIgnoreDynamicFormatChange;
     bool                         m_bError;
     cudaVideoDeinterlaceMode     m_deinterlaceMode;
     VideoInfo                    m_videoInfo;
     int                          m_nDecType;
+    //以下4つはデコーダリセットバリア用。デコードスレッド(parserコールバック)とパイプラインスレッドの間の同期に使う
+    std::atomic<bool>            m_formatChangeReq;     //リセット要求中か。パイプライン側からロックなしで見るためatomic
+    std::mutex                   m_formatChangeMtx;
+    std::condition_variable      m_formatChangeCv;
+    bool                         m_formatChangeAllowed; //リセット許可が下りたか(mutex保護下。cvのspurious wakeup対策も兼ねる)
 };
 
 #endif //#if ENABLE_AVSW_READER

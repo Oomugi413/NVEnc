@@ -709,6 +709,8 @@ typedef struct VideoFrameData {
 
 struct AVDemuxFormat {
     AVFormatContext          *formatCtx;             //動画ファイルのformatContext
+    int                       programId;             //PMT変更追従の対象program id (-1: 追従しない)
+    int                       pmtVersion;            //最後に処理したPMTのversion
     double                    analyzeSec;            //動画ファイルを先頭から分析する時間
     bool                      isPipe;                //入力がパイプ
     bool                      lowLatency;            //低遅延モード
@@ -745,6 +747,10 @@ struct AVDemuxVideo {
     AVCodecContext           *codecCtxDecode;        //動画のデコーダ (使用しない場合はnullptr)
     AVFrame                  *frame;                 //動画デコード用のフレーム
     int                       index;                 //動画のストリームID
+    int                       pmtTrackPos;            //追従対象program内で同じcodec_typeの何番目か (-1: 追従対象外)
+    bool                      pmtNoSuccessorWarned;  //後継ストリーム消失のWARNを出し済みか (同一状態での重複WARN抑制用)
+    bool                      waitKeyAfterSwitch;    //PMT変更で切り替えた直後、次のキーフレームまでパケットを捨てる
+    int                       pmtSwitchDropCount;    //切替後キーフレーム待ちで捨てたパケット数
     int64_t                   streamFirstKeyPts;     //動画ファイルの最初のpts
     int64_t                   beforeSeekStreamFirstKeyPts; //シーク前の動画ファイルの最初のpts (checkTimeSeekToでしか使わないはず)
     AVPacket                 *firstPkt;              //動画の最初のpacket
@@ -865,6 +871,7 @@ public:
     RGYListRef<RGYFrameDataQP> *qpTableListRef; //qp tableを格納するときのベース構造体
     RGYOptList     inputOpt;                //入力オプション
     RGYHEVCBsf     hevcbsf;
+    std::pair<int, int> adaptResolution;    // pipelineの入力プールと同じ物理確保上限。{ 0, 0 }なら初期入力解像度を上限にする。
     tstring        avswDecoder;             //avswデコーダの指定
 
     RGYInputAvcodecPrm(RGYInputPrm base);
@@ -878,6 +885,21 @@ public:
     virtual ~RGYInputAvcodec();
 
     virtual void Close() override;
+
+    //avswではデコード結果を受け取る前にINPUT-CUDA間のhost/deviceサーフェスを確保するため、
+    //途中で現れうる最大解像度を初期確保サイズとして返す必要がある。
+    //一方、GetInputFrameInfo()は現在フレームの実解像度を返し続ける。両者を混ぜると、
+    //小さい区間を最大解像度として処理して読み越すため、専用overrideで分離している。
+    //native avhwではデコードサーフェスをCUVIDが管理しPipelineTaskNVDecodeが確保をskipするため、この値は使われない。
+    //avhw指定でも対応外codec等でsoftware decodeへfallbackした場合はPipelineTaskInputを通るので、avswと同じ確保が必要になる。
+    virtual VideoInfo GetInputFrameInfoForAlloc() override {
+        auto info = m_inputVideoInfo;
+        if (m_maxSrcWidth > 0 && m_maxSrcHeight > 0) {
+            info.srcWidth = m_maxSrcWidth;
+            info.srcHeight = m_maxSrcHeight;
+        }
+        return info;
+    }
 
     //動画ストリームの1フレーム分のデータをbitstreamに追加する (リーダー側のデータは消す)
     virtual RGY_ERR GetNextBitstream(RGYBitstream *pBitstream) override;
@@ -985,11 +1007,18 @@ protected:
 
     RGY_ERR initFormatCtx(const TCHAR *strFileName, const RGYInputAvcodecPrm *input_prm, const int iretry);
     RGY_ERR initVideoBsfs();
+    int findStreamInProgram(const AVProgram *prog, AVMediaType type, int nth) const;
+    const AVProgram *getFollowProgram() const;
+    RGY_ERR initPmtFollow(const bool disableFollow);
+    void checkPmtChange();
     RGY_ERR initVideoParser();
     RGY_ERR parseVideoExtraData(const AVPacket *pkt);
 
     //streamで指定されたtrackの言語属性がlangの言語と等しいか
     bool isSelectedLangTrack(const std::string &lang, const AVStream *stream);
+
+    //streamで指定されたtrackが除外言語のいずれにも一致しないか
+    bool isNotExcludedLangTrack(const std::string &langs, const AVStream *stream);
 
     //streamで指定されたtrackのコーデックがselectCodecのコーデックと等しいか
     bool isSelectedCodecTrack(const std::string &selectCodec, const AVStream *stream);
@@ -1016,6 +1045,7 @@ protected:
 
     //対象のパケットの必要な対象のストリーム情報へのポインタ
     AVDemuxStream *getPacketStreamData(const AVPacket *pkt);
+    AVDemuxStream *getStreamDataByLogicalIndex(const AVPacket *pkt);
 
     //qStreamPktL1をチェックし、framePosListから必要な音声パケットかどうかを判定し、
     //必要ならqStreamPktL2に移し、不要ならパケットを開放する
@@ -1065,6 +1095,10 @@ protected:
     tstring          m_logFramePosList;           //FramePosListの内容を入力終了時に出力する (デバッグ用)
     std::unique_ptr<FILE, fp_deleter> m_fpPacketList; // 読み取ったパケット情報を出力するファイル
     vector<uint8_t>  m_hevcMp42AnnexbBuffer;       //HEVCのmp4->AnnexB簡易変換用バッファ
+    // 入力プールの物理確保上限。m_inputVideoInfo.srcWidth/Heightのように現在の論理解像度に追従させない。
+    // 途中でこれを超えた場合は、サーフェスへのコピー前に明示エラーとする。
+    int              m_maxSrcWidth;
+    int              m_maxSrcHeight;
     bool             m_suppressPulldownDetect;     // true: skip avgDuration *= 1.25 after bPulldown is detected. bPulldown itself is still set so log/diagnostic paths see it. Mirrors RGYInputAvcodecPrm::suppressPulldownMutation.
     bool             m_pulldownDetected;           // true when getFirstFramePosAndFrameRate detected soft pulldown.
 

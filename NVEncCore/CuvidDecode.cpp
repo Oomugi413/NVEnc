@@ -176,8 +176,10 @@ static int CUDAAPI HandlePictureDisplay(void *pUserData, CUVIDPARSERDISPINFO *pP
 
 CuvidDecode::CuvidDecode() :
     m_pFrameQueue(nullptr), m_decodedFrames(0), m_parsedPackets(0), m_videoParser(nullptr), m_videoDecoder(nullptr),
-    m_ctxLock(nullptr), m_pPrintMes(), m_bIgnoreDynamicFormatChange(false), m_bError(false), m_videoInfo(), m_nDecType(0) {
+    m_ctxLock(nullptr), m_pPrintMes(), m_bError(false), m_videoInfo(), m_nDecType(0),
+    m_formatChangeReq(false), m_formatChangeMtx(), m_formatChangeCv(), m_formatChangeAllowed(false) {
     memset(&m_videoDecodeCreateInfo, 0, sizeof(m_videoDecodeCreateInfo));
+    memset(&m_videoDecodeCaps, 0, sizeof(m_videoDecodeCaps));
     memset(&m_videoFormatEx, 0, sizeof(m_videoFormatEx));
 }
 
@@ -216,7 +218,9 @@ int CuvidDecode::DecPictureDecode(CUVIDPICPARAMS *pPicParams) {
     }
     cuvidCtxUnlock(m_ctxLock, 0);
     if (curesult != CUDA_SUCCESS) {
-        AddMessage(RGY_LOG_DEBUG, _T("cuvidDecodePicture error\n"));
+        AddMessage(RGY_LOG_DEBUG, _T("cuvidDecodePicture error %d (%s), pic_idx %d, %dx%d\n"),
+            curesult, char_to_tstring(_cudaGetErrorEnum(curesult)).c_str(), pPicParams->CurrPicIdx,
+            pPicParams->PicWidthInMbs * 16, pPicParams->FrameHeightInMbs * 16);
         m_bError = true;
     }
     return (curesult == CUDA_SUCCESS);
@@ -232,19 +236,118 @@ int CuvidDecode::DecVideoSequence(CUVIDEOFORMAT *pFormat) {
         CreateDecoder(pFormat);
         return 1;
     }
+    //入力ファイル途中での解像度変更 (--avhw時)。ARIBのマルチ編成TSなどでHD(1440x1080)とSD(720x480)が切り替わる場合にここに来る。
+    //この関数はparser(=デコードスレッド)から呼ばれるコールバックで、ここから戻るまでデコードは進まない。
     if (   (pFormat->coded_width   != m_videoDecodeCreateInfo.ulWidth)
         || (pFormat->coded_height  != m_videoDecodeCreateInfo.ulHeight)) {
-        AddMessage(RGY_LOG_DEBUG, _T("dynamic video format changing detected\n"));
-        m_videoDecodeCreateInfo.CodecType    = pFormat->codec;
-        m_videoDecodeCreateInfo.ulWidth      = pFormat->coded_width;
-        m_videoDecodeCreateInfo.ulHeight     = pFormat->coded_height;
-        m_videoDecodeCreateInfo.ChromaFormat = pFormat->chroma_format;
-        if (pFormat->coded_width != m_videoDecodeCreateInfo.ulWidth && pFormat->coded_height != m_videoDecodeCreateInfo.ulHeight) {
-            memcpy(&m_videoDecodeCreateInfo.display_area, &pFormat->display_area, sizeof(pFormat->display_area));
+        //デコーダの解像度上限は最初の作成時に固定され、同じparserセッション内でdecoderだけ作り直しても引き上げられない。
+        //実測では再作成自体が成功しても、上限を超えた最初のcuvidDecodePicture()がCUDA_ERROR_INVALID_VALUEになった。
+        //--adapt-resolutionはこの上限を初回作成前に広げるための指定であり、ここへ到達してからの再確保はできない。
+        //バリアへ入って下流を止める前に弾くことで、タイムアウトや原因の分かりにくいdecode失敗を避ける。
+        if (   pFormat->coded_width  > m_videoDecodeCreateInfo.ulMaxWidth
+            || pFormat->coded_height > m_videoDecodeCreateInfo.ulMaxHeight) {
+            AddMessage(RGY_LOG_ERROR, _T("input resolution %dx%d exceeds the decoder creation limit %dx%d (coded size).\n"),
+                (int)pFormat->coded_width, (int)pFormat->coded_height,
+                (int)m_videoDecodeCreateInfo.ulMaxWidth, (int)m_videoDecodeCreateInfo.ulMaxHeight);
+            AddMessage(RGY_LOG_ERROR, _T("  The decoder cannot be recreated beyond the limit selected at initial creation.\n"));
+            m_bError = true;
+            return 0;
         }
-        return 0;
+        AddMessage(RGY_LOG_DEBUG, _T("input resolution changed from %dx%d to %dx%d (coded size), requesting decoder reset barrier.\n"),
+            (int)m_videoDecodeCreateInfo.ulWidth, (int)m_videoDecodeCreateInfo.ulHeight, (int)pFormat->coded_width, (int)pFormat->coded_height);
+        //デコーダのリセットバリア。デコーダが保持するフレームバッファは再作成/reconfigureで無効化されるため、
+        //既にデコード済みで下流(フィルタ・エンコーダ)がまだ参照しているフレームがある状態でリセットすると壊れた絵になる。
+        //ここで要求フラグを立てて待機し、パイプライン側(PipelineTaskNVDecode)がフレームキューと
+        //ワークサーフェスの全解放を確認してからallowFormatChange()を呼ぶまでブロックする。
+        //タイムアウトを設けているのは、下流が別要因で詰まった場合にデコードスレッドが永久にハングするのを防ぐため。
+        m_formatChangeReq.store(true);
+        {
+            std::unique_lock<std::mutex> lock(m_formatChangeMtx);
+            if (!m_formatChangeCv.wait_for(lock, std::chrono::seconds(10), [this]() { return m_formatChangeAllowed; })) {
+                AddMessage(RGY_LOG_ERROR, _T("timed out waiting for decoder reset barrier.\n"));
+                m_formatChangeReq.store(false);
+                m_formatChangeAllowed = false;
+                m_bError = true;
+                return 0;
+            }
+        }
+        const auto decoderResetStart = std::chrono::steady_clock::now();
+        //cuvid resize(--vpp-resize cuda等でデコーダ側リサイズを使う場合)が無効なときのみ、出力解像度を新解像度に追従させる。
+        //cuvid resize有効時はdstWidth/Heightが出力解像度として指定済みなので、デコーダ出力は変えず元の解像度のまま維持する。
+        if (m_videoInfo.dstWidth <= 0 || m_videoInfo.dstHeight <= 0) {
+            m_videoInfo.srcWidth = pFormat->display_area.right - pFormat->display_area.left;
+            m_videoInfo.srcHeight = pFormat->display_area.bottom - pFormat->display_area.top;
+        }
+        //リセット手段は2つ。cuvidReconfigureDecoder()はデコーダを保持したまま解像度だけ変更でき、再作成より大幅に速い。
+        //ただしbit深度の変更や上限超過には使えず、ドライバ/SDKによっては関数自体が取れないので、その場合は再作成にフォールバックする。
+        const bool reconfigureFunctionAvailable = cuvidReconfigureDecoder != nullptr;
+        const bool decoderAvailable = m_videoDecoder != nullptr;
+        const bool bitDepthUnchanged = pFormat->bit_depth_luma_minus8 == m_videoDecodeCreateInfo.bitDepthMinus8;
+        const bool resolutionWithinLimit = pFormat->coded_width <= m_videoDecodeCreateInfo.ulMaxWidth
+            && pFormat->coded_height <= m_videoDecodeCreateInfo.ulMaxHeight;
+        CUresult decoderResetResult = CUDA_SUCCESS;
+        const TCHAR *decoderResetMethod = _T("reconfigure");
+        if (reconfigureFunctionAvailable && decoderAvailable && bitDepthUnchanged && resolutionWithinLimit) {
+            decoderResetResult = ReconfigureDecoder(pFormat);
+            if (decoderResetResult != CUDA_SUCCESS) {
+                AddMessage(RGY_LOG_WARN, _T("cuvidReconfigureDecoder failed %d (%s); falling back to decoder recreation.\n"),
+                    decoderResetResult, char_to_tstring(_cudaGetErrorEnum(decoderResetResult)).c_str());
+                decoderResetMethod = _T("recreate (fallback)");
+                decoderResetResult = CreateDecoder(pFormat);
+            }
+        } else {
+            decoderResetMethod = _T("recreate");
+            if (!reconfigureFunctionAvailable) {
+                AddMessage(RGY_LOG_DEBUG, _T("cuvidReconfigureDecoder is unavailable; recreating decoder.\n"));
+            } else if (!decoderAvailable) {
+                AddMessage(RGY_LOG_DEBUG, _T("decoder is not initialized; recreating decoder.\n"));
+            } else if (!bitDepthUnchanged) {
+                AddMessage(RGY_LOG_DEBUG, _T("bit depth changed from %d to %d; recreating decoder.\n"),
+                    (int)m_videoDecodeCreateInfo.bitDepthMinus8 + 8, (int)pFormat->bit_depth_luma_minus8 + 8);
+            } else {
+                AddMessage(RGY_LOG_DEBUG, _T("resolution %dx%d exceeds the reconfiguration limit %dx%d; recreating decoder.\n"),
+                    (int)pFormat->coded_width, (int)pFormat->coded_height,
+                    (int)m_videoDecodeCreateInfo.ulMaxWidth, (int)m_videoDecodeCreateInfo.ulMaxHeight);
+            }
+            decoderResetResult = CreateDecoder(pFormat);
+        }
+        if (decoderResetResult != CUDA_SUCCESS) {
+            m_formatChangeReq.store(false);
+            {
+                std::lock_guard<std::mutex> lock(m_formatChangeMtx);
+                m_formatChangeAllowed = false;
+            }
+            m_bError = true;
+            return 0;
+        }
+        const auto decoderResetMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - decoderResetStart).count();
+        AddMessage(RGY_LOG_DEBUG, _T("decoder reset operation completed in %.3f ms (method: %s).\n"), decoderResetMs, decoderResetMethod);
+        m_formatChangeReq.store(false);
+        {
+            std::lock_guard<std::mutex> lock(m_formatChangeMtx);
+            m_formatChangeAllowed = false;
+        }
+        AddMessage(RGY_LOG_DEBUG, _T("decoder reset barrier completed, resuming decode.\n"));
+        return 1; //1を返すとparserはデコードを継続する(0を返すとparserは停止するので、以前の解像度変更非対応時はここで0を返していた)
     }
     return 1;
+}
+
+//リセットバリアの解除。パイプライン側のスレッドから、下流のフレームがすべて解放されたことを確認して呼ばれる。
+//要求が出ていないときに呼ばれても何もしない(ポーリング的に毎回呼ばれる想定)。
+void CuvidDecode::allowFormatChange() {
+    bool notify = false;
+    {
+        std::lock_guard<std::mutex> lock(m_formatChangeMtx);
+        if (m_formatChangeReq.load() && !m_formatChangeAllowed) {
+            m_formatChangeAllowed = true;
+            notify = true;
+        }
+    }
+    if (notify) {
+        AddMessage(RGY_LOG_DEBUG, _T("decoder reset barrier is ready.\n"));
+        m_formatChangeCv.notify_one();
+    }
 }
 
 int CuvidDecode::DecPictureDisplay(CUVIDPARSERDISPINFO *pPicParams) {
@@ -305,15 +408,23 @@ CUresult CuvidDecode::CreateDecoder() {
 }
 
 
-CUresult CuvidDecode::CreateDecoder(CUVIDEOFORMAT *pFormat) {
-    if (m_videoDecoder) {
-        cuvidDestroyDecoder(m_videoDecoder);
-        m_videoDecoder = nullptr;
-    }
+//CUVIDDECODECREATEINFOをpFormatの内容で更新する。CreateDecoder()から切り出したのは、
+//ReconfigureDecoder()でも同じ計算結果(target/display_area等)が必要で、両者で食い違うと絵がずれるため。
+void CuvidDecode::SetDecodeCreateInfo(CUVIDEOFORMAT *pFormat) {
     m_videoDecodeCreateInfo.CodecType = pFormat->codec;
     m_videoDecodeCreateInfo.ChromaFormat = pFormat->chroma_format;
     m_videoDecodeCreateInfo.ulWidth   = pFormat->coded_width;
     m_videoDecodeCreateInfo.ulHeight  = pFormat->coded_height;
+    //デコーダの解像度上限は最初にデコーダを作成した時点で固定され、作り直しても引き上げられない。
+    //上限を下回る解像度で作り直した後にまた拡大されることがあるので、一度上げた上限は下げない。
+    m_videoDecodeCreateInfo.ulMaxWidth = std::max(m_videoDecodeCreateInfo.ulMaxWidth, m_videoDecodeCreateInfo.ulWidth);
+    m_videoDecodeCreateInfo.ulMaxHeight = std::max(m_videoDecodeCreateInfo.ulMaxHeight, m_videoDecodeCreateInfo.ulHeight);
+    if (m_videoDecodeCaps.bIsSupported) { //上限はデコーダのcapsの範囲に収める。範囲外の値を渡すとデコーダ作成自体が失敗する
+        m_videoDecodeCreateInfo.ulMaxWidth = std::min((unsigned long)m_videoDecodeCaps.nMaxWidth,
+            std::max((unsigned long)m_videoDecodeCaps.nMinWidth, m_videoDecodeCreateInfo.ulMaxWidth));
+        m_videoDecodeCreateInfo.ulMaxHeight = std::min((unsigned long)m_videoDecodeCaps.nMaxHeight,
+            std::max((unsigned long)m_videoDecodeCaps.nMinHeight, m_videoDecodeCreateInfo.ulMaxHeight));
+    }
     m_videoDecodeCreateInfo.bitDepthMinus8 = pFormat->bit_depth_luma_minus8;
 
     if (m_videoInfo.dstWidth > 0 && m_videoInfo.dstHeight > 0) {
@@ -346,20 +457,64 @@ CUresult CuvidDecode::CreateDecoder(CUVIDEOFORMAT *pFormat) {
     m_videoDecodeCreateInfo.display_area.right  = (short)(pFormat->display_area.right - m_videoInfo.crop.e.right);
     m_videoDecodeCreateInfo.display_area.bottom = (short)(pFormat->display_area.bottom - m_videoInfo.crop.e.bottom);
 #endif
+}
 
+CUresult CuvidDecode::CreateDecoder(CUVIDEOFORMAT *pFormat) {
+    //解像度変更時はデコーダの破棄→再作成をここで行うため、破棄も含めてctxLockの内側で行う
     NVEncCtxAutoLock(ctxlock(m_ctxLock));
-    m_videoDecodeCreateInfo.CodecType = pFormat->codec;
+    if (m_videoDecoder) {
+        cuvidDestroyDecoder(m_videoDecoder);
+        m_videoDecoder = nullptr;
+    }
+    SetDecodeCreateInfo(pFormat);
     CUresult curesult = CreateDecoder();
     if (CUDA_SUCCESS != curesult) {
         AddMessage(RGY_LOG_ERROR, _T("Failed cuvidCreateDecoder %d (%s)\n"), curesult, char_to_tstring(_cudaGetErrorEnum(curesult)).c_str());
         m_bError = true;
         return curesult;
     }
-    AddMessage(RGY_LOG_DEBUG, _T("created decoder (mode: %s)\n"), get_chr_from_value(list_cuvid_mode, m_nDecType));
+    AddMessage(RGY_LOG_DEBUG, _T("created decoder (mode: %s, coded: %dx%d, target: %dx%d, max: %dx%d)\n"),
+        get_chr_from_value(list_cuvid_mode, m_nDecType),
+        (int)m_videoDecodeCreateInfo.ulWidth, (int)m_videoDecodeCreateInfo.ulHeight,
+        (int)m_videoDecodeCreateInfo.ulTargetWidth, (int)m_videoDecodeCreateInfo.ulTargetHeight,
+        (int)m_videoDecodeCreateInfo.ulMaxWidth, (int)m_videoDecodeCreateInfo.ulMaxHeight);
     return curesult;
 }
 
-CUresult CuvidDecode::InitDecode(CUvideoctxlock ctxLock, const VideoInfo *input, const VppParam *vpp, AVRational streamtimebase, shared_ptr<RGYLog> pLog, int nDecType, bool bCuvidResize, bool lowLatency, bool ignoreDynamicFormatChange) {
+//デコーダを破棄せずに解像度だけ差し替える。再作成に比べて桁違いに速く、デコーダのフレームバッファも保持されるので
+//切り替え時のもたつきを避けられる。ただし変更できるのはCUVIDRECONFIGUREDECODERINFOにあるメンバのみで、
+//コーデック/chroma/bit深度/上限解像度は変えられない(呼び出し側でチェック済みであることが前提)。
+CUresult CuvidDecode::ReconfigureDecoder(CUVIDEOFORMAT *pFormat) {
+    NVEncCtxAutoLock(ctxlock(m_ctxLock));
+    SetDecodeCreateInfo(pFormat);
+
+    CUVIDRECONFIGUREDECODERINFO reconfigureInfo = { 0 };
+    reconfigureInfo.ulWidth = (unsigned int)m_videoDecodeCreateInfo.ulWidth;
+    reconfigureInfo.ulHeight = (unsigned int)m_videoDecodeCreateInfo.ulHeight;
+    reconfigureInfo.ulTargetWidth = (unsigned int)m_videoDecodeCreateInfo.ulTargetWidth;
+    reconfigureInfo.ulTargetHeight = (unsigned int)m_videoDecodeCreateInfo.ulTargetHeight;
+    reconfigureInfo.ulNumDecodeSurfaces = (unsigned int)m_videoDecodeCreateInfo.ulNumDecodeSurfaces;
+    reconfigureInfo.display_area.left = m_videoDecodeCreateInfo.display_area.left;
+    reconfigureInfo.display_area.top = m_videoDecodeCreateInfo.display_area.top;
+    reconfigureInfo.display_area.right = m_videoDecodeCreateInfo.display_area.right;
+    reconfigureInfo.display_area.bottom = m_videoDecodeCreateInfo.display_area.bottom;
+    reconfigureInfo.target_rect.left = m_videoDecodeCreateInfo.target_rect.left;
+    reconfigureInfo.target_rect.top = m_videoDecodeCreateInfo.target_rect.top;
+    reconfigureInfo.target_rect.right = m_videoDecodeCreateInfo.target_rect.right;
+    reconfigureInfo.target_rect.bottom = m_videoDecodeCreateInfo.target_rect.bottom;
+
+    const auto curesult = cuvidReconfigureDecoder(m_videoDecoder, &reconfigureInfo);
+    if (curesult == CUDA_SUCCESS) {
+        AddMessage(RGY_LOG_DEBUG, _T("reconfigured decoder (mode: %s, coded: %dx%d, target: %dx%d, max: %dx%d)\n"),
+            get_chr_from_value(list_cuvid_mode, m_nDecType),
+            (int)m_videoDecodeCreateInfo.ulWidth, (int)m_videoDecodeCreateInfo.ulHeight,
+            (int)m_videoDecodeCreateInfo.ulTargetWidth, (int)m_videoDecodeCreateInfo.ulTargetHeight,
+            (int)m_videoDecodeCreateInfo.ulMaxWidth, (int)m_videoDecodeCreateInfo.ulMaxHeight);
+    }
+    return curesult;
+}
+
+CUresult CuvidDecode::InitDecode(CUvideoctxlock ctxLock, const VideoInfo *input, const VppParam *vpp, AVRational streamtimebase, shared_ptr<RGYLog> pLog, int nDecType, bool bCuvidResize, bool lowLatency, const std::pair<int, int>& adaptResolution) {
     //初期化
     CloseDecoder();
 
@@ -370,7 +525,6 @@ CUresult CuvidDecode::InitDecode(CUvideoctxlock ctxLock, const VideoInfo *input,
     }
     m_nDecType = nDecType;
     m_pPrintMes = pLog;
-    m_bIgnoreDynamicFormatChange = ignoreDynamicFormatChange;
     m_deinterlaceMode = (vpp) ? vpp->deinterlace : cudaVideoDeinterlaceMode_Weave;
 
     if (!check_if_nvcuvid_dll_available()) {
@@ -385,6 +539,37 @@ CUresult CuvidDecode::InitDecode(CUvideoctxlock ctxLock, const VideoInfo *input,
     }
 
     m_ctxLock = ctxLock;
+
+    //デコーダがサポートする解像度の下限/上限を取得しておく。解像度変更時にulMaxWidth/Heightをこの範囲へclampするのに使う。
+    //取得に失敗した場合はclampせずに進む(=capsの制約を確認できないだけで、デコーダ作成時にエラーになるので致命的ではない)。
+    memset(&m_videoDecodeCaps, 0, sizeof(m_videoDecodeCaps));
+    m_videoDecodeCaps.eCodecType = codec_rgy_to_dec(input->codec);
+    m_videoDecodeCaps.eChromaFormat = chromafmt_rgy_to_enc(RGY_CSP_CHROMA_FORMAT[input->csp]);
+    m_videoDecodeCaps.nBitDepthMinus8 = std::max(input->bitdepth - 8, 0);
+    CUresult capsResult = CUDA_SUCCESS;
+    {
+        NVEncCtxAutoLock(ctxlock(m_ctxLock));
+        capsResult = cuvidGetDecoderCaps(&m_videoDecodeCaps);
+    }
+    if (capsResult == CUDA_SUCCESS && m_videoDecodeCaps.bIsSupported) {
+        AddMessage(RGY_LOG_DEBUG, _T("decoder caps: min %dx%d, max %dx%d.\n"),
+            (int)m_videoDecodeCaps.nMinWidth, (int)m_videoDecodeCaps.nMinHeight,
+            (int)m_videoDecodeCaps.nMaxWidth, (int)m_videoDecodeCaps.nMaxHeight);
+        //未指定時のコンテナ宣言値はUpdateDecoderCreateInfo()でcapsへclampする従来挙動を維持する。
+        //一方、ユーザが明示した上限を黙って縮めると、指定範囲を処理できるように見えて切替点で初めて失敗するため、
+        //明示指定だけはparser/decoderを作る前にエラーにする。表示解像度との比較なので、ここでは32アライン前の値を使う。
+        if (adaptResolution.first > 0
+            && (adaptResolution.first > (int)m_videoDecodeCaps.nMaxWidth || adaptResolution.second > (int)m_videoDecodeCaps.nMaxHeight)) {
+            AddMessage(RGY_LOG_ERROR, _T("--adapt-resolution %dx%d exceeds the decoder limit %dx%d.\n"),
+                adaptResolution.first, adaptResolution.second,
+                (int)m_videoDecodeCaps.nMaxWidth, (int)m_videoDecodeCaps.nMaxHeight);
+            return CUDA_ERROR_NOT_SUPPORTED;
+        }
+    } else {
+        memset(&m_videoDecodeCaps, 0, sizeof(m_videoDecodeCaps));
+        AddMessage(RGY_LOG_DEBUG, _T("failed to get decoder caps %d (%s), decoder limit will not be clamped.\n"),
+            capsResult, char_to_tstring(_cudaGetErrorEnum(capsResult)).c_str());
+    }
 
     if (nullptr == (m_pFrameQueue = new CUVIDFrameQueue(m_ctxLock))) {
         AddMessage(RGY_LOG_ERROR, _T("Failed to alloc frame queue for decoder.\n"));
@@ -470,6 +655,16 @@ CUresult CuvidDecode::InitDecode(CUvideoctxlock ctxLock, const VideoInfo *input,
     m_videoDecodeCreateInfo.CodecType = cudaVideoCodec_NumCodecs; // こうしておいて後からDecVideoSequence()->CreateDecoder()で設定する
     m_videoDecodeCreateInfo.ulWidth   = input->srcWidth;
     m_videoDecodeCreateInfo.ulHeight  = input->srcHeight;
+    //ストリーム途中の解像度変更に備えて、指定された最大表示解像度をcoded size相当に切り上げてデコーダ上限とする。
+    //H.264のフィールド符号化などでは表示高さ1080に対してcoded height 1088が来るため、表示値をそのまま入れると
+    //「指定上限と同じ解像度」への切替でも上限超過になる。幅・高さとも32アラインしてこの差を吸収する。
+    //この値はデコードサーフェス全枚数の確保量に効き、無闇に大きくすると解像度変更のない通常入力でもVRAMを消費する。
+    //そのため未指定時は従来どおりコンテナ宣言解像度だけを使い、必要な入力に限ってユーザ指定で広げる。
+    //なおUpdateDecoderCreateInfo()は取得済みcapsへ最終clampし、一度設定した上限を縮小後も維持する。
+    const int maxWidth = (adaptResolution.first > 0) ? adaptResolution.first : input->srcWidth;
+    const int maxHeight = (adaptResolution.second > 0) ? adaptResolution.second : input->srcHeight;
+    m_videoDecodeCreateInfo.ulMaxWidth = ALIGN32(maxWidth);
+    m_videoDecodeCreateInfo.ulMaxHeight = ALIGN32(maxHeight);
     m_videoDecodeCreateInfo.ulNumDecodeSurfaces = FrameQueue::cnMaximumSize;
 
     m_videoDecodeCreateInfo.ChromaFormat = chromafmt_rgy_to_enc(RGY_CSP_CHROMA_FORMAT[input->csp]);

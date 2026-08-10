@@ -194,6 +194,7 @@
   - [--tcfile-in \<string\>](#--tcfile-in-string)
   - [--timebase \<int\>/\<int\>](#--timebase-intint)
   - [--input-hevc-bsf \<string\>](#--input-hevc-bsf-string)
+  - [--adapt-resolution \<int\>x\<int\>](#--adapt-resolution-intxint)
   - [--input-pixel-format \<string\>](#--input-pixel-format-string)
   - [--offset-video-dts-advance](#--offset-video-dts-advance)
   - [--allow-other-negative-pts](#--allow-other-negative-pts)
@@ -269,6 +270,7 @@
   - [--vpp-fruc \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-fruc-param1value1param2value2)
   - [--vpp-anime4k-shader \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-anime4k-shader-param1value1param2value2)
   - [--vpp-onnx \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-onnx-param1value1param2value2)
+  - [--vpp-onnx-deint \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-onnx-deint-param1value1param2value2)
   - [--vpp-onnx-model-dir \<string\>](#--vpp-onnx-model-dir-string)
   - [--vpp-onnx-cache-dir \<string\>](#--vpp-onnx-cache-dir-string)
   - [--vpp-rife-ov \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-rife-ov-param1value1param2value2)
@@ -809,6 +811,15 @@ Specify B frame reference mode.
 - disabled
 - each ... use each B frames as references  
 - middle ... only (Number of B-frame)/2 th B-frame will be used for reference  
+- hierarchical ... use hierarchical B-frame references (AV1, NVENC API 13.1 or later)
+
+`hierarchical` has the following restrictions.
+
+- `--bframes` must be 0, 1, 3, 7, 15, or 31.
+- Lookahead must be disabled. When enabling Lookahead, specify `--lookahead-level 0`, `--no-i-adapt`, and `--no-b-adapt` together.
+- `--multipass` must be `none`.
+- `--split-enc` must be `auto` (recommended) or `disable`.
+- PTD must be enabled. NVEncC always enables PTD.
 
 ### --direct &lt;string&gt; [H.264]
 Specify H.264 B Direct mode.
@@ -1266,6 +1277,7 @@ Copy audio track into output file. Available only when avhw / avsw reader is use
 If it does not work well, try encoding with [--audio-codec](#--audio-codec-intstring), which is more stable.
 
 You can also specify the audio track (1, 2, ...) to extract with [&lt;int&gt;], or select audio track to copy by language with [&lt;string&gt;].
+Prefix languages with `!` to select all tracks except those languages (for example, `!eng,!jpn`).
 
 - Examples
   ```
@@ -1283,6 +1295,7 @@ You can also specify the audio track (1, 2, ...) to extract with [&lt;int&gt;], 
 Encode audio track with the codec specified. If codec is not set, most suitable codec will be selected automatically. Codecs available could be checked with [--check-encoders](#--check-codecs---check-decoders---check-encoders).
 
 You can select audio track (1, 2, ...) to encode with [&lt;int&gt;], or select audio track to encode by language with [&lt;string&gt;].
+Prefix languages with `!` to select all tracks except those languages (for example, `--audio-codec !eng,!jpn?copy`).
 
 Also, after ":" you can specify params for audio encoder,  after "#" you can specify params for audio decoder.
 
@@ -1666,6 +1679,7 @@ Read subtitle from the specified file and mux into the output file.
 ### --sub-copy [&lt;int/string&gt;;[,&lt;int/string&gt;]...]
 Copy subtitle tracks from input file. Available only when avhw / avsw reader is used.
 It is also possible to specify subtitle tracks (1, 2, ...) to extract with [&lt;int&gt;], or select subtitle tracks to copy by language with [&lt;string&gt;].
+Prefix languages with `!` to select all tracks except those languages (for example, `!eng,!jpn`).
 
 Supported subtitles are PGS / srt / txt / ttxt.
 
@@ -1813,6 +1827,13 @@ switch hevc bitstream filter used for hw decoder input. (for debug purpose)
   - libavcodec  
     use hevc_mp4toannexb bitstream filter.
 
+### --adapt-resolution &lt;int&gt;x&lt;int&gt;
+Specify the maximum resolution allowed for mid-stream resolution changes.
+
+For avhw, this sets the CUVID decoder max resolution. For avsw, this sets the allocation size of input surfaces. The value must be greater than or equal to the initial input resolution. When omitted, the container-declared input resolution is used as the upper limit.
+
+Larger limits increase memory usage for decode/input surfaces.
+
 ### --input-pixel-format &lt;string&gt;
 Set "pixel_format" for input avdevice. (not intended on other situations)
 
@@ -1896,6 +1917,7 @@ Vpp filters will be applied in fixed order, regardless of the order in the comma
 - [--vpp-fruc](#--vpp-overlay-param1value1param2value2)
 - [--vpp-anime4k-shader](#--vpp-anime4k-shader-param1value1param2value2)
 - [--vpp-onnx](#--vpp-onnx-param1value1param2value2)
+- [--vpp-onnx-deint](#--vpp-onnx-deint-param1value1param2value2)
 - [--vpp-onnx-model-dir](#--vpp-onnx-model-dir-string)
 - [--vpp-onnx-cache-dir](#--vpp-onnx-cache-dir-string)
 - [--vpp-rife-ov](#--vpp-rife-ov-param1value1param2value2)
@@ -4420,12 +4442,43 @@ Pre/post processing is inferred from the model channel count: 1ch=luma SR, 3ch=R
   --vpp-onnx model=hdrtvnetpp_agcm_dynamic,colormatrix=bt709 --output-depth 10 --colormatrix bt2020nc --colorprim bt2020 --transfer smpte2084
   ```
 
+### --vpp-onnx-deint [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+ONNX model based deinterlacing filter. The model is selected by its registered name in `onnx_deint_models.json`; direct ONNX paths are not accepted. The `architecture` field in that manifest is internal metadata and cannot be selected as a command-line parameter.
+
+The `stdeint` and `stdeint_fast` registrations use ST-DeInt (3-channel input, 6-channel half-height output). The `DDD` registration uses DDD (three-field, transposed 9-channel input and 3-channel output). `mode=bob` outputs two progressive frames per input frame and doubles the frame rate; `mode=normal` outputs one frame using the first displayed field. TFF and BFF field order are preserved. Progressive input is passed through without neural deinterlacing.
+
+This filter accepts 8-bit YUV420 input only, with an even frame height of at least 4. Inference uses ONNX Runtime with the CUDA or TensorRT execution provider. DDD keeps tensor packing and output weaving on host memory, while inference still runs on the GPU.
+
+- **Parameters**
+  - enable=&lt;bool&gt; (default: true when this option is present)  
+    Enable or disable the filter.
+  - model=&lt;string&gt; (required)  
+    Registered name from `onnx_deint_models.json` under [`--vpp-onnx-model-dir`](#--vpp-onnx-model-dir-string). Names such as `stdeint`, `stdeint_fast`, and `DDD` are examples; a file path is rejected.
+  - precision=&lt;string&gt; (default: fp32)  
+    Inference precision: fp32 / auto. `auto` allows TensorRT fp16.
+  - mode=&lt;string&gt; (default: bob)  
+    Output mode: bob / normal.
+  - colormatrix=&lt;string&gt; (default: auto)  
+    Input color matrix: auto / auto_res / bt709 / smpte170m / bt470bg / bt2020nc.
+  - colorrange=&lt;string&gt; (default: auto)  
+    Input color range: auto / limited (tv) / full (pc).
+
+Neither NVEnc nor the HWEnc-onnx-models release archives include ST-DeInt or DDD model files. Check the applicable rights and licenses, place or generate the models separately, then run `run_all.py` in the [HWEnc-onnx-models repository](https://github.com/rigaya/HWEnc-onnx-models) to generate `onnx_deint_models.json`.
+
+```
+--vpp-onnx-model-dir C:\models\HWEnc-onnx-models
+--vpp-onnx-deint model=stdeint,mode=bob,precision=fp32
+--vpp-onnx-deint model=DDD,mode=normal,precision=auto
+```
+
 ### --vpp-onnx-model-dir &lt;string&gt;
 Specify the directory containing models.json and the model files for registered ONNX models.
 
 This option is required when using short model names with `--vpp-onnx model=<name>`, or when listing registered models with `--vpp-onnx list`.
 
 Model files can be downloaded from [https://github.com/rigaya/HWEnc-onnx-models/releases](https://github.com/rigaya/HWEnc-onnx-models/releases). Download the zip archive, extract it to an arbitrary directory, and specify that directory.
+
+The release archives do not contain ST-DeInt or DDD models, or the deinterlacer manifest. Generate or place those files separately, verify their rights and licenses, and generate `onnx_deint_models.json` with `run_all.py` before using `--vpp-onnx-deint`.
 
 This option only specifies where model files are located. The ONNX Runtime GPU, CUDA runtime, cuDNN, TensorRT, and related DLLs must still be made visible separately through `PATH` or by placing them next to `NVEncC64.exe`.
 

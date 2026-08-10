@@ -497,8 +497,15 @@ void RGYOutputAvcodec::CloseVideo(AVMuxVideo *muxVideo) {
 
 void RGYOutputAvcodec::CloseFormat(AVMuxFormat *muxFormat) {
     if (muxFormat->formatCtx) {
-        if (!muxFormat->streamError && m_Mux.format.fileHeaderWritten) {
-            av_write_trailer(muxFormat->formatCtx);
+        if (m_Mux.format.fileHeaderWritten) {
+            //trailerを書かないとmp4のmoovが作られず、それまでに書き出した分すら再生できないファイルになってしまう。
+            //そのため、途中でエラーになった場合でもtrailerの書き込みは必ず試みて、部分的にでも再生できる状態で残す
+            const auto ret = av_write_trailer(muxFormat->formatCtx);
+            if (ret < 0) {
+                AddMessage(RGY_LOG_WARN, _T("failed to write trailer: %s.\n"), qsv_av_err2str(ret).c_str());
+            } else if (muxFormat->streamError) {
+                AddMessage(RGY_LOG_WARN, _T("output file was finalized, but it is incomplete due to the error above.\n"));
+            }
         }
 #if USE_CUSTOM_IO
         if (!muxFormat->fpOutput) {
@@ -4276,7 +4283,9 @@ RGY_ERR RGYOutputAvcodec::WriteOtherPacket(AVPacket *pkt) {
         //以前のptsより前になりそうになったら修正する
         const auto maxPts = pMuxOther->lastPtsOut + ((m_Mux.format.formatCtx->oformat->flags & AVFMT_TS_NONSTRICT) ? 0 : 1);
         if (pkt->pts < maxPts) {
-            auto loglevel = (maxPts - pkt->pts > 2 && pMuxOther->streamOut->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE /*字幕の場合は頻繁に発生することがある*/) ? RGY_LOG_WARN : RGY_LOG_DEBUG;
+            const auto loglevel = (pMuxOther->streamOut->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE)
+                ? RGY_LOG_TRACE // 字幕の場合は頻繁に発生することがある
+                : ((maxPts - pkt->pts > 2) ? RGY_LOG_WARN : RGY_LOG_DEBUG);
             if (loglevel >= m_printMes->getLogLevel(RGY_LOGT_OUT)) {
                 AddMessage(loglevel, _T("Timestamp error in stream %d, previous: %lld, current: %lld [timebase: %d/%d].\n"),
                     pMuxOther->streamOut->index,
