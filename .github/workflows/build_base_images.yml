@@ -28,7 +28,8 @@ jobs:
       NVENC_HEADER_DIR: /opt/nvenc_headers
       AVISYNTH_HEADERS_URL: https://github.com/AviSynth/AviSynthPlus/archive/refs/tags/v3.7.5.tar.gz
       VAPOURSYNTH_HEADERS_URL: https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R72.tar.gz
-      VSHIP_HEADERS_URL: https://codeberg.org/Line-fr/Vship/archive/v5.0.0.tar.gz
+      VSHIP_REPO: https://codeberg.org/Line-fr/Vship.git
+      VSHIP_TAG: v5.0.0
       NVENCC_FFMPEG_VERSION: '8.1.2'
 
     steps:
@@ -76,8 +77,8 @@ jobs:
             NVENC_HEADER_DIR=${{ env.NVENC_HEADER_DIR }}
             AVISYNTH_HEADERS_URL=${{ env.AVISYNTH_HEADERS_URL }}
             VAPOURSYNTH_HEADERS_URL=${{ env.VAPOURSYNTH_HEADERS_URL }}
-            VSHIP_HEADERS_URL=${{ env.VSHIP_HEADERS_URL }}
+            VSHIP_REPO=${{ env.VSHIP_REPO }}
+            VSHIP_TAG=${{ env.VSHIP_TAG }}
             NVENCC_FFMPEG_VERSION=${{ env.NVENCC_FFMPEG_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
