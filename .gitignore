@@ -20,6 +20,7 @@ config.mak
 
 rgy_rev.h
 /nvencc
+/.build-cuda13-framequeue-test/
 
 # Build results
 
