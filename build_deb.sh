@@ -9,6 +9,7 @@ PACKAGE_VERSION=`git describe --tags | cut -f 1 --delim="-"`
 PACKAGE_ARCH=`uname -m`
 PACKAGE_ARCH=`echo ${PACKAGE_ARCH} | sed -e 's/x86_64/amd64/g'`
 PACKAGE_ARCH=`echo ${PACKAGE_ARCH} | sed -e 's/aarch64/arm64/g'`
+PACKAGE_FILE_SUFFIX=${PACKAGE_FILE_SUFFIX:+_${PACKAGE_FILE_SUFFIX}}
 
 if [ -e /etc/lsb-release ]; then
     PACKAGE_OS_ID=`cat /etc/lsb-release | grep DISTRIB_ID | cut -f 2 --delim="="`
@@ -50,5 +51,5 @@ mkdir -p ${PACKAGE_ROOT}/usr/bin
 cp ${PACKAGE_BIN} ${PACKAGE_ROOT}/usr/bin
 chmod +x ${PACKAGE_ROOT}/usr/bin/${PACKAGE_BIN}
 
-DEB_FILE="${PACKAGE_NAME}_${PACKAGE_VERSION}_${PACKAGE_ARCH}.deb"
+DEB_FILE="${PACKAGE_NAME}_${PACKAGE_VERSION}${PACKAGE_FILE_SUFFIX}_${PACKAGE_ARCH}.deb"
 dpkg-deb -b "${PACKAGE_ROOT}" "${DEB_FILE}"

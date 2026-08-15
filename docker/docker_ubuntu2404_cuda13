@@ -1,0 +1,154 @@
+# syntax=docker/dockerfile:1
+
+# Keep the CUDA 13.3 toolchain for native sm_120 code, while pinning the
+# runtime NVRTC used by NVEncC to the CUDA 12.9 series.
+ARG NVENCC_CUDA_VERSION=13.3.0
+FROM nvidia/cuda:${NVENCC_CUDA_VERSION}-devel-ubuntu24.04
+
+ARG DEBIAN_FRONTEND=noninteractive \
+    FFMPEG_DLL_REPO=https://github.com/Oomugi413/build_scripts.git \
+    FFMPEG_DLL_REF=master \
+    FFMPEG_DLL_REV=unknown \
+    NVENCC_FFMPEG_VERSION=8.1.2 \
+    BUILD_SCRIPTS_DIR=/opt/build_scripts \
+    NVENC_HEADER_DIR=/opt/nvenc_headers \
+    AVISYNTH_HEADERS_URL=https://github.com/AviSynth/AviSynthPlus/archive/refs/tags/v3.7.5.tar.gz \
+    VAPOURSYNTH_HEADERS_URL=https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R72.tar.gz \
+    VSHIP_REPO=https://codeberg.org/Line-fr/Vship.git \
+    VSHIP_TAG=v5.0.0 \
+    FFMPEG_PREFIX=/opt/build_scripts/ffmpeg_dll/build_dll/x64/build \
+    VMAF_PREFIX=/opt/build_scripts/ffmpeg_dll/x64/build
+
+ENV CUDA_PATH=/usr/local/cuda
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cuda/bin:/usr/local/cargo/bin:${PATH}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      autoconf \
+      autogen \
+      automake \
+      autopoint \
+      build-essential \
+      bzip2 \
+      ca-certificates \
+      cmake \
+      curl \
+      gettext \
+      git \
+      gperf \
+      libssl-dev \
+      libtool \
+      libx11-dev \
+      lsb-release \
+      make \
+      nasm \
+      ninja-build \
+      openssl \
+      p7zip-full \
+      patch \
+      pkg-config \
+      python3 \
+      python3-pip \
+      unzip \
+      wget \
+      xxd \
+      xz-utils \
+      yasm \
+      cuda-nvrtc-12-9 \
+      cuda-nvrtc-dev-12-9 \
+    && python3 -m pip install --break-system-packages --no-cache-dir --upgrade meson \
+    && test -f /usr/local/cuda/include/npp.h \
+    && test -f /usr/local/cuda/include/nvrtc.h \
+    && test -f /usr/local/cuda/include/nvml.h \
+    && test -f /usr/local/cuda/include/curand_kernel.h \
+    && test -f /usr/local/cuda/lib64/libcudart_static.a \
+    && test -f /usr/local/cuda/lib64/libnppif_static.a \
+    && test -f /usr/local/cuda/lib64/libnppig_static.a \
+    && test -f /usr/local/cuda/lib64/libnppc_static.a \
+    && test -f /usr/local/cuda/lib64/libculibos.a \
+    && test -f /usr/local/cuda/lib64/stubs/libcuda.so \
+    && test -e /usr/local/cuda-12.9/targets/x86_64-linux/lib/libnvrtc.so \
+    && test -e /usr/local/cuda-12.9/targets/x86_64-linux/lib/libnvrtc-builtins.so \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin cargo-c to the version already proven by the RTX 50 standalone build.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal \
+    && cargo install cargo-c --version '0.10.18+cargo-0.92.0' --locked \
+    && cargo cbuild --version
+
+# Resolve the exact build_scripts revision selected by the workflow, then pin
+# FFmpeg independently so a future development snapshot cannot break releases.
+RUN if [[ "${FFMPEG_DLL_REV}" == "unknown" ]]; then \
+      git clone --depth 1 --branch "${FFMPEG_DLL_REF}" "${FFMPEG_DLL_REPO}" "${BUILD_SCRIPTS_DIR}"; \
+    else \
+      git init "${BUILD_SCRIPTS_DIR}" \
+      && git -C "${BUILD_SCRIPTS_DIR}" remote add origin "${FFMPEG_DLL_REPO}" \
+      && git -C "${BUILD_SCRIPTS_DIR}" fetch --depth 1 origin "${FFMPEG_DLL_REV}" \
+      && git -C "${BUILD_SCRIPTS_DIR}" checkout --detach FETCH_HEAD; \
+    fi \
+    && mkdir -p "${BUILD_SCRIPTS_DIR}/ffmpeg_dll/src" \
+    && curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${NVENCC_FFMPEG_VERSION}.tar.xz" \
+      | tar -xJ -C "${BUILD_SCRIPTS_DIR}/ffmpeg_dll/src" \
+    && mv "${BUILD_SCRIPTS_DIR}/ffmpeg_dll/src/ffmpeg-${NVENCC_FFMPEG_VERSION}" \
+      "${BUILD_SCRIPTS_DIR}/ffmpeg_dll/src/ffmpeg" \
+    && cd "${BUILD_SCRIPTS_DIR}/ffmpeg_dll" \
+    && sed -i 's/\r$//' ./build_ffmpeg_dll.sh ./build_libvmaf.sh \
+    && if ! grep -Fq '"-Denable_float=true"' ./build_libvmaf.sh; then \
+      sed -i '/"-Dbuilt_in_models=true"/a\        "-Denable_float=true"' ./build_libvmaf.sh; \
+    fi
+
+RUN cd "${BUILD_SCRIPTS_DIR}/ffmpeg_dll" \
+    && export NUMBER_OF_PROCESSORS="$(nproc)" \
+    && bash ./build_ffmpeg_dll.sh --skip-src-archive --disable-pgo \
+    && test -f "${FFMPEG_PREFIX}/lib/pkgconfig/libavutil.pc"
+
+# build_scripts currently creates a shared Vulkan Loader on Linux. Rebuild it
+# as a static archive so the distributed NVEncC package remains standalone.
+RUN vulkan_source="${BUILD_SCRIPTS_DIR}/ffmpeg_dll/build_dll/x64/Vulkan-Loader" \
+    && sed -i 's/add_library(vulkan SHARED)/add_library(vulkan STATIC)/' "${vulkan_source}/loader/CMakeLists.txt" \
+    && grep -F 'add_library(vulkan STATIC)' "${vulkan_source}/loader/CMakeLists.txt" \
+    && cmake -S "${vulkan_source}" -B "${vulkan_source}/build" \
+      -DCMAKE_INSTALL_PREFIX="${FFMPEG_PREFIX}" \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_TESTS=OFF \
+      -DUNIX=OFF \
+      -DVULKAN_HEADERS_INSTALL_DIR="${FFMPEG_PREFIX}" \
+      -DBUILD_WSI_XCB_SUPPORT=OFF \
+      -DBUILD_WSI_XLIB_SUPPORT=OFF \
+      -DBUILD_WSI_WAYLAND_SUPPORT=OFF \
+      -DBUILD_WSI_DIRECTFB_SUPPORT=OFF \
+    && cmake --build "${vulkan_source}/build" -j"$(nproc)" \
+    && cmake --install "${vulkan_source}/build" \
+    && rm -f "${FFMPEG_PREFIX}/lib"/libvulkan.so* \
+    && test -f "${FFMPEG_PREFIX}/lib/libvulkan.a"
+
+RUN cd "${BUILD_SCRIPTS_DIR}/ffmpeg_dll" \
+    && export NUMBER_OF_PROCESSORS="$(nproc)" \
+    && bash ./build_libvmaf.sh --skip-src-archive \
+    && test -f "${VMAF_PREFIX}/lib/pkgconfig/libvmaf.pc"
+
+# Keep the same NVEncC plugin/header support as docker_ubuntu2004_cuda11.
+RUN mkdir -p "${NVENC_HEADER_DIR}" \
+    && curl -fsSL "${AVISYNTH_HEADERS_URL}" -o /tmp/avisynth_headers.tar.gz \
+    && tar -xzf /tmp/avisynth_headers.tar.gz -C "${NVENC_HEADER_DIR}" \
+    && rm -f /tmp/avisynth_headers.tar.gz \
+    && curl -fsSL "${VAPOURSYNTH_HEADERS_URL}" -o /tmp/vapoursynth_headers.tar.gz \
+    && tar -xzf /tmp/vapoursynth_headers.tar.gz -C "${NVENC_HEADER_DIR}" \
+    && rm -f /tmp/vapoursynth_headers.tar.gz \
+    && git clone --depth 1 --branch "${VSHIP_TAG}" --single-branch "${VSHIP_REPO}" "${NVENC_HEADER_DIR}/vship" \
+    && test -f "${NVENC_HEADER_DIR}/AviSynthPlus-3.7.5/avs_core/include/avisynth_c.h" \
+    && test -f "${NVENC_HEADER_DIR}/vapoursynth-R72/include/VapourSynth.h" \
+    && test -f "${NVENC_HEADER_DIR}/vship/src/VshipAPI.h"
+
+ENV FFMPEG_PREFIX=${FFMPEG_PREFIX}
+ENV VMAF_PREFIX=${VMAF_PREFIX}
+ENV NVENC_HEADER_DIR=${NVENC_HEADER_DIR}
+ENV LD_LIBRARY_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64
+
+WORKDIR /work
