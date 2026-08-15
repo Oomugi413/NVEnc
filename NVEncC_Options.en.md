@@ -3199,7 +3199,7 @@ Apply custom shaders in the specified path using [libplacebo](https://code.video
     - colorsystem=&lt;string&gt;  
       Color system to use. Default: auto detect.
       ```
-      unknown, bt601, bt709, smpte240m, bt2020nc, bt2020c, bt2100pq, bt2100hlg, dolbyvision, ycgco, rgb, xyz
+      unknown, bt601, bt709, smpte240m, bt2020nc, bt2020c, bt2100pq, bt2100hlg, dolbyvision, ycgco, rgb, xyz, ycgco-re, ycgco-ro
       ```
 
     - transfer=&lt;string&gt;  
@@ -4201,8 +4201,9 @@ A complete chain in one pass: optional pre-filter denoise -> main Anime4K mode -
   - out_res=&lt;WxH&gt;  
     End-of-chain resize to an arbitrary final size, applied after the Anime4K stage.
     A negative value on one axis keeps the source aspect (e.g. out_res=-2x1080).
-  - resize=&lt;string&gt; (default: lanczos4)  
-    Resampler for out_res.
+  - resize=&lt;string&gt; (default: spline16)  
+    Resampler for out_res.  
+    lanczos4 / spline16 / spline36 / jinc144 / nis / bicubic / ...
 
 - Examples
   ```

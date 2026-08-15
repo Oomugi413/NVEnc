@@ -3255,7 +3255,7 @@ nppc64_11.dll, nppif64_11.dll, nppig64_11.dllをNVEncC64と同じフォルダに
     - colorsystem=&lt;string&gt;  
       使用する色空間を指定。デフォルトでは入力ファイルから自動的に設定される。
       ```
-      unknown, bt601, bt709, smpte240m, bt2020nc, bt2020c, bt2100pq, bt2100hlg, dolbyvision, ycgco, rgb, xyz
+      unknown, bt601, bt709, smpte240m, bt2020nc, bt2020c, bt2100pq, bt2100hlg, dolbyvision, ycgco, rgb, xyz, ycgco-re, ycgco-ro
       ```
 
     - transfer=&lt;string&gt;  
@@ -4258,8 +4258,9 @@ CNNモデルは含まれておらず、そちらを使用する場合は、[`--v
   - out_res=&lt;WxH&gt;  
     Anime4K処理後の最終リサイズ。任意の最終サイズに合わせられる。
     片方の軸に負の値を指定するとアスペクト比を保持 (例: out_res=-2x1080)。
-  - resize=&lt;string&gt; (デフォルト: lanczos4)  
-    out_resで使用するリサンプラー。
+  - resize=&lt;string&gt; (デフォルト: spline16)  
+    out_resで使用するリサンプラー。  
+    lanczos4 / spline16 / spline36 / jinc144 / nis / bicubic / ...
 
 - 使用例
   ```

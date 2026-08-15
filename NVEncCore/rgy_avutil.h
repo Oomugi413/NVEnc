@@ -102,6 +102,34 @@ using uniuqeRGYChannelLayout = std::unique_ptr<RGYChannelLayout>;
 #define FF_PROFILE_UNKNOWN (AV_PROFILE_UNKNOWN)
 #endif
 
+static inline AVRational rgy_av_stream_get_codec_timebase(const AVStream *stream) {
+#if LIBAVFORMAT_VERSION_MAJOR < 63
+    return av_stream_get_codec_timebase(stream);
+#else
+    return stream->time_base;
+#endif
+}
+
+static inline const AVSampleFormat *rgy_avcodec_get_sample_fmts(const AVCodec *codec) {
+#if LIBAVCODEC_VERSION_MAJOR < 63
+    return codec->sample_fmts;
+#else
+    const void *sample_fmts = nullptr;
+    avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0, &sample_fmts, nullptr);
+    return static_cast<const AVSampleFormat *>(sample_fmts);
+#endif
+}
+
+static inline const int *rgy_avcodec_get_supported_samplerates(const AVCodec *codec) {
+#if LIBAVCODEC_VERSION_MAJOR < 63
+    return codec->supported_samplerates;
+#else
+    const void *samplerates = nullptr;
+    avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_RATE, 0, &samplerates, nullptr);
+    return static_cast<const int *>(samplerates);
+#endif
+}
+
 template<typename T>
 struct RGYAVDeleter {
     RGYAVDeleter() : deleter(nullptr) {};
@@ -276,9 +304,9 @@ static tstring errorMesForCodec(const TCHAR *mes, AVCodecID targetCodec) {
 
 static const AVRational HW_NATIVE_TIMEBASE = { 1, (int)HW_TIMEBASE };
 static const TCHAR *AVCODEC_DLL_NAME[] = {
-    _T("avcodec-62.dll"), _T("avformat-62.dll"), _T("avutil-60.dll"), _T("avfilter-11.dll"), _T("swresample-6.dll")
+    _T("avcodec-63.dll"), _T("avformat-63.dll"), _T("avutil-61.dll"), _T("avfilter-12.dll"), _T("swresample-7.dll")
 #if ENABLE_LIBAVDEVICE
-    , _T("avdevice-62.dll")
+    , _T("avdevice-63.dll")
 #endif
 };
 
