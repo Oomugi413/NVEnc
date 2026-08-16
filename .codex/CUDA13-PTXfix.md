@@ -258,9 +258,7 @@ Compiling .../vulkan_stubs.c.o
 
 libplacebo 7.360.1が要求するVulkan 1.4およびshaderc対応環境を揃え、Vulkan stub版ではなく実装版を生成できる構成にした。変更は`Oomugi413/build_scripts`のcommit `faa2498`としてpush済み。
 
-詳細な変更記録は次を参照。
-
-- [Oomugi413/build_scripts/.codex/libplacebo_update.md](https://github.com/Oomugi413/build_scripts/blob/master/.codex/libplacebo_update.md)
+本家build_scriptsの依存ファイル更新により、この項目で問題となっていた依存ライブラリが最新版となり、問題が解消された。そのため、現在上記コミットは存在せず、該当リポジトリは2026年8月16日21:26現在、rigaya氏の親リポジトリと同一コミットを採用している。
 
 ### base imageタグの再現性に関する追加確認
 

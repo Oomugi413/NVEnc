@@ -32,8 +32,8 @@ option('enable_libass',
 
 option('libass_static',
   type: 'boolean',
-  value: true,
-  description: 'Statically link libass on Linux'
+  value: false,
+  description: 'Statically link libass on Linux (opt-in; avoids mixing static GLib with shared FFmpeg libraries)'
 )
 
 option('enable_libplacebo',
