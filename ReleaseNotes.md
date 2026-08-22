@@ -29,6 +29,7 @@
   - svt-av1 3.1.0 -> 4.2.0
   - dovi_tool 2.3.1 -> 2.3.3
 - Reinitialize host path after [--vpp-onnx](./NVEncC_Options.en.md#--vpp-onnx-param1value1param2value2) zero-copy failure. ( #791 )
+- [--vpp-onnx](./NVEncC_Options.en.md#--vpp-onnx-param1value1param2value2) で9～16bit YUV入力に対応。 ( #794 )
 - Fix [--vpp-anime4k-shader](./NVEncC_Options.en.md#--vpp-anime4k-shader-param1value1param2value2) deblur strength depending on parameter order.
 - Fix LUT3D input domain handling in [--vpp-colorspace](./NVEncC_Options.en.md#--vpp-colorspace-param1value1param2value2).
 - Fix double application of saturation in [--vpp-tweak](./NVEncC_Options.en.md#--vpp-tweak-param1value1param2value2).

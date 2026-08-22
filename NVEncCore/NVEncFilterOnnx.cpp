@@ -47,7 +47,7 @@ NVEncFilterOnnx::NVEncFilterOnnx() :
     m_matVR(0), m_matUG(0), m_matVG(0), m_matUB(0),
     m_matRY(0), m_matGY(0), m_matBY(0), m_matRU(0), m_matGU(0), m_matBU(0), m_matRV(0), m_matGV(0), m_matBV(0),
     m_inStaging(), m_outStaging(), m_inBuf(), m_outBuf(), m_u444(), m_v444(),
-    m_inputDevice(), m_outputDevice(), m_cropToRgb(), m_cropFromRgb(), m_cropToYuv444(), m_cropFromYuv444(),
+    m_inputDevice(), m_outputDevice(), m_cropToRgb(), m_cropFromRgb(), m_cropToYuv444(), m_cropFromYuv444(), m_lumaResize(),
     m_modelPath(), m_provider(RGYOnnxRTProvider::Auto), m_precision(), m_cacheDir(), m_deviceID(-1),
     m_cudaPathTried(false), m_cudaPath(false),
     m_temporalT(1), m_ring(), m_ringBaseIdx(0), m_recvCount(0), m_emitCount(0),
@@ -94,6 +94,22 @@ static bool onnx_supported_colorrange(CspColorRange range) {
     return range == RGY_COLORRANGE_AUTO
         || range == RGY_COLORRANGE_LIMITED
         || range == RGY_COLORRANGE_FULL;
+}
+
+static bool onnx_supported_csp(RGY_CSP csp) {
+    switch (csp) {
+    case RGY_CSP_NV12:
+    case RGY_CSP_P010:
+    case RGY_CSP_YV12:
+    case RGY_CSP_YV12_09:
+    case RGY_CSP_YV12_10:
+    case RGY_CSP_YV12_12:
+    case RGY_CSP_YV12_14:
+    case RGY_CSP_YV12_16:
+        return true;
+    default:
+        return false;
+    }
 }
 
 // Bilinear upscale of one 8-bit channel from (sw x sh) to (sw*scale x sh*scale)
@@ -377,8 +393,8 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
     }
 
     const auto inCsp = prm->frameIn.csp;
-    if ((inCsp != RGY_CSP_YV12 && inCsp != RGY_CSP_NV12) || prm->frameIn.bitdepth != 8) {
-        AddMessage(RGY_LOG_ERROR, _T("onnx: supports 8-bit yuv420 (yv12/nv12) only; got %s %dbit.\n"),
+    if (!onnx_supported_csp(inCsp)) {
+        AddMessage(RGY_LOG_ERROR, _T("onnx: 対応する入力形式はYUV420の8/9/10/12/14/16bitのみです: %s %dbit。\n"),
             RGY_CSP_NAMES[inCsp], prm->frameIn.bitdepth);
         return RGY_ERR_UNSUPPORTED;
     }
@@ -435,6 +451,10 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
     m_inC  = m_ov->inChannels();
     m_outC = m_ov->outChannels();
     if (!prm->onnx.maskFile.empty()) {
+        if (RGY_CSP_BIT_DEPTH[inCsp] != 8) {
+            AddMessage(RGY_LOG_ERROR, _T("onnx: 9bit以上の入力ではmask=を使用できません。\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
         if (prm->onnx.frames > 1) {
             AddMessage(RGY_LOG_ERROR, _T("onnx: mask=とframes=は同時に指定できません。\n"));
             return RGY_ERR_UNSUPPORTED;
@@ -448,6 +468,10 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
     }
     m_temporalT = std::max(1, prm->onnx.frames);
     if (m_temporalT > 1) {
+        if (RGY_CSP_BIT_DEPTH[inCsp] != 8) {
+            AddMessage(RGY_LOG_ERROR, _T("onnx: 9bit以上の入力ではframes=を使用できません。\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
         if (m_inC != m_temporalT * 3 || m_outC != 3) {
             AddMessage(RGY_LOG_ERROR, _T("onnx: frames=%dには%dch入力と3ch出力のRGBモデルが必要です（現在%dch/%dch）。\n"),
                 m_temporalT, m_temporalT * 3, m_inC, m_outC);
@@ -479,7 +503,7 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
             (m_io == OnnxIO::Chroma) ? _T("chroma") : _T("gray+noise"), m_scale);
         return RGY_ERR_UNSUPPORTED;
     }
-    m_maxval = (float)((1 << prm->frameIn.bitdepth) - 1);
+    m_maxval = (float)((1 << RGY_CSP_BIT_DEPTH[inCsp]) - 1);
 
     m_ycbcr = (m_io == OnnxIO::Chroma) || (m_io == OnnxIO::RGB && prm->onnx.colorspace == _T("ycbcr"));
 
@@ -518,22 +542,38 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
         m_u444.resize((size_t)outW * outH);
         m_v444.resize((size_t)outW * outH);
     }
-    m_inStaging  = std::make_unique<CUFrameBuf>();
-    m_outStaging = std::make_unique<CUFrameBuf>();
-    if (m_inStaging->allocHost(inW, inH, inCsp) != RGY_ERR_NONE
-        || m_outStaging->allocHost(outW, outH, inCsp) != RGY_ERR_NONE) {
-        AddMessage(RGY_LOG_ERROR, _T("onnx: failed to allocate host staging frame buffers.\n"));
-        return RGY_ERR_MEMORY_ALLOC;
+    if (RGY_CSP_BIT_DEPTH[inCsp] == 8) {
+        m_inStaging  = std::make_unique<CUFrameBuf>();
+        m_outStaging = std::make_unique<CUFrameBuf>();
+        if (m_inStaging->allocHost(inW, inH, inCsp) != RGY_ERR_NONE
+            || m_outStaging->allocHost(outW, outH, inCsp) != RGY_ERR_NONE) {
+            AddMessage(RGY_LOG_ERROR, _T("onnx: failed to allocate host staging frame buffers.\n"));
+            return RGY_ERR_MEMORY_ALLOC;
+        }
     }
 
     m_cudaPathTried = false;
     m_cudaPath = false;
-    if (m_temporalT == 1 && (m_io == OnnxIO::GrayNoise || m_io == OnnxIO::Chroma || m_io == OnnxIO::RGB || m_io == OnnxIO::RGBNoise)) {
+    if (m_temporalT == 1) {
         m_inputDevice = std::make_unique<CUMemBuf>(m_inBuf.size() * sizeof(float));
         m_outputDevice = std::make_unique<CUMemBuf>(m_outBuf.size() * sizeof(float));
         if (m_inputDevice->alloc() != RGY_ERR_NONE || m_outputDevice->alloc() != RGY_ERR_NONE) {
             AddMessage(RGY_LOG_ERROR, _T("onnx: CUDAテンソルバッファの確保に失敗しました。\n"));
             return RGY_ERR_MEMORY_ALLOC;
+        }
+    }
+    if (m_temporalT == 1 && m_io == OnnxIO::LumaSR && m_scale != 1) {
+        auto resizeParam = std::make_shared<NVEncFilterParamResize>();
+        resizeParam->interp = RGY_VPP_RESIZE_BILINEAR;
+        resizeParam->frameIn = prm->frameIn;
+        resizeParam->frameOut = frameOut;
+        resizeParam->baseFps = prm->baseFps;
+        resizeParam->bOutOverwrite = false;
+        m_lumaResize = std::make_unique<NVEncFilterResize>();
+        err = m_lumaResize->init(resizeParam, m_pLog);
+        if (err != RGY_ERR_NONE) {
+            AddMessage(RGY_LOG_ERROR, _T("onnx: 輝度モデル用クロマ拡大の初期化に失敗しました: %s.\n"), get_err_mes(err));
+            return err;
         }
     }
     if (m_temporalT == 1 && (m_io == OnnxIO::RGB || m_io == OnnxIO::RGBNoise) && !m_ycbcr) {
@@ -726,6 +766,10 @@ RGY_ERR NVEncFilterOnnx::initCudaPath(cudaStream_t stream) {
         || session->inChannels() != m_inC || session->outChannels() != m_outC
         || session->outWidth() * session->outHeight() * session->outChannels() != (int)m_outBuf.size()) {
         const auto reason = !errorMessage.empty() ? errorMessage : session->lastError();
+        if (RGY_CSP_BIT_DEPTH[m_param->frameIn.csp] != 8) {
+            AddMessage(RGY_LOG_ERROR, _T("onnx: 9bit以上の入力に必要なCUDAゼロコピー経路を初期化できません: %s\n"), reason.c_str());
+            return (err != RGY_ERR_NONE) ? err : RGY_ERR_UNSUPPORTED;
+        }
         AddMessage(RGY_LOG_WARN, _T("onnx: CUDAゼロコピー経路を初期化できないためホスト経路を使用します: %s\n"), reason.c_str());
         const auto cudaPathErr = (err != RGY_ERR_NONE) ? err : RGY_ERR_UNSUPPORTED;
 
@@ -744,6 +788,24 @@ RGY_ERR NVEncFilterOnnx::initCudaPath(cudaStream_t stream) {
     m_cudaPath = true;
     AddMessage(RGY_LOG_INFO, _T("onnx: path cuda-zerocopy をフィルタストリーム上で初期化しました。\n"));
     return RGY_ERR_NONE;
+}
+
+RGY_ERR NVEncFilterOnnx::runCudaLuma(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream) {
+    RGY_ERR err = RGY_ERR_NONE;
+    if (m_lumaResize) {
+        auto inputFrame = *input;
+        RGYFrameInfo *resizeOutput[1] = { output };
+        int outputCount = 0;
+        err = m_lumaResize->filter(&inputFrame, resizeOutput, &outputCount, stream);
+    } else {
+        err = copyFrameAsync(output, input, stream);
+    }
+    if (err != RGY_ERR_NONE) return err;
+    err = run_onnx_pack_luma((float *)m_inputDevice->ptr, input, stream);
+    if (err != RGY_ERR_NONE) return err;
+    err = m_ov->inferDevice((const float *)m_inputDevice->ptr, (float *)m_outputDevice->ptr);
+    if (err != RGY_ERR_NONE) return err;
+    return run_onnx_unpack_luma(output, (const float *)m_outputDevice->ptr, stream);
 }
 
 RGY_ERR NVEncFilterOnnx::runCudaRGB(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream) {
@@ -826,7 +888,12 @@ RGY_ERR NVEncFilterOnnx::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInf
 
     RGY_ERR cerr = RGY_ERR_UNSUPPORTED;
     RGY_ERR cudaPathInitErr = RGY_ERR_NONE;
-    if ((m_io == OnnxIO::RGB || m_io == OnnxIO::RGBNoise) && !m_ycbcr) {
+    if (m_io == OnnxIO::LumaSR) {
+        cudaPathInitErr = initCudaPath(stream);
+        if (cudaPathInitErr == RGY_ERR_NONE) {
+            cerr = runCudaLuma(pInputFrame, coreFrame, stream);
+        }
+    } else if ((m_io == OnnxIO::RGB || m_io == OnnxIO::RGBNoise) && !m_ycbcr) {
         cudaPathInitErr = initCudaPath(stream);
         if (cudaPathInitErr == RGY_ERR_NONE) {
             cerr = runCudaRGB(pInputFrame, coreFrame, stream);
@@ -844,6 +911,12 @@ RGY_ERR NVEncFilterOnnx::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInf
     }
     if (m_cudaPath && cerr != RGY_ERR_NONE) {
         const auto cudaReason = m_ov ? m_ov->lastError() : tstring();
+        if (RGY_CSP_BIT_DEPTH[m_param->frameIn.csp] != 8) {
+            AddMessage(RGY_LOG_ERROR, cudaReason.empty()
+                ? strsprintf(_T("onnx: 9bit以上の入力でCUDAゼロコピー実行に失敗しました: %s。\n"), get_err_mes(cerr))
+                : strsprintf(_T("onnx: 9bit以上の入力でCUDAゼロコピー実行に失敗しました: %s。\n"), cudaReason.c_str()));
+            return cerr;
+        }
         AddMessage(RGY_LOG_WARN, cudaReason.empty()
             ? strsprintf(_T("onnx: CUDAゼロコピー実行に失敗したためホスト経路へフォールバックします: %s.\n"), get_err_mes(cerr))
             : strsprintf(_T("onnx: CUDAゼロコピー実行に失敗したためホスト経路へフォールバックします: %s.\n"), cudaReason.c_str()));
@@ -856,6 +929,9 @@ RGY_ERR NVEncFilterOnnx::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInf
         }
     }
     if (!m_cudaPath) {
+        if (RGY_CSP_BIT_DEPTH[m_param->frameIn.csp] != 8) {
+            return (cudaPathInitErr != RGY_ERR_NONE) ? cudaPathInitErr : RGY_ERR_UNSUPPORTED;
+        }
         if (!m_ov) {
             return (cudaPathInitErr != RGY_ERR_NONE) ? cudaPathInitErr : RGY_ERR_UNKNOWN;
         }
@@ -1315,6 +1391,7 @@ void NVEncFilterOnnx::close() {
     m_cropFromRgb.reset();
     m_cropToYuv444.reset();
     m_cropFromYuv444.reset();
+    m_lumaResize.reset();
     m_inputDevice.reset();
     m_outputDevice.reset();
     m_inStaging.reset();
