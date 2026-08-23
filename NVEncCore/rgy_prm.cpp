@@ -4356,6 +4356,7 @@ RGYParamCommon::RGYParamCommon() :
     inputFilename(),
     outputFilename(),
     muxOutputFormat(),
+    y4mTimestamp(false),
     out_vui(),
     inputOpt(),
     maxCll(),
