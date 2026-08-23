@@ -729,7 +729,7 @@ Change the rate control mode and parameters within the specified input frame or 
   - `start=<int>`, `end=<int>`: Select by input frame number using the inclusive range `start <= frame number <= end`. `start` is required; omitting `end` selects through the end of the stream.
   - `start-time=<float>`, `end-time=<float>`: Select by presentation timestamp in seconds using the half-open range `start-time <= timestamp < end-time`. An omitted bound means the beginning or end of the stream.
 
-  Frame-number and timestamp range parameters cannot be combined in the same `--dynamic-rc`. Separate `--dynamic-rc` options may use different range types.
+  Frame-number and timestamp range parameters cannot be combined in the same `--dynamic-rc`. Separate `--dynamic-rc` options may use different range types; timestamp ranges take priority when zones overlap.
 
 - **required parameters**
   It is required to specify one of the params below.  
@@ -1220,7 +1220,7 @@ Specify input format for avhw / avsw reader.
 Since the output format is automatically determined by the output extension, it is usually not necessary to specify it, but you can force the output format with this option.
 
 ### --y4m-timestamp
-Add the presentation timestamp relative to the stream start to each y4m FRAME line as `Xts=<seconds>`.
+Add the presentation timestamp relative to the stream start as `Xts=<seconds>` and the frame duration as `Xdur=<seconds>` to each y4m FRAME line. `Xdur` is omitted when the duration is unavailable.
 This option is effective only with `-c raw --output-format y4m`.
 
   Available formats can be checked with [--check-formats](#--check-formats). To output H.264 / HEVC as an Elementary Stream, specify "raw".

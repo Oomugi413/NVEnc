@@ -5380,14 +5380,13 @@ RGY_ERR NVEncCore::CheckDynamicRCParams(std::vector<NVEncRCParam>& dynamicRC) {
     if (dynamicRC.size() == 0) {
         return RGY_ERR_NONE;
     }
-    const bool hasTimeRange = std::any_of(dynamicRC.begin(), dynamicRC.end(), [](const NVEncRCParam& a) {
-        return a.startTime >= 0.0 || a.endTime >= 0.0;
+    std::sort(dynamicRC.begin(), dynamicRC.end(), [](const NVEncRCParam& a, const NVEncRCParam& b) {
+        const bool aTime = a.startTime >= 0.0 || a.endTime >= 0.0;
+        const bool bTime = b.startTime >= 0.0 || b.endTime >= 0.0;
+        if (aTime != bTime) return !aTime;
+        if (aTime) return (a.startTime == b.startTime) ? a.endTime < b.endTime : a.startTime < b.startTime;
+        return (a.start == b.start) ? a.end < b.end : a.start < b.start;
     });
-    if (!hasTimeRange) {
-        std::sort(dynamicRC.begin(), dynamicRC.end(), [](const NVEncRCParam& a, const NVEncRCParam& b) {
-            return (a.start == b.start) ? a.end < b.end : a.start < b.start;
-        });
-    }
     std::for_each(dynamicRC.begin(), dynamicRC.end(), [](NVEncRCParam &a) {
         if (a.startTime < 0.0 && a.endTime < 0.0 && a.end <= 0) {
             a.end = TRIM_MAX;
