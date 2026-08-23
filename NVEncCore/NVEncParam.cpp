@@ -61,6 +61,8 @@ tstring printParams(const std::vector<NVEncRCParam> &dynamicRC) {
 NVEncRCParam::NVEncRCParam() :
     start(-1),
     end(-1),
+    startTime(-1.0),
+    endTime(-1.0),
     rc_mode(NV_ENC_PARAMS_RC_VBR),
     avg_bitrate(0),
     max_bitrate(0),
@@ -107,7 +109,14 @@ NVEncVideoParamAV1::NVEncVideoParamAV1() :
 }
 tstring NVEncRCParam::print() const {
     TStringStream t;
-    if (start >= 0) {
+    if (startTime >= 0.0 || endTime >= 0.0) {
+        if (startTime >= 0.0) {
+            t << "start-time=" << startTime << ",";
+        }
+        if (endTime >= 0.0) {
+            t << "end-time=" << endTime << ",";
+        }
+    } else if (start >= 0) {
         if (end == INT_MAX || end <= 0) {
             t << "frame=" << start << ":end";
         } else {
@@ -133,6 +142,8 @@ tstring NVEncRCParam::print() const {
 bool NVEncRCParam::operator==(const NVEncRCParam &x) const {
     return start == x.start
         && end == x.end
+        && startTime == x.startTime
+        && endTime == x.endTime
         && rc_mode == x.rc_mode
         && avg_bitrate == x.avg_bitrate
         && max_bitrate == x.max_bitrate

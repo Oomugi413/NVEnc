@@ -5380,23 +5380,29 @@ RGY_ERR NVEncCore::CheckDynamicRCParams(std::vector<NVEncRCParam>& dynamicRC) {
     if (dynamicRC.size() == 0) {
         return RGY_ERR_NONE;
     }
-    std::sort(dynamicRC.begin(), dynamicRC.end(), [](const NVEncRCParam& a, const NVEncRCParam& b) {
-        return (a.start == b.start) ? a.end < b.end : a.start < b.start;
+    const bool hasTimeRange = std::any_of(dynamicRC.begin(), dynamicRC.end(), [](const NVEncRCParam& a) {
+        return a.startTime >= 0.0 || a.endTime >= 0.0;
     });
+    if (!hasTimeRange) {
+        std::sort(dynamicRC.begin(), dynamicRC.end(), [](const NVEncRCParam& a, const NVEncRCParam& b) {
+            return (a.start == b.start) ? a.end < b.end : a.start < b.start;
+        });
+    }
     std::for_each(dynamicRC.begin(), dynamicRC.end(), [](NVEncRCParam &a) {
-        if (a.end <= 0) {
+        if (a.startTime < 0.0 && a.endTime < 0.0 && a.end <= 0) {
             a.end = TRIM_MAX;
         }
     });
-    int id = 0;
-    for (auto a : dynamicRC) {
-        if (a.start < id) {
-            PrintMes(RGY_LOG_ERROR, _T("Invalid sequence of frame ID in --dynamic-rc.\n"));
-            PrintMes(RGY_LOG_ERROR, _T("%s\n"), printParams(dynamicRC).c_str());
-            return RGY_ERR_INVALID_PARAM;
-        }
-        id = a.start;
-        if (a.end > 0 && a.end < id) {
+    for (const auto& a : dynamicRC) {
+        if (a.startTime >= 0.0 || a.endTime >= 0.0) {
+            const double start = (a.startTime < 0.0) ? 0.0 : a.startTime;
+            const double end = (a.endTime < 0.0) ? std::numeric_limits<double>::max() : a.endTime;
+            if (start > end) {
+                PrintMes(RGY_LOG_ERROR, _T("Invalid timestamp range in --dynamic-rc.\n"));
+                PrintMes(RGY_LOG_ERROR, _T("%s\n"), printParams(dynamicRC).c_str());
+                return RGY_ERR_INVALID_PARAM;
+            }
+        } else if (a.start < 0 || a.end < a.start) {
             PrintMes(RGY_LOG_ERROR, _T("Invalid sequence of frame ID in --dynamic-rc.\n"));
             PrintMes(RGY_LOG_ERROR, _T("%s\n"), printParams(dynamicRC).c_str());
             return RGY_ERR_INVALID_PARAM;

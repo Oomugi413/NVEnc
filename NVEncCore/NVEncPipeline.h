@@ -3195,13 +3195,20 @@ protected:
 
         if (m_dynamicRC.size() > 0) {
             int selectedIdx = DYNAMIC_PARAM_NOT_SELECTED;
+            const double timeSec = timestamp * (double)m_outputTimebase.n() / m_outputTimebase.d();
             for (int i = 0; i < (int)m_dynamicRC.size(); i++) {
-                const int end = (m_dynamicRC[i].end < 0) ? std::numeric_limits<decltype(id)>::max() : m_dynamicRC[i].end;
-                if (m_dynamicRC[i].start <= id && id <= end) {
-                    selectedIdx = i;
-                }
-                if (m_dynamicRC[i].start > id) {
-                    break;
+                const auto& prm = m_dynamicRC[i];
+                if (prm.startTime >= 0.0 || prm.endTime >= 0.0) {
+                    const double start = (prm.startTime < 0.0) ? 0.0 : prm.startTime;
+                    const double end = (prm.endTime < 0.0) ? std::numeric_limits<double>::max() : prm.endTime;
+                    if (start <= timeSec && timeSec < end) {
+                        selectedIdx = i;
+                    }
+                } else {
+                    const int end = (prm.end < 0) ? std::numeric_limits<decltype(inputFrameId)>::max() : prm.end;
+                    if (prm.start <= inputFrameId && inputFrameId <= end) {
+                        selectedIdx = i;
+                    }
                 }
             }
             if (m_appliedDynamicRC != selectedIdx) {

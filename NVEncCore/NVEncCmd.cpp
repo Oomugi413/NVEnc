@@ -27,6 +27,7 @@
 // ------------------------------------------------------------------------------------------
 
 #include <set>
+#include <cmath>
 #include <sstream>
 #include <numeric>
 #include <iomanip>
@@ -212,9 +213,11 @@ tstring encoder_help() {
         _T("                                  none, 2pass-quarter, 2pass-full\n")
         _T("   --max-bitrate <int>          set Max Bitrate (kbps)\n")
         _T("\n")
-        _T("   --dynamic-rc <int>:<int>,<param1>=<value>[,<param2>=<value>][...]\n")
-        _T("     change the rate control mode within the specified range of output frames\n")
+        _T("   --dynamic-rc <range>,<param1>=<value>[,<param2>=<value>][...]\n")
+        _T("     change the rate control mode within the specified input frame or timestamp range\n")
         _T("    params\n")
+        _T("      start=<int>,end=<int>            inclusive input frame range\n")
+        _T("      start-time=<float>,end-time=<float>  half-open timestamp range in seconds\n")
         _T("      cqp=<int> or <int>:<int>:<int>\n")
         _T("      vbr=<int>\n")
         _T("      vbrhq=<int>\n")
@@ -637,7 +640,9 @@ int parse_one_option(const TCHAR *option_name, const TCHAR* strInput[], int& i, 
         }
         i++;
         bool rc_mode_defined = false;
-        auto paramList = std::vector<std::string>{ "start", "end", "cqp", "max-bitrate", "vbr-quality", "multipass" };
+        bool frame_range_defined = false;
+        bool time_range_defined = false;
+        auto paramList = std::vector<std::string>{ "start", "end", "start-time", "end-time", "cqp", "max-bitrate", "vbr-quality", "multipass" };
         for (int j = 0; list_nvenc_rc_method_en[j].desc; j++) {
             paramList.push_back(tolowercase(tchar_to_string(list_nvenc_rc_method_en[j].desc)));
         }
@@ -651,6 +656,7 @@ int parse_one_option(const TCHAR *option_name, const TCHAR* strInput[], int& i, 
                 if (param_arg == _T("start")) {
                     try {
                         rcPrm.start = std::stoi(param_val);
+                        frame_range_defined = true;
                     } catch (...) {
                         print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
                         return 1;
@@ -660,6 +666,21 @@ int parse_one_option(const TCHAR *option_name, const TCHAR* strInput[], int& i, 
                 if (param_arg == _T("end")) {
                     try {
                         rcPrm.end = std::stoi(param_val);
+                        frame_range_defined = true;
+                    } catch (...) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                        return 1;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("start-time") || param_arg == _T("end-time")) {
+                    try {
+                        const auto value = std::stod(param_val);
+                        if (!std::isfinite(value) || value < 0.0) {
+                            throw std::invalid_argument("time");
+                        }
+                        ((param_arg == _T("start-time")) ? rcPrm.startTime : rcPrm.endTime) = value;
+                        time_range_defined = true;
                     } catch (...) {
                         print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
                         return 1;
@@ -751,6 +772,7 @@ int parse_one_option(const TCHAR *option_name, const TCHAR* strInput[], int& i, 
                     try {
                         rcPrm.start = std::stoi(param_val0);
                         rcPrm.end   = std::stoi(param_val1);
+                        frame_range_defined = true;
                     } catch (...) {
                         print_cmd_error_invalid_value(option_name, param);
                         return 1;
@@ -765,8 +787,16 @@ int parse_one_option(const TCHAR *option_name, const TCHAR* strInput[], int& i, 
             print_cmd_error_invalid_value(option_name, strInput[i], _T("rate control mode unspecified!"));
             return 1;
         }
-        if (rcPrm.start < 0) {
+        if (frame_range_defined && time_range_defined) {
+            print_cmd_error_invalid_value(option_name, strInput[i], _T("frame and time ranges cannot be specified together!"));
+            return 1;
+        }
+        if (!time_range_defined && rcPrm.start < 0) {
             print_cmd_error_invalid_value(option_name, strInput[i], _T("start frame ID unspecified!"));
+            return 1;
+        }
+        if (time_range_defined && rcPrm.startTime >= 0.0 && rcPrm.endTime >= 0.0 && rcPrm.startTime > rcPrm.endTime) {
+            print_cmd_error_invalid_value(option_name, strInput[i], _T("start time must be smaller than end time!"));
             return 1;
         }
         if (rcPrm.end > 0 && rcPrm.start > rcPrm.end) {
@@ -1670,9 +1700,20 @@ tstring gen_cmd(const InEncodeVideoParam *pParams, bool save_disabled_prm, RGYDi
 
     // 動的レート制御は要素ごとに1つの --dynamic-rc として出力する
     for (const auto& rc : pParams->dynamicRC) {
-        cmd << _T(" --dynamic-rc start=") << rc.start;
-        if (rc.end > 0) {
-            cmd << _T(",end=") << rc.end;
+        cmd << _T(" --dynamic-rc ");
+        if (rc.startTime >= 0.0 || rc.endTime >= 0.0) {
+            if (rc.startTime >= 0.0) {
+                cmd << _T("start-time=") << rc.startTime;
+            }
+            if (rc.endTime >= 0.0) {
+                if (rc.startTime >= 0.0) cmd << _T(",");
+                cmd << _T("end-time=") << rc.endTime;
+            }
+        } else {
+            cmd << _T("start=") << rc.start;
+            if (rc.end > 0) {
+                cmd << _T(",end=") << rc.end;
+            }
         }
         if (rc.rc_mode == NV_ENC_PARAMS_RC_CONSTQP) {
             cmd << _T(",cqp=") << rc.qp.qpI << _T(":") << rc.qp.qpP << _T(":") << rc.qp.qpB;

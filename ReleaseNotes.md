@@ -2,6 +2,8 @@
 
 ## 9.32
 
+- Add timestamp range parameters `start-time` and `end-time` to [--dynamic-rc](./NVEncC_Options.en.md#--dynamic-rc-intintintintparam1value1param2value2).
+- Fix frame-based [--dynamic-rc](./NVEncC_Options.en.md#--dynamic-rc-intintintintparam1value1param2value2) to use input frame IDs before VPP, matching QSVEnc. Output may change when used with frame-count-changing filters.
 - Update ffmpeg libraries. -> [binaries and src](https://github.com/rigaya/ffmpeg_dlls_for_hwenc/releases/tag/20260812), [build_scripts](https://github.com/rigaya/build_scripts)
   - ffmpeg 8.0 -> 9.0.1
   - libvmaf 3.0.0 -> 3.2.0
