@@ -112,37 +112,6 @@ static bool onnx_supported_csp(RGY_CSP csp) {
     }
 }
 
-// Bilinear upscale of one 8-bit channel from (sw x sh) to (sw*scale x sh*scale)
-// on the CPU (host path).
-static void upscale_bilinear_u8(uint8_t *dst, const int dstPitch, const int dstStride,
-                                const uint8_t *src, const int srcPitch, const int srcStride,
-                                const int sw, const int sh, const int scale) {
-    const int dw = sw * scale;
-    const int dh = sh * scale;
-    const float inv = 1.0f / (float)scale;
-    for (int dy = 0; dy < dh; dy++) {
-        float sy = (dy + 0.5f) * inv - 0.5f;
-        int y0 = (int)std::floor(sy);
-        float fy = sy - (float)y0;
-        const uint8_t *row0 = src + (size_t)clampi(y0,     0, sh - 1) * srcPitch;
-        const uint8_t *row1 = src + (size_t)clampi(y0 + 1, 0, sh - 1) * srcPitch;
-        uint8_t *drow = dst + (size_t)dy * dstPitch;
-        for (int dx = 0; dx < dw; dx++) {
-            float sx = (dx + 0.5f) * inv - 0.5f;
-            int x0 = (int)std::floor(sx);
-            float fx = sx - (float)x0;
-            const int x0c = clampi(x0,     0, sw - 1) * srcStride;
-            const int x1c = clampi(x0 + 1, 0, sw - 1) * srcStride;
-            const float a = row0[x0c], b = row0[x1c];
-            const float c = row1[x0c], d = row1[x1c];
-            const float top = a + (b - a) * fx;
-            const float bot = c + (d - c) * fx;
-            const int v = (int)(top + (bot - top) * fy + 0.5f);
-            drow[dx * dstStride] = (uint8_t)clampi(v, 0, 255);
-        }
-    }
-}
-
 // Bilinearly sample one 8-bit chroma channel (half-res, 4:2:0) at the location of
 // luma pixel (lx, ly), upsampling x2. Returns the raw value (0..255) as a float.
 static inline float sample_chroma_up2(const uint8_t *plane, const int pitch, const int stride,
@@ -790,7 +759,7 @@ RGY_ERR NVEncFilterOnnx::initCudaPath(cudaStream_t stream) {
     return RGY_ERR_NONE;
 }
 
-RGY_ERR NVEncFilterOnnx::runCudaLuma(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream) {
+RGY_ERR NVEncFilterOnnx::prepareLumaOutput(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream) {
     RGY_ERR err = RGY_ERR_NONE;
     if (m_lumaResize) {
         auto inputFrame = *input;
@@ -800,6 +769,11 @@ RGY_ERR NVEncFilterOnnx::runCudaLuma(const RGYFrameInfo *input, RGYFrameInfo *ou
     } else {
         err = copyFrameAsync(output, input, stream);
     }
+    return err;
+}
+
+RGY_ERR NVEncFilterOnnx::runCudaLuma(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream) {
+    auto err = prepareLumaOutput(input, output, stream);
     if (err != RGY_ERR_NONE) return err;
     err = run_onnx_pack_luma((float *)m_inputDevice->ptr, input, stream);
     if (err != RGY_ERR_NONE) return err;
@@ -1209,6 +1183,7 @@ void NVEncFilterOnnx::fillInputHost(const RGYFrameInfo &hin) {
 
     switch (m_io) {
     case OnnxIO::LumaSR:
+        break;
     case OnnxIO::GrayNoise:
         for (int y = 0; y < inH; y++) {
             const uint8_t *srow = hin.ptr[0] + (size_t)y * hin.pitch[0];
@@ -1284,22 +1259,8 @@ void NVEncFilterOnnx::writeOutputHost(const RGYFrameInfo &hout, const RGYFrameIn
     const int oPitchV = nv12 ? hout.pitch[1] : hout.pitch[2];
 
     switch (m_io) {
-    case OnnxIO::LumaSR: {
-        for (int y = 0; y < outH; y++) {
-            const float *srow = ob + (size_t)y * outW;
-            uint8_t *drow = hout.ptr[0] + (size_t)y * hout.pitch[0];
-            for (int x = 0; x < outW; x++) { int v = (int)(srow[x] * m_maxval + 0.5f); drow[x] = (uint8_t)clampi(v, 0, pixMax); }
-        }
-        const int cInW = hin.width / 2, cInH = hin.height / 2;
-        if (!nv12) {
-            upscale_bilinear_u8(hout.ptr[1], hout.pitch[1], 1, hin.ptr[1], hin.pitch[1], 1, cInW, cInH, m_scale);
-            upscale_bilinear_u8(hout.ptr[2], hout.pitch[2], 1, hin.ptr[2], hin.pitch[2], 1, cInW, cInH, m_scale);
-        } else {
-            upscale_bilinear_u8(hout.ptr[1] + 0, hout.pitch[1], 2, hin.ptr[1] + 0, hin.pitch[1], 2, cInW, cInH, m_scale);
-            upscale_bilinear_u8(hout.ptr[1] + 1, hout.pitch[1], 2, hin.ptr[1] + 1, hin.pitch[1], 2, cInW, cInH, m_scale);
-        }
+    case OnnxIO::LumaSR:
         break;
-    }
     case OnnxIO::GrayNoise: {
         for (int y = 0; y < outH; y++) {
             const float *srow = ob + (size_t)y * outW;
@@ -1355,14 +1316,24 @@ void NVEncFilterOnnx::writeOutputHost(const RGYFrameInfo &hout, const RGYFrameIn
 }
 
 RGY_ERR NVEncFilterOnnx::runHost(const RGYFrameInfo *in, RGYFrameInfo *out, cudaStream_t stream) {
-    // 1. device input -> host staging, then wait for the copy so the CPU can read it.
-    auto err = copyFrameAsync(&m_inStaging->frame, in, stream);
-    if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: copy input to staging failed: %s.\n"), get_err_mes(err)); return err; }
-    err = err_to_rgy(cudaStreamSynchronize(stream));
-    if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: stream sync failed: %s.\n"), get_err_mes(err)); return err; }
-
-    // 2. pack the input frame into the network tensor (per I/O mode).
-    fillInputHost(m_inStaging->frame);
+    RGY_ERR err = RGY_ERR_NONE;
+    if (m_io == OnnxIO::LumaSR) {
+        // ホスト推論へのフォールバック時も、画素形式とテンソルの変換はCUDA側へ統一する。
+        err = run_onnx_pack_luma((float *)m_inputDevice->ptr, in, stream);
+        if (err != RGY_ERR_NONE) return err;
+        err = err_to_rgy(cudaMemcpyAsync(m_inBuf.data(), m_inputDevice->ptr,
+            m_inBuf.size() * sizeof(float), cudaMemcpyDeviceToHost, stream));
+        if (err != RGY_ERR_NONE) return err;
+        err = err_to_rgy(cudaStreamSynchronize(stream));
+        if (err != RGY_ERR_NONE) return err;
+    } else {
+        // device input -> host staging, then wait for the copy so the CPU can read it.
+        err = copyFrameAsync(&m_inStaging->frame, in, stream);
+        if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: copy input to staging failed: %s.\n"), get_err_mes(err)); return err; }
+        err = err_to_rgy(cudaStreamSynchronize(stream));
+        if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: stream sync failed: %s.\n"), get_err_mes(err)); return err; }
+        fillInputHost(m_inStaging->frame);
+    }
 
     // 3. inference.
     err = m_ov->infer(m_inBuf.data(), m_outBuf.data());
@@ -1376,13 +1347,19 @@ RGY_ERR NVEncFilterOnnx::runHost(const RGYFrameInfo *in, RGYFrameInfo *out, cuda
         return err;
     }
 
-    // 4. unpack the network output into the host output staging frame (per I/O mode).
-    writeOutputHost(m_outStaging->frame, m_inStaging->frame);
-
-    // 5. copy host staging -> device output.
-    err = copyFrameAsync(out, &m_outStaging->frame, stream);
-    if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: copy staging to output failed: %s.\n"), get_err_mes(err)); return err; }
-    return RGY_ERR_NONE;
+    if (m_io == OnnxIO::LumaSR) {
+        err = prepareLumaOutput(in, out, stream);
+        if (err != RGY_ERR_NONE) return err;
+        err = err_to_rgy(cudaMemcpyAsync(m_outputDevice->ptr, m_outBuf.data(),
+            m_outBuf.size() * sizeof(float), cudaMemcpyHostToDevice, stream));
+        if (err != RGY_ERR_NONE) return err;
+        return run_onnx_unpack_luma(out, (const float *)m_outputDevice->ptr, stream);
+    } else {
+        writeOutputHost(m_outStaging->frame, m_inStaging->frame);
+        err = copyFrameAsync(out, &m_outStaging->frame, stream);
+        if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: copy staging to output failed: %s.\n"), get_err_mes(err)); return err; }
+        return RGY_ERR_NONE;
+    }
 }
 
 void NVEncFilterOnnx::close() {
