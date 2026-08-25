@@ -79,6 +79,7 @@
 #include "NVEncFilterDenoiseHqdn3d.h"
 #include "NVEncFilterDescale.h"
 #include "NVEncFilterDenoiseDct.h"
+#include "NVEncFilterDenoiseBm3d.h"
 #include "NVEncFilterSmooth.h"
 #include "NVEncFilterDenoiseFFT3D.h"
 #include "NVEncFilterMsmooth.h"
@@ -3041,6 +3042,7 @@ std::vector<VppType> NVEncCore::InitFiltersCreateVppList(const InEncodeVideoPara
     if (inputParam->vpp.nlmeans.enable)       filterPipeline.push_back(VppType::CL_DENOISE_NLMEANS);
     if (inputParam->vpp.pmd.enable)           filterPipeline.push_back(VppType::CL_DENOISE_PMD);
     if (inputParam->vpp.hqdn3d.enable)        filterPipeline.push_back(VppType::CL_DENOISE_HQDN3D);
+    if (inputParam->vpp.bm3d.enable)          filterPipeline.push_back(VppType::CL_DENOISE_BM3D);
     if (inputParam->vpp.descale.enable)       filterPipeline.push_back(VppType::CL_DESCALE);
     if (degrainLegacy)                        filterPipeline.push_back(VppType::CL_DEGRAIN);
     if (inputParam->vpp.rtgmc_edi.enable && degrainLegacy) filterPipeline.push_back(VppType::CL_RTGMC_EDI);
@@ -4324,6 +4326,26 @@ RGY_ERR NVEncCore::AddFilterCUDA(std::vector<std::unique_ptr<NVEncFilter>>& cufi
         //パラメータ情報を更新
         m_pLastFilterParam = std::dynamic_pointer_cast<NVEncFilterParam>(param);
         //入力フレーム情報を更新
+        inputFrame = param->frameOut;
+        m_encFps = param->baseFps;
+        return RGY_ERR_NONE;
+    }
+    //bm3d
+    if (vppType == VppType::CL_DENOISE_BM3D) {
+        unique_ptr<NVEncFilter> filter(new NVEncFilterDenoiseBm3d());
+        shared_ptr<NVEncFilterParamDenoiseBm3d> param(new NVEncFilterParamDenoiseBm3d());
+        param->bm3d = inputParam->vpp.bm3d;
+        param->frameIn = inputFrame;
+        param->frameOut = inputFrame;
+        param->baseFps = m_encFps;
+        param->bOutOverwrite = false;
+        NVEncCtxAutoLock(cxtlock(m_dev->vidCtxLock()));
+        auto sts = filter->init(param, m_pLog);
+        if (sts != RGY_ERR_NONE) {
+            return sts;
+        }
+        cufilters.push_back(std::move(filter));
+        m_pLastFilterParam = std::dynamic_pointer_cast<NVEncFilterParam>(param);
         inputFrame = param->frameOut;
         m_encFps = param->baseFps;
         return RGY_ERR_NONE;

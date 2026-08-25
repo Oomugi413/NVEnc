@@ -790,6 +790,9 @@
     <ClInclude Include="NVEncFilterDenoiseDct.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
+    <ClInclude Include="NVEncFilterDenoiseBm3d.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
     <ClInclude Include="NVEncFilterParam.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
@@ -1062,6 +1065,9 @@
       <Filter>ソース ファイル</Filter>
     </CudaCompile>
     <CudaCompile Include="NVEncFilterDenoiseDct.cu">
+      <Filter>ソース ファイル</Filter>
+    </CudaCompile>
+    <CudaCompile Include="NVEncFilterDenoiseBm3d.cu">
       <Filter>ソース ファイル</Filter>
     </CudaCompile>
     <CudaCompile Include="NVEncFilterDenoiseNLMeans.cu">
