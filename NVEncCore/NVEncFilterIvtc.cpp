@@ -707,7 +707,7 @@ RGY_ERR NVEncFilterIvtc::init(shared_ptr<RGYFilterParam> pParam, shared_ptr<RGYL
             pParam->baseFps *= rgy_rational<int>(prm->ivtc.cycle - prm->ivtc.drop, prm->ivtc.cycle);
         }
     } else {
-        m_pathThrough |= FILTER_PATHTHROUGH_TIMESTAMP;
+        m_pathThrough &= ~(FILTER_PATHTHROUGH_TIMESTAMP);
     }
 
     // m_frameBuf レイアウト (cycle>0 時):
