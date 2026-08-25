@@ -3421,6 +3421,7 @@ RGY_ERR NVEncCore::InitFilters(const InEncodeVideoParam *inputParam) {
         m_normalizeResizeParam->interp = inputParam->vpp.resize_algo;
     }
     m_normalizeResizeParam->fsr1 = inputParam->vpp.resize_fsr1;
+    m_normalizeResizeParam->dpid = inputParam->vpp.resize_dpid;
     m_normalizeResizeParam->nis = inputParam->vpp.resize_nis;
     m_normalizeResizeParam->bicubic = inputParam->vpp.resize_bicubic;
     m_normalizeResizeParam->baseFps = m_encFps; //baseFpsが0だとフィルタのinitに失敗するので必ず設定する
@@ -4598,6 +4599,7 @@ RGY_ERR NVEncCore::AddFilterCUDA(std::vector<std::unique_ptr<NVEncFilter>>& cufi
             param->interp = inputParam->vpp.resize_algo;
         }
         param->fsr1 = inputParam->vpp.resize_fsr1;
+        param->dpid = inputParam->vpp.resize_dpid;
         param->nis = inputParam->vpp.resize_nis;
         param->bicubic = inputParam->vpp.resize_bicubic;
         if (isNvvfxResizeFiter(inputParam->vpp.resize_algo)) {

@@ -159,6 +159,7 @@ public:
     RGY_VPP_RESIZE_ALGO interp;
     RGY_VPP_RESIZE_ALGO nvvfxSubAlgo;
     VppResizeFsr1 fsr1;
+    VppResizeDpid dpid;
     VppResizeNis nis;
     VppResizeBicubic bicubic;
     std::shared_ptr<NVEncFilterParamNvvfxSuperRes> nvvfxSuperRes;
