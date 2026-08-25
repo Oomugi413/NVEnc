@@ -110,6 +110,7 @@
 #include "NVEncFilterDeflicker.h"
 #include "NVEncFilterStab.h"
 #include "NVEncFilterColorFix.h"
+#include "NVEncFilterGuidedFilter.h"
 #include "NVEncFilterEdgelevel.h"
 #include "NVEncFilterDehalo.h"
 #include "NVEncFilterFineDehalo.h"
@@ -3059,6 +3060,7 @@ std::vector<VppType> NVEncCore::InitFiltersCreateVppList(const InEncodeVideoPara
     if (inputParam->vpp.deflicker.enable)  filterPipeline.push_back(VppType::CL_DEFLICKER);
     if (inputParam->vpp.stab.enable)       filterPipeline.push_back(VppType::CL_STAB);
     if (inputParam->vpp.colorfix.enable)   filterPipeline.push_back(VppType::CL_COLORFIX);
+    if (inputParam->vpp.guidedfilter.enable) filterPipeline.push_back(VppType::CL_GUIDEDFILTER);
     if (inputParam->vpp.edgelevel.enable)  filterPipeline.push_back(VppType::CL_EDGELEVEL);
     if (inputParam->vpp.dehalo.enable)     filterPipeline.push_back(VppType::CL_DEHALO);
     if (inputParam->vpp.finedehalo.enable) filterPipeline.push_back(VppType::CL_FINEDEHALO);
@@ -4825,6 +4827,26 @@ RGY_ERR NVEncCore::AddFilterCUDA(std::vector<std::unique_ptr<NVEncFilter>>& cufi
         //パラメータ情報を更新
         m_pLastFilterParam = std::dynamic_pointer_cast<NVEncFilterParam>(param);
         //入力フレーム情報を更新
+        inputFrame = param->frameOut;
+        m_encFps = param->baseFps;
+        return RGY_ERR_NONE;
+    }
+    // guidedfilterを追加
+    if (vppType == VppType::CL_GUIDEDFILTER) {
+        unique_ptr<NVEncFilter> filter(new NVEncFilterGuidedFilter());
+        shared_ptr<NVEncFilterParamGuidedFilter> param(new NVEncFilterParamGuidedFilter());
+        param->guidedfilter = inputParam->vpp.guidedfilter;
+        param->frameIn = inputFrame;
+        param->frameOut = inputFrame;
+        param->baseFps = m_encFps;
+        param->bOutOverwrite = false;
+        NVEncCtxAutoLock(cxtlock(m_dev->vidCtxLock()));
+        auto sts = filter->init(param, m_pLog);
+        if (sts != RGY_ERR_NONE) {
+            return sts;
+        }
+        cufilters.push_back(std::move(filter));
+        m_pLastFilterParam = std::dynamic_pointer_cast<NVEncFilterParam>(param);
         inputFrame = param->frameOut;
         m_encFps = param->baseFps;
         return RGY_ERR_NONE;
