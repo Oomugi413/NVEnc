@@ -470,6 +470,10 @@ RGY_ERR NVEncFilterRifeOV::runCuda(const RGYFrameInfo *input, RGYFrameInfo **out
         if (m_fpsConv && m_prevYuv) {
             err = copyFrameAsync(&m_prevYuv->frame, input, stream);
             if (err != RGY_ERR_NONE) return err;
+            m_prevYuv->frame.timestamp = input->timestamp;
+            m_prevYuv->frame.duration = input->duration;
+            m_prevYuv->frame.picstruct = input->picstruct;
+            m_prevYuv->frame.inputFrameId = input->inputFrameId;
         }
         m_prevTimestamp = input->timestamp;
         m_prevDuration = input->duration;
@@ -513,6 +517,10 @@ RGY_ERR NVEncFilterRifeOV::runCuda(const RGYFrameInfo *input, RGYFrameInfo **out
         *outputCount = nOut;
         err = copyFrameAsync(&m_prevYuv->frame, input, stream);
         if (err != RGY_ERR_NONE) return err;
+        m_prevYuv->frame.timestamp = input->timestamp;
+        m_prevYuv->frame.duration = input->duration;
+        m_prevYuv->frame.picstruct = input->picstruct;
+        m_prevYuv->frame.inputFrameId = input->inputFrameId;
         const auto cudaerr = cudaMemcpyAsync(m_inputDevice->ptr,
             (uint8_t *)m_inputDevice->ptr + 3 * planeBytes, 3 * planeBytes,
             cudaMemcpyDeviceToDevice, stream);
@@ -562,7 +570,27 @@ RGY_ERR NVEncFilterRifeOV::runCuda(const RGYFrameInfo *input, RGYFrameInfo **out
 
 RGY_ERR NVEncFilterRifeOV::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
     cudaStream_t stream) {
-    if (pInputFrame->ptr[0] == nullptr) { *pOutputFrameNum = 0; return RGY_ERR_NONE; } // flush: drop trailing single frame
+    if (pInputFrame == nullptr || pInputFrame->ptr[0] == nullptr) {
+        *pOutputFrameNum = 0;
+        ppOutputFrames[0] = nullptr;
+        if (m_fpsConv && m_havePrev && m_prevYuv) {
+            // 出力位置が最終入力位置と一致する場合だけ、終端で最終入力をコピーする。
+            if (m_outIdx * m_ratioNum == m_inIdx * m_ratioDen) {
+                auto out = &m_frameBuf[0]->frame;
+                auto err = copyFrameAsync(out, &m_prevYuv->frame, stream);
+                if (err != RGY_ERR_NONE) return err;
+                out->timestamp = m_prevTimestamp;
+                out->duration = (int64_t)((double)m_prevDuration * (double)m_ratioNum / (double)m_ratioDen + 0.5);
+                out->picstruct = m_prevYuv->frame.picstruct;
+                out->inputFrameId = m_prevYuv->frame.inputFrameId;
+                ppOutputFrames[0] = out;
+                *pOutputFrameNum = 1;
+                m_outIdx++;
+            }
+            m_havePrev = false;
+        }
+        return RGY_ERR_NONE;
+    }
 
     if (initCudaPath(stream) == RGY_ERR_NONE) {
         const auto err = runCuda(pInputFrame, ppOutputFrames, pOutputFrameNum, stream);
@@ -596,6 +624,10 @@ RGY_ERR NVEncFilterRifeOV::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameI
         if (m_fpsConv && m_prevYuv) {
             err = copyFrameAsync(&m_prevYuv->frame, pInputFrame, stream);
             if (err != RGY_ERR_NONE) return err;
+            m_prevYuv->frame.timestamp = pInputFrame->timestamp;
+            m_prevYuv->frame.duration = pInputFrame->duration;
+            m_prevYuv->frame.picstruct = pInputFrame->picstruct;
+            m_prevYuv->frame.inputFrameId = pInputFrame->inputFrameId;
         }
         m_prevRGB = m_currRGB;
         m_prevTimestamp = pInputFrame->timestamp;
@@ -634,6 +666,10 @@ RGY_ERR NVEncFilterRifeOV::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameI
         *pOutputFrameNum = nOut;
         err = copyFrameAsync(&m_prevYuv->frame, pInputFrame, stream);
         if (err != RGY_ERR_NONE) return err;
+        m_prevYuv->frame.timestamp = pInputFrame->timestamp;
+        m_prevYuv->frame.duration = pInputFrame->duration;
+        m_prevYuv->frame.picstruct = pInputFrame->picstruct;
+        m_prevYuv->frame.inputFrameId = pInputFrame->inputFrameId;
         m_prevRGB.swap(m_currRGB);
         m_prevTimestamp = pInputFrame->timestamp;
         m_prevDuration = pInputFrame->duration;
