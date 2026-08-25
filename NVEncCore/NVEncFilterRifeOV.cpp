@@ -119,8 +119,9 @@ RGY_ERR NVEncFilterRifeOV::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<
         return RGY_ERR_INVALID_PARAM;
     }
     const auto inCsp = prm->frameIn.csp;
-    if ((inCsp != RGY_CSP_YV12 && inCsp != RGY_CSP_NV12) || prm->frameIn.bitdepth != 8) {
-        AddMessage(RGY_LOG_ERROR, _T("rife-ov: supports 8-bit yuv420 (yv12/nv12) only; got %s %dbit.\n"),
+    if ((inCsp != RGY_CSP_YV12 && inCsp != RGY_CSP_NV12 && inCsp != RGY_CSP_YV12_16 && inCsp != RGY_CSP_P010)
+        || (prm->frameIn.bitdepth != 8 && prm->frameIn.bitdepth != 16)) {
+        AddMessage(RGY_LOG_ERROR, _T("rife-ov: supports 8-bit yuv420 (yv12/nv12) or 16-bit yuv420 (yv12 16-bit/p010) only; got %s %dbit.\n"),
             RGY_CSP_NAMES[inCsp], prm->frameIn.bitdepth);
         return RGY_ERR_UNSUPPORTED;
     }
