@@ -99,7 +99,7 @@ __global__ void kernel_tweak_y(uint8_t *__restrict__ pFrame, const int pitch,
 
 template<typename Type, int bit_depth>
 __device__ __inline__
-void apply_basic_tweak_uv(Type& u, Type& v, const float saturation, const float hue_sin, const float hue_cos,
+void apply_basic_tweak_uv(Type& u, Type& v, const float saturation, const float vibrance, const float hue_sin, const float hue_cos,
     const bool hue_limit, const float hue_min, const float hue_max, const int clamp_min, const int clamp_max) {
     float u0 = (float)u * (1.0f / (1 << bit_depth));
     float v0 = (float)v * (1.0f / (1 << bit_depth));
@@ -110,8 +110,17 @@ void apply_basic_tweak_uv(Type& u, Type& v, const float saturation, const float 
         const bool in_range = (hue_min <= hue_max) ? (deg >= hue_min && deg <= hue_max) : (deg >= hue_min || deg <= hue_max);
         if (!in_range) return;
     }
-    u0 = saturation * (u0 - 0.5f) + 0.5f;
-    v0 = saturation * (v0 - 0.5f) + 0.5f;
+    float sat = saturation;
+    if (vibrance != 0.0f) {
+        // 現在の彩度を0（無彩色）から1（色差平面の端）へ正規化し、
+        // 彩度が低い画素ほどvibranceの効果を強くする。
+        const float du = u0 - 0.5f;
+        const float dv = v0 - 0.5f;
+        const float already = fminf(2.0f * sqrtf(du * du + dv * dv), 1.0f);
+        sat = fmaxf(saturation * (1.0f + vibrance * (1.0f - already)), 0.0f);
+    }
+    u0 = sat * (u0 - 0.5f) + 0.5f;
+    v0 = sat * (v0 - 0.5f) + 0.5f;
 
     float u1 = ((hue_cos * (u0 - 0.5f)) - (hue_sin * (v0 - 0.5f))) + 0.5f;
     float v1 = ((hue_sin * (u0 - 0.5f)) + (hue_cos * (v0 - 0.5f))) + 0.5f;
@@ -123,7 +132,7 @@ void apply_basic_tweak_uv(Type& u, Type& v, const float saturation, const float 
 template<typename Type, typename Type4, int bit_depth>
 __global__ void kernel_tweak_uv(uint8_t *__restrict__ pFrameU, uint8_t *__restrict__ pFrameV, const int pitch,
     const int width, const int height,
-    const float saturation, const float hue_sin, const float hue_cos, const bool swapuv,
+    const float saturation, const float vibrance, const float hue_sin, const float hue_cos, const bool swapuv,
     const bool tweak_cb, const float cb_gain, const float cb_offset,
     const bool tweak_cr, const float cr_gain, const float cr_offset,
     const bool hue_limit, const float hue_min, const float hue_max, const int clamp_min, const int clamp_max) {
@@ -137,10 +146,10 @@ __global__ void kernel_tweak_uv(uint8_t *__restrict__ pFrameU, uint8_t *__restri
         Type4 pixelU = ptrU[0];
         Type4 pixelV = ptrV[0];
 
-        apply_basic_tweak_uv<Type, bit_depth>(pixelU.x, pixelV.x, saturation, hue_sin, hue_cos, hue_limit, hue_min, hue_max, clamp_min, clamp_max);
-        apply_basic_tweak_uv<Type, bit_depth>(pixelU.y, pixelV.y, saturation, hue_sin, hue_cos, hue_limit, hue_min, hue_max, clamp_min, clamp_max);
-        apply_basic_tweak_uv<Type, bit_depth>(pixelU.z, pixelV.z, saturation, hue_sin, hue_cos, hue_limit, hue_min, hue_max, clamp_min, clamp_max);
-        apply_basic_tweak_uv<Type, bit_depth>(pixelU.w, pixelV.w, saturation, hue_sin, hue_cos, hue_limit, hue_min, hue_max, clamp_min, clamp_max);
+        apply_basic_tweak_uv<Type, bit_depth>(pixelU.x, pixelV.x, saturation, vibrance, hue_sin, hue_cos, hue_limit, hue_min, hue_max, clamp_min, clamp_max);
+        apply_basic_tweak_uv<Type, bit_depth>(pixelU.y, pixelV.y, saturation, vibrance, hue_sin, hue_cos, hue_limit, hue_min, hue_max, clamp_min, clamp_max);
+        apply_basic_tweak_uv<Type, bit_depth>(pixelU.z, pixelV.z, saturation, vibrance, hue_sin, hue_cos, hue_limit, hue_min, hue_max, clamp_min, clamp_max);
+        apply_basic_tweak_uv<Type, bit_depth>(pixelU.w, pixelV.w, saturation, vibrance, hue_sin, hue_cos, hue_limit, hue_min, hue_max, clamp_min, clamp_max);
 
         if (tweak_cb) {
             apply_basic_tweak_cbcr<Type, bit_depth>(pixelU.x, cb_gain, cb_offset, clamp_min, clamp_max);
@@ -170,6 +179,7 @@ static RGY_ERR tweak_frame(RGYFrameInfo *pFrame, const NVEncFilterParamTweak *pr
     const float contrast   = prm->tweak.contrast;
     const float brightness = prm->tweak.brightness;
     const float saturation = prm->tweak.saturation;
+    const float vibrance   = prm->tweak.vibrance;
     const float gamma      = prm->tweak.gamma;
     const float hue_degree = prm->tweak.hue;
     const int   swapuv     = prm->tweak.swapuv ? 1 : 0;
@@ -201,6 +211,7 @@ static RGY_ERR tweak_frame(RGYFrameInfo *pFrame, const NVEncFilterParamTweak *pr
 
     //UV
     if (saturation != 1.0f
+        || vibrance != 0.0f
         || hue_degree != 0.0f
         || swapuv
         || prm->tweak.cb.enabled()
@@ -216,7 +227,7 @@ static RGY_ERR tweak_frame(RGYFrameInfo *pFrame, const NVEncFilterParamTweak *pr
         const float hue = hue_degree * (float)M_PI / 180.0f;
         kernel_tweak_uv<Type, Type4, bit_depth><<<gridSize, blockSize, 0, stream>>>(
             planeInputU.ptr[0], planeInputV.ptr[0], planeInputU.pitch[0], planeInputU.width, planeInputU.height,
-            saturation, std::sin(hue), std::cos(hue), swapuv,
+            saturation, vibrance, std::sin(hue), std::cos(hue), swapuv,
             prm->tweak.cb.enabled(), prm->tweak.cb.gain, prm->tweak.cb.offset,
             prm->tweak.cr.enabled(), prm->tweak.cr.gain, prm->tweak.cr.offset,
             hue_limit, prm->tweak.startHue, prm->tweak.endHue, clamp_min, clamp_max_c);
