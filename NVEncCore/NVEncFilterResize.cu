@@ -83,7 +83,8 @@ enum RESIZE_WEIGHT_TYPE {
     WEIGHT_BICUBIC_MITCHELL,    // tunable bicubic preset B=1/3, C=1/3
     WEIGHT_BICUBIC_CATMULL_ROM, // tunable bicubic preset B=0,   C=1/2
     WEIGHT_BICUBIC_HERMITE,     // tunable bicubic preset B=0,   C=0
-    WEIGHT_BILINEAR
+    WEIGHT_BILINEAR,
+    WEIGHT_AREA
 };
 
 // User-tunable B/C for algo=bicubic (set per-resize via cudaMemcpyToSymbolAsync on
@@ -200,6 +201,18 @@ float factor_bilinear(const float x) {
     return 1.0f - fabs(x) * (1.0f / radius);
 }
 
+// 入力画素と出力画素のフットプリントが重なる長さを重みにする。
+// deltaは出力画素単位で、入力画素の幅はratioClamped、出力画素の幅は1となる。
+// 大きな縮小ではbox、ratioClampedが1となる拡大ではbilinearの三角形と一致する。
+// 重みの合計で正規化するため、1 / ratioClampedの係数は不要。
+__inline__ __device__
+float factor_area(const float delta, const float ratioClamped) {
+    const float srcHalf = ratioClamped * 0.5f;
+    const float lo = fmaxf(delta - srcHalf, -0.5f);
+    const float hi = fminf(delta + srcHalf,  0.5f);
+    return fmaxf(hi - lo, 0.0f);
+}
+
 template<int radius>
 __inline__ __device__
 float factor_bicubic(float x, float B, float C) {
@@ -264,6 +277,7 @@ void __inline__ __device__ calc_weight(
         case WEIGHT_BICUBIC_CATMULL_ROM: weight = factor_bicubic<radius>(delta, 0.0f, 0.5f); break;
         case WEIGHT_BICUBIC_HERMITE:     weight = factor_bicubic<radius>(delta, 0.0f, 0.0f); break;
         case WEIGHT_BILINEAR: weight = factor_bilinear<radius>(delta); break;
+        case WEIGHT_AREA:     weight = factor_area(delta, ratioClamped); break;
         default:
             break;
         }
@@ -665,6 +679,7 @@ static RGY_ERR resize_frame(RGYFrameInfo *pOutputFrame, const RGYFrameInfo *pInp
     }
     switch (interp) {
     case RGY_VPP_RESIZE_BILINEAR: return resize_frame<Type, bit_depth, WEIGHT_BILINEAR, 1>(pOutputFrame, pInputFrame, pgFactor, stream);
+    case RGY_VPP_RESIZE_AREA:     return resize_frame<Type, bit_depth, WEIGHT_AREA,     1>(pOutputFrame, pInputFrame, pgFactor, stream);
     case RGY_VPP_RESIZE_BICUBIC:  return resize_frame<Type, bit_depth, WEIGHT_BICUBIC,  2>(pOutputFrame, pInputFrame, pgFactor, stream);
     case RGY_VPP_RESIZE_SPLINE16: return resize_frame<Type, bit_depth, WEIGHT_SPLINE,   2>(pOutputFrame, pInputFrame, pgFactor, stream);
     case RGY_VPP_RESIZE_SPLINE36: return resize_frame<Type, bit_depth, WEIGHT_SPLINE,   3>(pOutputFrame, pInputFrame, pgFactor, stream);
