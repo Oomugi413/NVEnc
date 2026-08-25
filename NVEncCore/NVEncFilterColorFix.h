@@ -54,6 +54,8 @@ protected:
     RGY_ERR checkParam(const std::shared_ptr<NVEncFilterParamColorFix> pParam);
     int resolveMatrix(const VppColorFix& cf, const VideoVUIInfo& vui, int height) const;
     int resolveSpace(const VppColorFix& cf) const;
+    // 指定した光源色温度を基準色温度へ中和するRGBゲインを返す。
+    static void temperatureGains(int kelvin, float &gR, float &gG, float &gB);
     void getMatrixCoeffs(int resolvedMatrix, float& Kr, float& Kg, float& Kb) const;
     RGY_ERR setupCspConverters(const RGYFrameInfo& frameIn, RGY_CSP cspRgb, rgy_rational<int> baseFps);
     RGY_ERR allocReduceBuffer(const RGYFrameInfo& frameIn);
@@ -85,6 +87,9 @@ protected:
     int m_rollingVarianceCount;
     int m_offsetU;
     int m_offsetV;
+    float m_tempR;
+    float m_tempG;
+    float m_tempB;
     float m_scaleR;
     float m_scaleG;
     float m_scaleB;
