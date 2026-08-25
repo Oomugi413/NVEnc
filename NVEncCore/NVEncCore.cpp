@@ -94,6 +94,7 @@
 #include "NVEncFilterMpdecimate.h"
 #include "NVEncFilterAfs.h"
 #include "NVEncFilterNnedi.h"
+#include "NVEncFilterNnediUpscale.h"
 #include "NVEncFilterRtgmc.h"
 #include "NVEncFilterKfm.h"
 #include "NVEncFilterYadif.h"
@@ -2998,6 +2999,7 @@ std::vector<VppType> NVEncCore::InitFiltersCreateVppList(const InEncodeVideoPara
     if (inputParam->vpp.delogo.enable)        filterPipeline.push_back(VppType::CL_DELOGO);
     if (inputParam->vpp.afs.enable)           filterPipeline.push_back(VppType::CL_AFS);
     if (inputParam->vpp.nnedi.enable)         filterPipeline.push_back(VppType::CL_NNEDI);
+    if (inputParam->vpp.nnediUpscale.enable)  filterPipeline.push_back(VppType::CL_NNEDI_UPSCALE);
     if (inputParam->vpp.rtgmc.enable)         filterPipeline.push_back(VppType::CL_RTGMC);
     if (inputParam->vpp.kfm.enable)           filterPipeline.push_back(VppType::CL_KFM);
     const bool degrainLegacy = inputParam->vpp.degrain.enable;
@@ -3619,6 +3621,31 @@ RGY_ERR NVEncCore::AddFilterCUDA(std::vector<std::unique_ptr<NVEncFilter>>& cufi
         //パラメータ情報を更新
         m_pLastFilterParam = std::dynamic_pointer_cast<NVEncFilterParam>(param);
         //入力フレーム情報を更新
+        inputFrame = param->frameOut;
+        m_encFps = param->baseFps;
+        return RGY_ERR_NONE;
+    }
+    // NNEDIの縦2倍処理を2軸へ順に適用する。
+    if (vppType == VppType::CL_NNEDI_UPSCALE) {
+        unique_ptr<NVEncFilter> filter(new NVEncFilterNnediUpscale());
+        shared_ptr<NVEncFilterParamNnediUpscale> param(new NVEncFilterParamNnediUpscale());
+        param->nnediUpscale = inputParam->vpp.nnediUpscale;
+        param->compute_capability = m_dev->cc();
+#if defined(_WIN32) || defined(_WIN64)
+        param->hModule = GetModuleHandle(nullptr);
+#else
+        param->hModule = NULL;
+#endif
+        param->frameIn = inputFrame;
+        param->frameOut = inputFrame;
+        param->baseFps = m_encFps;
+        param->timebase = m_outputTimebase;
+        param->bOutOverwrite = false;
+        NVEncCtxAutoLock(cxtlock(m_dev->vidCtxLock()));
+        auto sts = filter->init(param, m_pLog);
+        if (sts != RGY_ERR_NONE) return sts;
+        cufilters.push_back(std::move(filter));
+        m_pLastFilterParam = std::dynamic_pointer_cast<NVEncFilterParam>(param);
         inputFrame = param->frameOut;
         m_encFps = param->baseFps;
         return RGY_ERR_NONE;

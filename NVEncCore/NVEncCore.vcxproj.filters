@@ -578,6 +578,9 @@
     <ClInclude Include="NVEncFilterNnedi.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
+    <ClInclude Include="NVEncFilterNnediUpscale.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
     <ClInclude Include="NVEncFilterNnedi.cuh">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
@@ -967,6 +970,9 @@
       <Filter>ソース ファイル</Filter>
     </CudaCompile>
     <CudaCompile Include="NVEncFilterNnedi.cu">
+      <Filter>ソース ファイル</Filter>
+    </CudaCompile>
+    <CudaCompile Include="NVEncFilterNnediUpscale.cu">
       <Filter>ソース ファイル</Filter>
     </CudaCompile>
     <CudaCompile Include="NVEncFilterNnediU8Fast.cu">
