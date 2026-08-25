@@ -2133,6 +2133,7 @@ VppRifeOV::VppRifeOV() :
     modelFile(),
     device(_T("GPU.0")),
     multi(2),
+    fps(),
     colormatrix(_T("auto")),
     colorrange(_T("auto")) {
 }
@@ -2142,6 +2143,7 @@ bool VppRifeOV::operator==(const VppRifeOV &x) const {
         && modelFile == x.modelFile
         && device == x.device
         && multi == x.multi
+        && fps == x.fps
         && colormatrix == x.colormatrix
         && colorrange == x.colorrange;
 }

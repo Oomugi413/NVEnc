@@ -15,10 +15,11 @@ public:
     tstring modelDir;
     tstring device;
     int multi;
+    rgy_rational<int> fps; // 変換先フレームレート。未指定時はmultiを使う。
     tstring colormatrix;
     tstring colorrange;
     int deviceID;
-    NVEncFilterParamRifeOV() : modelFile(), modelDir(), device(_T("GPU.0")), multi(2), colormatrix(_T("auto")), colorrange(_T("auto")), deviceID(-1) {};
+    NVEncFilterParamRifeOV() : modelFile(), modelDir(), device(_T("GPU.0")), multi(2), fps(), colormatrix(_T("auto")), colorrange(_T("auto")), deviceID(-1) {};
     virtual tstring print() const override;
 };
 
@@ -38,9 +39,18 @@ protected:
     RGY_ERR initCudaPath(cudaStream_t stream);
     RGY_ERR runCuda(const RGYFrameInfo *input, RGYFrameInfo **outputs, int *outputCount, cudaStream_t stream);
     RGYFrameInfo rgbFrame(float *ptr) const;
+    // 現在の入力区間に含まれる出力位置を列挙する。
+    int planSpan(std::vector<float>& tOut);
 
     std::unique_ptr<RGYOnnxRTCUDA> m_ov;
     int m_W, m_H, m_multi;
+    // 任意レート変換は入力フレーム数を基準に整数比で管理し、累積誤差を避ける。
+    bool m_fpsConv;
+    int64_t m_ratioNum;
+    int64_t m_ratioDen;
+    int64_t m_inIdx;
+    int64_t m_outIdx;
+    int m_poolSize;
     float m_maxval;
     float m_yOff, m_yScale, m_yRange, m_cOff, m_cScale, m_cRange;
     float m_matVR, m_matUG, m_matVG, m_matUB;
@@ -49,6 +59,8 @@ protected:
     int64_t m_prevTimestamp, m_prevDuration;
     std::vector<float> m_prevRGB, m_currRGB, m_inBuf, m_outBuf, m_baseGrid, m_multiplier;
     std::unique_ptr<CUFrameBuf> m_inStaging, m_outStaging;
+    // t=0の出力を推論せずコピーするため、直前の入力を元の色空間で保持する。
+    std::unique_ptr<CUFrameBuf> m_prevYuv;
     std::unique_ptr<CUMemBuf> m_inputDevice, m_outputDevice;
     std::unique_ptr<NVEncFilterCspCrop> m_cropToRgb, m_cropFromRgb;
     tstring m_modelPath;

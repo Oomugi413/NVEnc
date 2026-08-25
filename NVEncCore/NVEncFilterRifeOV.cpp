@@ -38,13 +38,14 @@ static inline uint8_t clamp_u8(int v) { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 
 static inline float   clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 NVEncFilterRifeOV::NVEncFilterRifeOV() :
-    NVEncFilter(), m_ov(), m_W(0), m_H(0), m_multi(2), m_maxval(255.0f),
+    NVEncFilter(), m_ov(), m_W(0), m_H(0), m_multi(2),
+    m_fpsConv(false), m_ratioNum(0), m_ratioDen(1), m_inIdx(0), m_outIdx(0), m_poolSize(2), m_maxval(255.0f),
     m_yOff(0), m_yScale(1), m_yRange(255), m_cOff(128), m_cScale(1), m_cRange(255),
     m_matVR(0), m_matUG(0), m_matVG(0), m_matUB(0),
     m_matRY(0), m_matGY(0), m_matBY(0), m_matRU(0), m_matGU(0), m_matBU(0), m_matRV(0), m_matGV(0), m_matBV(0),
     m_havePrev(false), m_prevTimestamp(0), m_prevDuration(0),
     m_prevRGB(), m_currRGB(), m_inBuf(), m_outBuf(), m_baseGrid(), m_multiplier(),
-    m_inStaging(), m_outStaging(), m_inputDevice(), m_outputDevice(), m_cropToRgb(), m_cropFromRgb(),
+    m_inStaging(), m_outStaging(), m_prevYuv(), m_inputDevice(), m_outputDevice(), m_cropToRgb(), m_cropFromRgb(),
     m_modelPath(), m_deviceID(-1), m_cudaPathTried(false), m_cudaPath(false) {
     m_name = _T("rife-ov");
 }
@@ -52,6 +53,7 @@ NVEncFilterRifeOV::NVEncFilterRifeOV() :
 NVEncFilterRifeOV::~NVEncFilterRifeOV() { close(); }
 
 void NVEncFilterRifeOV::close() {
+    m_prevYuv.reset();
     m_ov.reset();
     m_inStaging.reset();
     m_outStaging.reset();
@@ -65,6 +67,10 @@ void NVEncFilterRifeOV::close() {
 }
 
 tstring NVEncFilterParamRifeOV::print() const {
+    if (fps.is_valid() && fps.n() > 0 && fps.d() > 0) {
+        return strsprintf(_T("rife-ov: %s, to %d/%d fps, device %s"),
+            modelFile.c_str(), fps.n(), fps.d(), device.c_str());
+    }
     return strsprintf(_T("rife-ov: %s, x%d, device %s"), modelFile.c_str(), multi, device.c_str());
 }
 
@@ -199,13 +205,42 @@ RGY_ERR NVEncFilterRifeOV::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<
     m_pathThrough = (FILTER_PATHTHROUGH_FRAMEINFO)(m_pathThrough &
         (~(uint32_t)(FILTER_PATHTHROUGH_TIMESTAMP | FILTER_PATHTHROUGH_PICSTRUCT | FILTER_PATHTHROUGH_FLAGS)));
 
-    prm->baseFps   *= m_multi;   // interpolated output runs at multi x the input rate
+    m_fpsConv = prm->fps.is_valid() && prm->fps.n() > 0 && prm->fps.d() > 0;
+    if (m_fpsConv) {
+        const auto fpsIn = prm->baseFps;
+        if (!fpsIn.is_valid() || fpsIn.n() <= 0 || fpsIn.d() <= 0) {
+            AddMessage(RGY_LOG_ERROR, _T("rife-ov: fps= needs a known input frame rate.\n"));
+            return RGY_ERR_INVALID_PARAM;
+        }
+        m_ratioNum = (int64_t)fpsIn.n() * prm->fps.d();
+        m_ratioDen = (int64_t)fpsIn.d() * prm->fps.n();
+        if (m_ratioNum <= 0 || m_ratioDen <= 0) {
+            AddMessage(RGY_LOG_ERROR, _T("rife-ov: invalid frame rate conversion.\n"));
+            return RGY_ERR_INVALID_PARAM;
+        }
+        // 1入力区間に必要な最大出力数を確保する。
+        m_poolSize = std::max(2, (int)std::ceil((double)m_ratioDen / (double)m_ratioNum) + 1);
+        prm->baseFps = prm->fps;
+        AddMessage(RGY_LOG_DEBUG, _T("rife-ov: %d/%d -> %d/%d fps, pool %d\n"),
+            fpsIn.n(), fpsIn.d(), prm->fps.n(), prm->fps.d(), m_poolSize);
+    } else {
+        m_poolSize = m_multi;
+        prm->baseFps *= m_multi;
+    }
+    m_inIdx = 0;
+    m_outIdx = 0;
 
-    // pool: up to `multi` output frames per input frame.
-    err = AllocFrameBuf(prm->frameOut, m_multi);
+    err = AllocFrameBuf(prm->frameOut, m_fpsConv ? m_poolSize : m_multi);
     if (err != RGY_ERR_NONE) {
         AddMessage(RGY_LOG_ERROR, _T("rife-ov: failed to allocate output frame buffer: %s.\n"), get_err_mes(err));
         return err;
+    }
+    if (m_fpsConv) {
+        m_prevYuv = std::make_unique<CUFrameBuf>(prm->frameOut);
+        if (!m_prevYuv || !m_prevYuv->frame.ptr[0]) {
+            AddMessage(RGY_LOG_ERROR, _T("rife-ov: failed to allocate the previous frame.\n"));
+            return RGY_ERR_MEMORY_ALLOC;
+        }
     }
     for (int i = 0; i < RGY_CSP_PLANES[m_frameBuf[0]->frame.csp]; i++) {
         prm->frameOut.pitch[i] = m_frameBuf[0]->frame.pitch[i];
@@ -389,6 +424,21 @@ RGY_ERR NVEncFilterRifeOV::initCudaPath(cudaStream_t stream) {
     return RGY_ERR_NONE;
 }
 
+int NVEncFilterRifeOV::planSpan(std::vector<float>& tOut) {
+    tOut.clear();
+    while ((int)tOut.size() < m_poolSize) {
+        // 出力nの入力位置n*fpsIn/fpsOutが現在の入力位置未満なら、この区間で出力する。
+        if (m_outIdx * m_ratioNum >= m_inIdx * m_ratioDen) {
+            break;
+        }
+        const double pos = (double)(m_outIdx * m_ratioNum) / (double)m_ratioDen;
+        const float t = (float)clamp(pos - (double)(m_inIdx - 1), 0.0, 1.0);
+        tOut.push_back(t);
+        m_outIdx++;
+    }
+    return (int)tOut.size();
+}
+
 RGY_ERR NVEncFilterRifeOV::runCuda(const RGYFrameInfo *input, RGYFrameInfo **outputs,
     int *outputCount, cudaStream_t stream) {
     const size_t plane = (size_t)m_W * m_H;
@@ -409,16 +459,68 @@ RGY_ERR NVEncFilterRifeOV::runCuda(const RGYFrameInfo *input, RGYFrameInfo **out
             cudaMemcpyDeviceToDevice, stream);
         if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
         outputs[0]->timestamp = input->timestamp;
-        outputs[0]->duration = input->duration;
+        outputs[0]->duration = m_fpsConv
+            ? (int64_t)((double)input->duration * (double)m_ratioNum / (double)m_ratioDen + 0.5)
+            : input->duration;
         outputs[0]->picstruct = input->picstruct;
         outputs[0]->inputFrameId = input->inputFrameId;
         *outputCount = 1;
+        m_inIdx = 0;
+        m_outIdx = 1;
+        if (m_fpsConv && m_prevYuv) {
+            err = copyFrameAsync(&m_prevYuv->frame, input, stream);
+            if (err != RGY_ERR_NONE) return err;
+        }
         m_prevTimestamp = input->timestamp;
         m_prevDuration = input->duration;
         m_havePrev = true;
         return RGY_ERR_NONE;
     }
     const int64_t spanDuration = input->timestamp - m_prevTimestamp;
+    if (m_fpsConv) {
+        m_inIdx++;
+        std::vector<float> tList;
+        const int nOut = planSpan(tList);
+        const int64_t outDuration = (spanDuration > 0)
+            ? (int64_t)((double)spanDuration * (double)m_ratioNum / (double)m_ratioDen + 0.5)
+            : input->duration;
+        for (int k = 0; k < nOut; k++) {
+            const float t = tList[k];
+            auto output = &m_frameBuf[k]->frame;
+            if (t == 0.0f && m_prevYuv) {
+                err = copyFrameAsync(output, &m_prevYuv->frame, stream);
+                if (err != RGY_ERR_NONE) return err;
+            } else {
+                uint32_t tBits = 0;
+                std::memcpy(&tBits, &t, sizeof(tBits));
+                const auto cuerr = cuMemsetD32Async((CUdeviceptr)((uint8_t *)m_inputDevice->ptr + 6 * planeBytes),
+                    tBits, plane, (CUstream)stream);
+                if (cuerr != CUDA_SUCCESS) return RGY_ERR_CUDA;
+                err = m_ov->inferDevice((const float *)m_inputDevice->ptr, (float *)m_outputDevice->ptr);
+                if (err != RGY_ERR_NONE) return err;
+                auto rgbOutput = rgbFrame((float *)m_outputDevice->ptr);
+                RGYFrameInfo *yuvOut[1] = { output };
+                int yuvOutCount = 0;
+                err = m_cropFromRgb->filter(&rgbOutput, yuvOut, &yuvOutCount, stream);
+                if (err != RGY_ERR_NONE) return err;
+            }
+            output->timestamp = m_prevTimestamp + (int64_t)((double)spanDuration * (double)t + 0.5);
+            output->duration = outDuration;
+            output->picstruct = input->picstruct;
+            output->inputFrameId = input->inputFrameId;
+            outputs[k] = output;
+        }
+        *outputCount = nOut;
+        err = copyFrameAsync(&m_prevYuv->frame, input, stream);
+        if (err != RGY_ERR_NONE) return err;
+        const auto cudaerr = cudaMemcpyAsync(m_inputDevice->ptr,
+            (uint8_t *)m_inputDevice->ptr + 3 * planeBytes, 3 * planeBytes,
+            cudaMemcpyDeviceToDevice, stream);
+        if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
+        m_prevTimestamp = input->timestamp;
+        m_prevDuration = input->duration;
+        return RGY_ERR_NONE;
+    }
     for (int k = 1; k < m_multi; k++) {
         const float t = (float)k / (float)m_multi;
         uint32_t tBits = 0;
@@ -483,10 +585,18 @@ RGY_ERR NVEncFilterRifeOV::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameI
         err = copyFrameAsync(ppOutputFrames[0], pInputFrame, stream);
         if (err != RGY_ERR_NONE) return err;
         ppOutputFrames[0]->timestamp = pInputFrame->timestamp;
-        ppOutputFrames[0]->duration  = pInputFrame->duration;
+        ppOutputFrames[0]->duration = m_fpsConv
+            ? (int64_t)((double)pInputFrame->duration * (double)m_ratioNum / (double)m_ratioDen + 0.5)
+            : pInputFrame->duration;
         ppOutputFrames[0]->picstruct = pInputFrame->picstruct;
         ppOutputFrames[0]->inputFrameId = pInputFrame->inputFrameId;
         *pOutputFrameNum = 1;
+        m_inIdx = 0;
+        m_outIdx = 1;
+        if (m_fpsConv && m_prevYuv) {
+            err = copyFrameAsync(&m_prevYuv->frame, pInputFrame, stream);
+            if (err != RGY_ERR_NONE) return err;
+        }
         m_prevRGB = m_currRGB;
         m_prevTimestamp = pInputFrame->timestamp;
         m_prevDuration  = pInputFrame->duration;
@@ -495,6 +605,40 @@ RGY_ERR NVEncFilterRifeOV::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameI
     }
 
     const int64_t spanDur = pInputFrame->timestamp - m_prevTimestamp;
+    if (m_fpsConv) {
+        m_inIdx++;
+        std::vector<float> tList;
+        const int nOut = planSpan(tList);
+        const int64_t outDur = (spanDur > 0)
+            ? (int64_t)((double)spanDur * (double)m_ratioNum / (double)m_ratioDen + 0.5)
+            : pInputFrame->duration;
+        for (int k = 0; k < nOut; k++) {
+            const float t = tList[k];
+            RGYFrameInfo *out = &m_frameBuf[k]->frame;
+            if (t == 0.0f && m_prevYuv) {
+                err = copyFrameAsync(out, &m_prevYuv->frame, stream);
+                if (err != RGY_ERR_NONE) return err;
+            } else {
+                err = interpolate(t);
+                if (err != RGY_ERR_NONE) return err;
+                rgbToYUV(m_outStaging->frame, m_outBuf.data());
+                err = copyFrameAsync(out, &m_outStaging->frame, stream);
+                if (err != RGY_ERR_NONE) return err;
+            }
+            out->timestamp = m_prevTimestamp + (int64_t)((double)spanDur * (double)t + 0.5);
+            out->duration = outDur;
+            out->picstruct = pInputFrame->picstruct;
+            out->inputFrameId = pInputFrame->inputFrameId;
+            ppOutputFrames[k] = out;
+        }
+        *pOutputFrameNum = nOut;
+        err = copyFrameAsync(&m_prevYuv->frame, pInputFrame, stream);
+        if (err != RGY_ERR_NONE) return err;
+        m_prevRGB.swap(m_currRGB);
+        m_prevTimestamp = pInputFrame->timestamp;
+        m_prevDuration = pInputFrame->duration;
+        return RGY_ERR_NONE;
+    }
     // (multi-1) interpolated frames between prev and curr.
     for (int k = 1; k < m_multi; k++) {
         const float t = (float)k / (float)m_multi;
