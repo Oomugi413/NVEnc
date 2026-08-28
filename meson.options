@@ -38,7 +38,7 @@ option('enable_libass',
 
 option('libass_static',
   type: 'boolean',
-  value: true,
+  value: false,
   description: 'Statically link libass on Linux'
 )
 
