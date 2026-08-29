@@ -1,6 +1,7 @@
 name: Build Base Docker Images
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -14,20 +15,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - dockerimg: ubuntu2004_cuda11
-          - dockerimg: fedora39_cuda12
+          - dockerimg: ubuntu2404_cuda13
+          # Legacy distribution targets. Keep their Dockerfiles, but do not
+          # publish them from the Oomugi413 fork by default.
+          # - dockerimg: ubuntu2004_cuda11
+          # - dockerimg: fedora39_cuda12
 
     env:
       DOCKER_FILE: docker/docker_${{ matrix.dockerimg }}
-      IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/nvenc-build
-      FFMPEG_DLL_REPO: https://github.com/rigaya/build_scripts.git
+      FFMPEG_DLL_REPO: https://github.com/Oomugi413/build_scripts.git
       FFMPEG_DLL_REF: master
       NVENC_HEADER_DIR: /opt/nvenc_headers
       AVISYNTH_HEADERS_URL: https://github.com/AviSynth/AviSynthPlus/archive/refs/tags/v3.7.5.tar.gz
       VAPOURSYNTH_HEADERS_URL: https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R72.tar.gz
-      VSHIP_HEADERS_URL: https://codeberg.org/Line-fr/Vship/archive/v5.0.0.tar.gz
+      VSHIP_REPO: https://codeberg.org/Line-fr/Vship.git
+      VSHIP_TAG: v5.0.0
+      NVENCC_FFMPEG_VERSION: '8.1.2'
 
     steps:
+      - name: Prepare image name
+        id: prep
+        run: echo "image_repo=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/nvenc-build" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -60,7 +69,7 @@ jobs:
           context: ./
           file: ${{ env.DOCKER_FILE }}
           push: true
-          tags: ${{ env.IMAGE_REPO }}:${{ matrix.dockerimg }}
+          tags: ${{ steps.prep.outputs.image_repo }}:${{ matrix.dockerimg }}
           build-args: |
             FFMPEG_DLL_REPO=${{ env.FFMPEG_DLL_REPO }}
             FFMPEG_DLL_REF=${{ env.FFMPEG_DLL_REF }}
@@ -68,8 +77,8 @@ jobs:
             NVENC_HEADER_DIR=${{ env.NVENC_HEADER_DIR }}
             AVISYNTH_HEADERS_URL=${{ env.AVISYNTH_HEADERS_URL }}
             VAPOURSYNTH_HEADERS_URL=${{ env.VAPOURSYNTH_HEADERS_URL }}
-            VSHIP_HEADERS_URL=${{ env.VSHIP_HEADERS_URL }}
+            VSHIP_REPO=${{ env.VSHIP_REPO }}
+            VSHIP_TAG=${{ env.VSHIP_TAG }}
+            NVENCC_FFMPEG_VERSION=${{ env.NVENCC_FFMPEG_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-

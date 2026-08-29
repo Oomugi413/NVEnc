@@ -367,6 +367,9 @@ int main(void) { return 0; }
   endif
 endif
 
+# Keep libass shared by default. A static libass dependency can pull static
+# GLib into nvencc while shared FFmpeg libraries use shared GLib/GObject,
+# causing GLib global-state conflicts at process startup.
 if enable_libass
   libass_dep = dependency('libass', required: true, static: libass_static)
   libass_compile_dep = libass_dep.partial_dependency(includes: true, compile_args: true)

@@ -25,6 +25,7 @@
   #include <unistd.h>
   #include <string.h>
   #include <pthread.h>
+  #include <time.h>
   typedef pthread_mutex_t CRITICAL_SECTION;
   typedef void* HANDLE;
 
@@ -115,6 +116,9 @@ protected:
 
     HANDLE hEvent_;
     CRITICAL_SECTION    oCriticalSection_;
+#ifndef _WIN32
+    pthread_cond_t      oQueueUpdateCondition_;
+#endif
     volatile int        nReadPosition_;
     volatile int        nWritePosition_;
 
