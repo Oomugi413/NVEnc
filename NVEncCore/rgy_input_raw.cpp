@@ -26,6 +26,7 @@
 // ------------------------------------------------------------------------------------------
 
 #include <sstream>
+#include <cmath>
 #include <fcntl.h>
 #include "rgy_filesystem.h"
 #include "rgy_input_raw.h"
@@ -348,6 +349,8 @@ RGY_ERR RGYInputRaw::LoadNextFrameInternal(RGYFrame *pSurface) {
         return m_encSatusInfo->UpdateDisplay();
     }
 
+    int64_t y4mTimestamp = AV_NOPTS_VALUE;
+    int64_t y4mDuration = -1;
     if (m_inputVideoInfo.type == RGY_INPUT_FMT_Y4M) {
         uint8_t y4m_buf[8] = { 0 };
         if (_fread_nolock(y4m_buf, 1, strlen("FRAME"), m_fSource) != strlen("FRAME")) {
@@ -358,11 +361,35 @@ RGY_ERR RGYInputRaw::LoadNextFrameInternal(RGYFrame *pSurface) {
             AddMessage(RGY_LOG_DEBUG, _T("header2: finish.\n"));
             return RGY_ERR_MORE_DATA;
         }
-        int i;
-        for (i = 0; _fgetc_nolock(m_fSource) != '\n'; i++) {
-            if (i >= 64) {
+        char frameParam[65] = { 0 };
+        int frameParamLen = 0;
+        for (;;) {
+            const int c = _fgetc_nolock(m_fSource);
+            if (c == '\n') break;
+            if (c == EOF || frameParamLen >= 64) {
                 AddMessage(RGY_LOG_DEBUG, _T("header3: finish.\n"));
                 return RGY_ERR_MORE_DATA;
+            }
+            frameParam[frameParamLen++] = (char)c;
+        }
+        // FRAME行の拡張パラメータ(Xts=表示時刻, Xdur=表示時間, いずれも秒)を取り込む
+        // keyが一致しない、または値が不正な場合は負値を返し、そのパラメータは無視される
+        const auto parseSec = [](const char *token, const char *key) {
+            const size_t keyLen = strlen(key);
+            if (strncmp(token, key, keyLen) != 0) return -1.0;
+            char *endptr = nullptr;
+            const double sec = strtod(token + keyLen, &endptr);
+            return (endptr != token + keyLen && *endptr == '\0' && std::isfinite(sec) && sec >= 0.0) ? sec : -1.0;
+        };
+        const auto timebase = getInputTimebase();
+        const auto toTick = [&timebase](const double sec) { return (int64_t)std::llround(sec * timebase.d() / timebase.n()); };
+        char *context = nullptr;
+        for (char *token = strtok_s(frameParam, " ", &context); token != nullptr; token = strtok_s(nullptr, " ", &context)) {
+            double sec = -1.0;
+            if ((sec = parseSec(token, "Xts=")) >= 0.0) {
+                y4mTimestamp = toTick(sec);
+            } else if ((sec = parseSec(token, "Xdur=")) > 0.0) {
+                y4mDuration = toTick(sec);
             }
         }
     }
@@ -465,8 +492,18 @@ RGY_ERR RGYInputRaw::LoadNextFrameInternal(RGYFrame *pSurface) {
         dst_array, src_array, m_inputVideoInfo.srcWidth, m_inputVideoInfo.srcPitch,
         src_uv_pitch, pSurface->pitch(), pSurface->pitch(RGY_PLANE_C), m_inputVideoInfo.srcHeight, m_inputVideoInfo.srcHeight, m_inputVideoInfo.crop.c);
     auto inputFps = rgy_rational<int>(m_inputVideoInfo.fpsN, m_inputVideoInfo.fpsD);
-    pSurface->setDuration(rational_rescale(1, getInputTimebase().inv(), inputFps));
-    pSurface->setTimestamp(rational_rescale(GetVideoFirstKeyPts() + m_encSatusInfo->m_sData.frameIn, getInputTimebase().inv(), inputFps));
+    const auto cfrDuration = rational_rescale(1, getInputTimebase().inv(), inputFps);
+    if (m_timecode && y4mTimestamp != AV_NOPTS_VALUE && m_encSatusInfo->m_sData.frameIn == 0) {
+        AddMessage(RGY_LOG_WARN, _T("Ignoring y4m Xts timestamps because --tcfile-in is specified.\n"));
+    }
+    if (y4mTimestamp != AV_NOPTS_VALUE && !m_timecode) {
+        pSurface->setTimestamp(y4mTimestamp);
+        // Xdurがない場合はヘッダFPSから求めたCFRのdurationで代用する
+        pSurface->setDuration(y4mDuration > 0 ? y4mDuration : cfrDuration);
+    } else {
+        pSurface->setDuration(cfrDuration);
+        pSurface->setTimestamp(rational_rescale(GetVideoFirstKeyPts() + m_encSatusInfo->m_sData.frameIn, getInputTimebase().inv(), inputFps));
+    }
 
     m_encSatusInfo->m_sData.frameIn++;
     return m_encSatusInfo->UpdateDisplay();

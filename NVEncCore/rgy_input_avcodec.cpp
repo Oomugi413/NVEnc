@@ -1872,6 +1872,8 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
                     if ((input_prm->ppSubtitleSelect[i]->trackID == 0 && input_prm->ppSubtitleSelect[i]->encCodec.length() > 0) //特に指定なし = 全指定かどうか
                         || (input_prm->ppSubtitleSelect[i]->trackID == TRACK_SELECT_BY_LANG && isSelectedLangTrack(input_prm->ppSubtitleSelect[i]->lang, srcStream))
                         || (input_prm->ppSubtitleSelect[i]->trackID == TRACK_SELECT_BY_LANG_EXCLUDE && isNotExcludedLangTrack(input_prm->ppSubtitleSelect[i]->lang, srcStream))
+                        || (input_prm->ppSubtitleSelect[i]->trackID == TRACK_SELECT_BY_TRACK_EXCLUDE
+                            && std::find(input_prm->ppSubtitleSelect[i]->excludeTrackIDs.begin(), input_prm->ppSubtitleSelect[i]->excludeTrackIDs.end(), iTrack - m_Demux.format.audioTracks + 1) == input_prm->ppSubtitleSelect[i]->excludeTrackIDs.end())
                         || (input_prm->ppSubtitleSelect[i]->trackID == TRACK_SELECT_BY_CODEC && isSelectedCodecTrack(input_prm->ppSubtitleSelect[i]->selectCodec, srcStream))
                         || input_prm->ppSubtitleSelect[i]->trackID - 1 == (iTrack - m_Demux.format.audioTracks)) {
                         useStream = true;
@@ -1882,6 +1884,9 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
                 for (int i = 0; !useStream && i < input_prm->nDataSelectCount; i++) {
                     if ((input_prm->ppDataSelect[i]->trackID == 0 && input_prm->ppDataSelect[i]->encCodec.length() > 0) //特に指定なし = 全指定かどうか
                         || (input_prm->ppDataSelect[i]->trackID == TRACK_SELECT_BY_LANG && isSelectedLangTrack(input_prm->ppDataSelect[i]->lang, srcStream))
+                        || (input_prm->ppDataSelect[i]->trackID == TRACK_SELECT_BY_LANG_EXCLUDE && isNotExcludedLangTrack(input_prm->ppDataSelect[i]->lang, srcStream))
+                        || (input_prm->ppDataSelect[i]->trackID == TRACK_SELECT_BY_TRACK_EXCLUDE
+                            && std::find(input_prm->ppDataSelect[i]->excludeTrackIDs.begin(), input_prm->ppDataSelect[i]->excludeTrackIDs.end(), iTrack - m_Demux.format.audioTracks - m_Demux.format.subtitleTracks + 1) == input_prm->ppDataSelect[i]->excludeTrackIDs.end())
                         || (input_prm->ppDataSelect[i]->trackID == TRACK_SELECT_BY_CODEC && isSelectedCodecTrack(input_prm->ppDataSelect[i]->selectCodec, srcStream))
                         || input_prm->ppDataSelect[i]->trackID - 1 == (iTrack - m_Demux.format.audioTracks - m_Demux.format.subtitleTracks)) {
                         useStream = true;
@@ -1892,6 +1897,8 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
                 for (int i = 0; !useStream && i < input_prm->nAudioSelectCount; i++) {
                     if ((input_prm->ppAudioSelect[i]->trackID == TRACK_SELECT_BY_LANG && isSelectedLangTrack(input_prm->ppAudioSelect[i]->lang, srcStream))
                         || (input_prm->ppAudioSelect[i]->trackID == TRACK_SELECT_BY_LANG_EXCLUDE && isNotExcludedLangTrack(input_prm->ppAudioSelect[i]->lang, srcStream))
+                        || (input_prm->ppAudioSelect[i]->trackID == TRACK_SELECT_BY_TRACK_EXCLUDE
+                            && std::find(input_prm->ppAudioSelect[i]->excludeTrackIDs.begin(), input_prm->ppAudioSelect[i]->excludeTrackIDs.end(), iTrack + 1) == input_prm->ppAudioSelect[i]->excludeTrackIDs.end())
                         || (input_prm->ppAudioSelect[i]->trackID == TRACK_SELECT_BY_CODEC && isSelectedCodecTrack(input_prm->ppAudioSelect[i]->selectCodec, srcStream))
                         || (input_prm->ppAudioSelect[i]->trackID - 1 == (iTrack))) {
                         useStream = true;
@@ -2040,12 +2047,6 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
             AddMessage((m_inputVideoInfo.type == RGY_INPUT_FMT_AVHW) ? RGY_LOG_WARN : RGY_LOG_INFO, _T("--dhdr10-info copy is only supported with sw deocde in %s, switching to --avsw.\n"), _T(ENCODER_NAME));
             m_inputVideoInfo.type = RGY_INPUT_FMT_AVSW;
         }
-#if ENCODER_NVENC && (defined(_M_ARM64) || defined(__aarch64__) || defined(__arm64__) || defined(__ARM_ARCH))
-        //armではhwデコーダを使用すると現状エラー終了するため、--avhwの指定がないときはavswを使用する
-        if (m_inputVideoInfo.type != RGY_INPUT_FMT_AVHW) {
-            m_inputVideoInfo.type = RGY_INPUT_FMT_AVSW;
-        }
-#endif
         m_Demux.video.HWDecodeDeviceId.clear();
         if (input_prm->tcfileIn.length() > 0) {
             if (input_prm->seekSec > 0.0f) {

@@ -101,7 +101,9 @@ protected:
     RGY_ERR runMask(const RGYFrameInfo *pInputFrame, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum, cudaStream_t stream);
     RGY_ERR reinitHostPath(tstring &errorMessage);
     RGY_ERR initCudaPath(cudaStream_t stream);
+    RGY_ERR prepareLumaOutput(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream);
     RGY_ERR runCudaRGB(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream);
+    RGY_ERR runCudaLuma(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream);
     RGY_ERR runCudaGrayNoise(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream);
     RGY_ERR runCudaYuv444(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream);
     RGYFrameInfo tensorFrame(float *ptr, int channels, int width, int height, RGY_CSP csp) const;
@@ -133,6 +135,7 @@ protected:
     std::unique_ptr<NVEncFilterCspCrop> m_cropFromRgb;
     std::unique_ptr<NVEncFilterCspCrop> m_cropToYuv444;
     std::unique_ptr<NVEncFilterCspCrop> m_cropFromYuv444;
+    std::unique_ptr<NVEncFilterResize> m_lumaResize;
     tstring m_modelPath;
     RGYOnnxRTProvider m_provider;
     tstring m_precision;

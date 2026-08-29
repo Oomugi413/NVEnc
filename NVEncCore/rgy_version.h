@@ -29,11 +29,13 @@
 #ifndef __RGY_CONFIG_H__
 #define __RGY_CONFIG_H__
 
-#define VER_FILEVERSION             0,9,32,1
-#define VER_STR_FILEVERSION          "9.32.1"
-#define VER_STR_FILEVERSION_TCHAR _T("9.32.1")
+#define VER_FILEVERSION             0,9,33,1
+#define VER_STR_FILEVERSION          "9.33.1"
+#define VER_STR_FILEVERSION_TCHAR _T("9.33.1")
 
-#ifdef _M_IX86
+#if (defined(_M_ARM64) || defined(__aarch64__) || defined(__arm64__) || defined(__ARM_ARCH))
+#define BUILD_ARCH_STR _T("aarch64")
+#elif defined(_M_IX86)
 #define BUILD_ARCH_STR _T("x86")
 #else
 #define BUILD_ARCH_STR _T("x64")

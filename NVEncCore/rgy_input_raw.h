@@ -60,6 +60,11 @@ public:
     virtual bool timestampStable() const override {
         return true;
     }
+    virtual rgy_rational<int> getInputTimebase() const override {
+        if (m_timebase.is_valid()) return m_timebase;
+        return (m_inputVideoInfo.type == RGY_INPUT_FMT_Y4M)
+            ? rgy_rational<int>(1, 1200000) : RGYInput::getInputTimebase();
+    }
     virtual int64_t GetVideoFirstKeyPts() const override;
 
 protected:

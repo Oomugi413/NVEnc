@@ -34,7 +34,8 @@ template<typename Type, int bit_depth>
 __global__ void kernel_lenscorrection(
     uint8_t *dst, const int dstPitch, const int dstWidth, const int dstHeight,
     const uint8_t *src, const int srcPitch, const int srcWidth, const int srcHeight,
-    const float k1, const float k2, const float cx, const float cy, const float fillValue) {
+    const float k1, const float k2, const float cx, const float cy, const float fillValue,
+    const float vignette, const float pivot) {
     const int ix = blockIdx.x * blockDim.x + threadIdx.x;
     const int iy = blockIdx.y * blockDim.y + threadIdx.y;
     if (ix >= dstWidth || iy >= dstHeight) {
@@ -57,8 +58,12 @@ __global__ void kernel_lenscorrection(
     const float v10 = lens_sample<Type>(src, srcPitch, srcWidth, srcHeight, x0 + 1, y0, fillValue);
     const float v01 = lens_sample<Type>(src, srcPitch, srcWidth, srcHeight, x0, y0 + 1, fillValue);
     const float v11 = lens_sample<Type>(src, srcPitch, srcWidth, srcHeight, x0 + 1, y0 + 1, fillValue);
-    const float v = v00 * (1.0f - fx) * (1.0f - fy) + v10 * fx * (1.0f - fy)
-                  + v01 * (1.0f - fx) * fy          + v11 * fx * fy;
+    float v = v00 * (1.0f - fx) * (1.0f - fy) + v10 * fx * (1.0f - fy)
+            + v01 * (1.0f - fx) * fy          + v11 * fx * fy;
+    if (vignette != 0.0f) {
+        const float gain = fmaxf(1.0f + vignette * rn2, 0.0f);
+        v = pivot + gain * (v - pivot);
+    }
     auto dstPix = (Type *)(dst + iy * dstPitch + ix * (int)sizeof(Type));
     const int maxValue = (1 << bit_depth) - 1;
     dstPix[0] = (Type)clamp((int)(v + 0.5f), 0, maxValue);
@@ -73,7 +78,8 @@ static RGY_ERR lenscorrection_plane(RGYFrameInfo *pOutputPlane, const RGYFrameIn
         pOutputPlane->ptr[0], pOutputPlane->pitch[0], pOutputPlane->width, pOutputPlane->height,
         pInputPlane->ptr[0], pInputPlane->pitch[0], pInputPlane->width, pInputPlane->height,
         prm->lenscorrection.k1, prm->lenscorrection.k2,
-        prm->lenscorrection.cx, prm->lenscorrection.cy, fillValue);
+        prm->lenscorrection.cx, prm->lenscorrection.cy, fillValue,
+        prm->lenscorrection.vignette, fillValue);
     auto cudaerr = cudaGetLastError();
     if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
     CUDA_DEBUG_SYNC_ERR;

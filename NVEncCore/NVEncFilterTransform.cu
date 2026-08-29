@@ -349,6 +349,8 @@ RGY_ERR NVEncFilterTransform::run_filter(const RGYFrameInfo *pInputFrame, RGYFra
     }
 
     static const std::map<RGY_CSP, decltype(transform_frame<uchar4>)*> func_list = {
+        { RGY_CSP_Y8,        transform_frame<uchar4> },
+        { RGY_CSP_Y16,       transform_frame<ushort4> },
         { RGY_CSP_YV12,      transform_frame<uchar4> },
         { RGY_CSP_YV12_16,   transform_frame<ushort4> },
         { RGY_CSP_YUV444,    transform_frame<uchar4> },

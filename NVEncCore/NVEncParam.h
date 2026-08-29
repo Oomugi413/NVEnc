@@ -794,6 +794,8 @@ static int get_value(int id, const std::vector<NVEncCap>& capList) {
 struct NVEncRCParam {
     int start;
     int end;
+    double startTime;
+    double endTime;
     NV_ENC_PARAMS_RC_MODE rc_mode;
     int avg_bitrate;
     int max_bitrate;

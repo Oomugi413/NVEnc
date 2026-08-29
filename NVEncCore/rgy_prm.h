@@ -61,6 +61,7 @@ static const int RGY_AUDIO_QUALITY_DEFAULT = 0;
 #endif
 #define ENABLE_VPP_FILTER_AFS          (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP)
 #define ENABLE_VPP_FILTER_NNEDI        (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
+#define ENABLE_VPP_FILTER_NNEDI_UPSCALE (ENCODER_QSV   || ENCODER_NVENC)
 #define ENABLE_VPP_FILTER_BWDIF        (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP)
 #define ENABLE_VPP_FILTER_MAA          (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP)
 #define ENABLE_VPP_FILTER_RTGMC        (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP)
@@ -91,6 +92,7 @@ static const int RGY_AUDIO_QUALITY_DEFAULT = 0;
 #define ENABLE_VPP_FILTER_RIFE_OV      ((ENABLE_OPENVINO && ENCODER_QSV) || (ENABLE_ONNXRUNTIME && (ENCODER_NVENC || ENCODER_VCEENC)))
 #define ENABLE_VPP_FILTER_ONNX_DEINT   ((ENABLE_OPENVINO && ENCODER_QSV) || (ENABLE_ONNXRUNTIME && ENCODER_NVENC))
 #define ENABLE_VPP_FILTER_DENOISE_DCT  (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
+#define ENABLE_VPP_FILTER_DENOISE_BM3D (ENCODER_QSV || ENCODER_NVENC)
 #define ENABLE_VPP_FILTER_SMOOTH       (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
 #define ENABLE_VPP_FILTER_FFT3D        (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP)
 #define ENABLE_VPP_FILTER_MSMOOTH      (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
@@ -104,6 +106,9 @@ static const int RGY_AUDIO_QUALITY_DEFAULT = 0;
 #define ENABLE_VPP_FILTER_DEHALO       (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
 #define ENABLE_VPP_FILTER_FINEDEHALO   (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
 #define ENABLE_VPP_FILTER_HQDERING     (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP)
+#define ENABLE_VPP_FILTER_GUIDEDFILTER (ENCODER_QSV || ENCODER_NVENC)
+#define ENABLE_VPP_FILTER_CLAHE        (ENCODER_QSV || ENCODER_NVENC)
+#define ENABLE_VPP_FILTER_DEHAZE       (ENCODER_QSV || ENCODER_NVENC)
 #define ENABLE_VPP_FILTER_WARPSHARP    (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
 #define ENABLE_VPP_FILTER_DETAILSHARPEN (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
 #define ENABLE_VPP_FILTER_EDGELEVEL    (ENCODER_QSV   || ENCODER_NVENC || ENCODER_VCEENC || ENCODER_MPP || CLFILTERS_AUF)
@@ -182,6 +187,7 @@ enum class VppType : int {
     CL_LIBPLACEBO_TONEMAP,
     CL_AFS,
     CL_NNEDI,
+    CL_NNEDI_UPSCALE,
     CL_BWDIF,
     CL_RTGMC,
     CL_RTGMC_BOB,
@@ -212,6 +218,7 @@ enum class VppType : int {
     CL_RIFE_OV,
 
     CL_DENOISE_DCT,
+    CL_DENOISE_BM3D,
     CL_DENOISE_SMOOTH,
     CL_DENOISE_FFT3D,
     CL_DEGRAIN,
@@ -241,6 +248,9 @@ enum class VppType : int {
     CL_DEHALO,
     CL_FINEDEHALO,
     CL_HQDERING,
+    CL_GUIDEDFILTER,
+    CL_CLAHE,
+    CL_DEHAZE,
     CL_EDGELEVEL,
     CL_MSHARPEN,
     CL_WARPSHARP,
@@ -509,6 +519,18 @@ static const float FILTER_DEFAULT_SMOOTH_B_RATIO = 0.5f;
 static const int   FILTER_DEFAULT_SMOOTH_MAX_QPTABLE_ERR = 10;
 
 static const float FILTER_DEFAULT_DENOISE_DCT_SIGMA = 4.0f;
+
+// BM3D: block-matching + 3D collaborative filter, from Dabov 2007,
+// "Image denoising by sparse 3D transform-domain collaborative
+// filtering". Two step: a hard-threshold basic estimate then a Wiener
+// final estimate. radius>0 enables the V-BM3D temporal extension.
+// Defaults match the reference plugin's "fast" profile.
+static const float FILTER_DEFAULT_DENOISE_BM3D_SIGMA      = 3.0f;
+static const int   FILTER_DEFAULT_DENOISE_BM3D_BLOCK_STEP = 8;
+static const int   FILTER_DEFAULT_DENOISE_BM3D_GROUP_SIZE = 8;
+static const int   FILTER_DEFAULT_DENOISE_BM3D_BM_RANGE   = 9;
+static const int   FILTER_DEFAULT_DENOISE_BM3D_RADIUS     = 0;
+static const bool  FILTER_DEFAULT_DENOISE_BM3D_CHROMA     = false;
 static const float FILTER_DEFAULT_DENOISE_DCT_SIGMA2 = 0.0f; // 0 = follow sigma
 static const float FILTER_DEFAULT_DENOISE_DCT_SIGMA3 = 0.0f; // 0 = follow sigma
 static const float FILTER_DEFAULT_DENOISE_DCT_SIGMA4 = 0.0f; // 0 = follow sigma
@@ -589,6 +611,9 @@ static const bool  FILTER_DEFAULT_MSMOOTH_MASK = false;
 static const float FILTER_DEFAULT_TWEAK_BRIGHTNESS = 0.0f;
 static const float FILTER_DEFAULT_TWEAK_CONTRAST = 1.0f;
 static const float FILTER_DEFAULT_TWEAK_GAMMA = 1.0f;
+static const float FILTER_DEFAULT_TWEAK_VIBRANCE = 0.0f;
+static const float FILTER_MIN_TWEAK_VIBRANCE = -1.0f;
+static const float FILTER_MAX_TWEAK_VIBRANCE = 2.0f;
 static const float FILTER_DEFAULT_TWEAK_SATURATION = 1.0f;
 static const float FILTER_DEFAULT_TWEAK_HUE = 0.0f;
 
@@ -596,6 +621,18 @@ static const float FILTER_DEFAULT_EDGELEVEL_STRENGTH = 5.0f;
 static const float FILTER_DEFAULT_EDGELEVEL_THRESHOLD = 20.0f;
 static const float FILTER_DEFAULT_EDGELEVEL_BLACK = 0.0f;
 static const float FILTER_DEFAULT_EDGELEVEL_WHITE = 0.0f;
+
+static const int   FILTER_DEFAULT_GUIDEDFILTER_RADIUS = 4;
+static const float FILTER_DEFAULT_GUIDEDFILTER_EPS = 0.01f;
+
+static const int   FILTER_DEFAULT_CLAHE_TILES_X = 8;
+static const int   FILTER_DEFAULT_CLAHE_TILES_Y = 8;
+static const float FILTER_DEFAULT_CLAHE_SLOPE = 3.0f;
+
+static const int   FILTER_DEFAULT_DEHAZE_PATCH_RADIUS = 7;
+static const float FILTER_DEFAULT_DEHAZE_OMEGA = 0.95f;
+static const float FILTER_DEFAULT_DEHAZE_T_FLOOR = 0.1f;
+static const float FILTER_DEFAULT_DEHAZE_ATM_LIGHT = 0.95f;
 
 static const float FILTER_DEFAULT_MSHARPEN_STRENGTH = 1.0f;
 static const float FILTER_DEFAULT_MSHARPEN_THRESHOLD = 15.0f;
@@ -638,6 +675,7 @@ static const int   FILTER_DEFAULT_DEBLOCK_QP = 24;
 static const int   FILTER_DEFAULT_DEBLOCK_ALPHA = 0;
 static const int   FILTER_DEFAULT_DEBLOCK_BETA = 0;
 static const bool  FILTER_DEFAULT_DEBLOCK_CHROMA = false;
+static const int   FILTER_DEFAULT_DEBLOCK_GRID = 4;
 static const float FILTER_DEFAULT_DEFLICKER_STRENGTH = 1.0f;
 static const float FILTER_DEFAULT_DEFLICKER_DAMPING = 0.8f;
 static const float FILTER_DEFAULT_DEFLICKER_SCENE_THRESHOLD = 2.0f;
@@ -662,6 +700,10 @@ static const int   FILTER_DEFAULT_COLORFIX_BLACK = 0;
 static const int   FILTER_DEFAULT_COLORFIX_FRAMES = 30;
 static const float FILTER_DEFAULT_COLORFIX_STRENGTH = 1.0f;
 static const float FILTER_DEFAULT_COLORFIX_VARIANCE_THRESHOLD = 2.0f;
+static const int   FILTER_DEFAULT_COLORFIX_TEMPERATURE = 0;
+static const int   FILTER_MIN_COLORFIX_TEMPERATURE = 2500;
+static const int   FILTER_MAX_COLORFIX_TEMPERATURE = 15000;
+static const int   FILTER_REF_COLORFIX_TEMPERATURE = 6500;
 
 static const float FILTER_DEFAULT_DEHALO_RX = 2.0f;
 static const float FILTER_DEFAULT_DEHALO_RY = 2.0f;
@@ -859,6 +901,8 @@ enum RGY_VPP_RESIZE_ALGO {
     RGY_VPP_RESIZE_JINC64,
     RGY_VPP_RESIZE_JINC144,
     RGY_VPP_RESIZE_JINC256,
+    RGY_VPP_RESIZE_AREA,
+    RGY_VPP_RESIZE_DPID,
     RGY_VPP_RESIZE_OPENCL_CUDA_MAX,
 #if ENCODER_QSV
     RGY_VPP_RESIZE_MFX_NEAREST_NEIGHBOR,
@@ -1043,6 +1087,8 @@ const CX_DESC list_vpp_resize[] = {
     { _T("jinc64"),   RGY_VPP_RESIZE_JINC64 },
     { _T("jinc144"),  RGY_VPP_RESIZE_JINC144 },
     { _T("jinc256"),  RGY_VPP_RESIZE_JINC256 },
+    { _T("area"),     RGY_VPP_RESIZE_AREA },
+    { _T("dpid"),     RGY_VPP_RESIZE_DPID },
 #if ENCODER_QSV
   #if !FOR_AUO
     { _T("bilinear"), RGY_VPP_RESIZE_MFX_BILINEAR },
@@ -1143,6 +1189,8 @@ const CX_DESC list_vpp_resize_help[] = {
     { _T("jinc64"),   RGY_VPP_RESIZE_JINC64 },
     { _T("jinc144"),  RGY_VPP_RESIZE_JINC144 },
     { _T("jinc256"),  RGY_VPP_RESIZE_JINC256 },
+    { _T("area"),     RGY_VPP_RESIZE_AREA },
+    { _T("dpid"),     RGY_VPP_RESIZE_DPID },
 #if ENCODER_QSV
     { _T("bilinear"), RGY_VPP_RESIZE_MFX_BILINEAR },
     { _T("advanced"), RGY_VPP_RESIZE_MFX_ADVANCED },
@@ -1219,8 +1267,22 @@ static const char *paramsResizeQSVEnc[] = { "superres-mode", "superres-algo" };
 static const char *paramsResizeFsr1[] = { "sharpness" };
 static const char *paramsResizeNis[]      = { "cascade", "sharpness", "hdr", "opt" };
 static const char *paramsResizeBicubic[]  = { "b", "c" };
+static const char *paramsResizeDpid[]     = { "dpid_lambda" };
 
 static const float FILTER_DEFAULT_RESIZE_FSR1_SHARPNESS = 0.5f;
+
+static const float FILTER_DEFAULT_RESIZE_DPID_LAMBDA = 1.0f;
+static const float FILTER_MIN_RESIZE_DPID_LAMBDA = 0.0f;
+static const float FILTER_MAX_RESIZE_DPID_LAMBDA = 4.0f;
+
+struct VppResizeDpid {
+    float lambda; // 大きいほど周囲と異なる画素を強く残す
+
+    VppResizeDpid();
+    bool operator==(const VppResizeDpid &x) const;
+    bool operator!=(const VppResizeDpid &x) const;
+    tstring print() const;
+};
 
 struct VppResizeFsr1 {
     float sharpness;
@@ -2542,6 +2604,17 @@ struct VppNnedi {
     tstring print() const;
 };
 
+struct VppNnediUpscale {
+    bool enable;
+    VppNnedi nnedi;
+    bool shiftCubic;
+
+    VppNnediUpscale();
+    bool operator==(const VppNnediUpscale& x) const;
+    bool operator!=(const VppNnediUpscale& x) const;
+    tstring print() const;
+};
+
 struct VppSelectEvery {
     bool  enable;
     int   step;
@@ -2767,6 +2840,20 @@ struct VppPmd {
     VppPmd();
     bool operator==(const VppPmd &x) const;
     bool operator!=(const VppPmd &x) const;
+    tstring print() const;
+};
+
+struct VppDenoiseBm3d {
+    bool  enable;
+    float sigma;
+    int   block_step;
+    int   group_size;
+    int   bm_range;
+    int   radius;
+    bool  chroma;
+    VppDenoiseBm3d();
+    bool operator==(const VppDenoiseBm3d &x) const;
+    bool operator!=(const VppDenoiseBm3d &x) const;
     tstring print() const;
 };
 
@@ -3133,6 +3220,8 @@ struct VppDeblock {
     int  alpha;
     int  beta;
     bool chroma;
+    // フィルタを適用するブロック境界の間隔。H.264/AVCは4、MPEG-2/MPEG-4 Part 2は8。
+    int  grid;
 
     VppDeblock();
     bool operator==(const VppDeblock &x) const;
@@ -3202,6 +3291,7 @@ struct VppColorFix {
     int   frames;
     float strength;
     float varianceThreshold;
+    int   temperature;   // 撮影光源の色温度（K）、0で無効
 
     VppColorFix();
     bool operator==(const VppColorFix &x) const;
@@ -3577,6 +3667,7 @@ struct VppRifeOV {
     tstring modelFile;
     tstring device;
     int     multi;
+    rgy_rational<int> fps; // 変換先フレームレート。未指定時はmultiを使う。
     tstring colormatrix;
     tstring colorrange;
 
@@ -3680,6 +3771,7 @@ struct VppTweak {
     float contrast;   // -2.0 - 2.0 (1.0)
     float gamma;      //  0.1 - 10.0 (1.0)
     float saturation; //  0.0 - 3.0 (1.0)
+    float vibrance;   // -1.0 - 2.0 (0.0)、低彩度の色を優先して調整
     float hue;        // -180 - 180 (0.0)
     bool swapuv;
     bool coring;      //出力をTVレンジ相当にクランプ (default false)
@@ -3717,6 +3809,7 @@ struct VppLensCorrection {
     float k2;
     float cx;
     float cy;
+    float vignette;   // 四隅の明るさ補正量。正値で周辺減光を除去し、0で無効
 
     VppLensCorrection();
     bool operator==(const VppLensCorrection &x) const;
@@ -3907,6 +4000,46 @@ enum class VppDeintCsp {
 
 extern const CX_DESC list_vpp_deint_csp[];
 
+// 自己ガイド型のエッジ保持平滑化フィルタ。
+struct VppGuidedfilter {
+    bool enable;
+    int radius;
+    float eps;
+    bool chroma;
+
+    VppGuidedfilter();
+    bool operator==(const VppGuidedfilter& x) const;
+    bool operator!=(const VppGuidedfilter& x) const;
+    tstring print() const;
+};
+
+// タイル単位の局所ヒストグラム均等化フィルタ。
+struct VppClahe {
+    bool enable;
+    int tiles_x;
+    int tiles_y;
+    float slope;
+
+    VppClahe();
+    bool operator==(const VppClahe& x) const;
+    bool operator!=(const VppClahe& x) const;
+    tstring print() const;
+};
+
+// dark channel priorによる輝度プレーンの霧除去。
+struct VppDehaze {
+    bool enable;
+    int patch_radius;
+    float omega;
+    float t_floor;
+    float atm_light;
+
+    VppDehaze();
+    bool operator==(const VppDehaze& x) const;
+    bool operator!=(const VppDehaze& x) const;
+    tstring print() const;
+};
+
 struct RGYParamVpp {
     std::vector<VppType> filterOrder;
     RGY_VPP_RESIZE_ALGO resize_algo;
@@ -3914,6 +4047,7 @@ struct RGYParamVpp {
     VppDeintCsp deintCsp;
     VppLibplaceboResample resize_libplacebo;
     VppResizeFsr1    resize_fsr1;
+    VppResizeDpid    resize_dpid;
     VppResizeNis     resize_nis;
     VppResizeBicubic resize_bicubic;
     VppColorspace    colorspace;
@@ -3921,6 +4055,7 @@ struct RGYParamVpp {
     VppDelogo delogo;
     VppAfs afs;
     VppNnedi nnedi;
+    VppNnediUpscale nnediUpscale;
     VppBwdif bwdif;
     VppRtgmc rtgmc;
     VppRtgmcBob rtgmc_bob;
@@ -3941,6 +4076,7 @@ struct RGYParamVpp {
     VppNLMeans nlmeans;
     VppPmd pmd;
     VppHqdn3d hqdn3d;
+    VppDenoiseBm3d bm3d;
     VppDescale descale;
     VppAnime4k anime4k;
     VppOnnx onnx;
@@ -3972,6 +4108,9 @@ struct RGYParamVpp {
     VppDehalo dehalo;
     VppFineDehalo finedehalo;
     VppDering dering;
+    VppGuidedfilter guidedfilter;
+    VppClahe clahe;
+    VppDehaze dehaze;
     VppEdgelevel edgelevel;
     VppMsharpen msharpen;
     VppWarpsharp warpsharp;
@@ -4005,6 +4144,7 @@ static const TCHAR *RGY_METADATA_COPY = _T("copy");
 static const int TRACK_SELECT_BY_LANG  = -1;
 static const int TRACK_SELECT_BY_CODEC = -2;
 static const int TRACK_SELECT_BY_LANG_EXCLUDE = -3;
+static const int TRACK_SELECT_BY_TRACK_EXCLUDE = -4;
 
 struct AudioBitrate {
     std::string channel;
@@ -4026,6 +4166,7 @@ struct AudioSelect {
                               // TRACK_SELECT_BY_LANG  ... langによる選択
                               // TRACK_SELECT_BY_CODEC ... selectCodecによる選択
                               // TRACK_SELECT_BY_LANG_EXCLUDE ... langによる除外
+                              // TRACK_SELECT_BY_TRACK_EXCLUDE ... excludeTrackIDsによる除外
     tstring  decCodecPrm;     //音声エンコードのデコーダのパラメータ
     tstring  encCodec;        //音声エンコードのコーデック
     tstring  encCodecPrm;     //音声エンコードのコーデックのパラメータ
@@ -4043,6 +4184,7 @@ struct AudioSelect {
     tstring  disposition;          // 指定のdisposition
     std::string lang;              // 言語選択
     std::string selectCodec;       // 対象コーデック
+    std::vector<int> excludeTrackIDs; // 除外する音声トラック番号
     std::vector<tstring> metadata;
     std::string resamplerPrm;
 
@@ -4066,6 +4208,7 @@ struct SubtitleSelect {
                          //  TRACK_SELECT_BY_LANG ... langによる選択
                          //  TRACK_SELECT_BY_CODEC ... selectCodecによる選択
                          //  TRACK_SELECT_BY_LANG_EXCLUDE ... langによる除外
+                         //  TRACK_SELECT_BY_TRACK_EXCLUDE ... excludeTrackIDsによる除外
     tstring encCodec;
     tstring encCodecPrm;
     tstring decCodecPrm;
@@ -4074,6 +4217,7 @@ struct SubtitleSelect {
     tstring disposition;  // 指定のdisposition
     std::string lang;         // 言語選択
     std::string selectCodec;  // 対象コーデック
+    std::vector<int> excludeTrackIDs; // 除外する字幕トラック番号
     std::vector<tstring> metadata;
 
     SubtitleSelect();
@@ -4095,10 +4239,13 @@ struct DataSelect {
                          //  0 ... 全指定
                          //  TRACK_SELECT_BY_LANG ... langによる選択
                          //  TRACK_SELECT_BY_CODEC ... selectCodecによる選択
+                         //  TRACK_SELECT_BY_LANG_EXCLUDE ... langによる除外
+                         //  TRACK_SELECT_BY_TRACK_EXCLUDE ... excludeTrackIDsによる除外
     tstring encCodec;
     tstring disposition; // 指定のdisposition
     std::string lang;    // 言語選択
     std::string selectCodec; // 対象コーデック
+    std::vector<int> excludeTrackIDs; // 除外するデータトラック番号
     std::vector<tstring> metadata;
 
     DataSelect();
@@ -4200,6 +4347,7 @@ struct RGYParamCommon {
     tstring inputFilename;        //入力ファイル名
     tstring outputFilename;       //出力ファイル名
     tstring muxOutputFormat;      //出力フォーマット
+    bool y4mTimestamp;            //y4mのFRAME行に表示時刻を出力する
     VideoVUIInfo out_vui;
     RGYOptList inputOpt; //入力オプション
     std::string maxCll;

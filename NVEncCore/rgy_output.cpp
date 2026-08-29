@@ -40,6 +40,9 @@
 static const uint8_t AUD_H264_PRIMARY[] = { 0x00, 0x00, 0x00, 0x01, 0x09, 0x10 }; // AUD (primary_pic_type = 0)
 static const uint8_t AUD_HEVC_PRIMARY[] = { 0x00, 0x00, 0x00, 0x01, 0x46, 0x01 }; // AUD (pic_type = 0)
 
+// P010は10bitの値を16bitコンテナのMSB側に詰めて保持するため、LSB詰め10bitに戻す際のシフト量
+static const int RGY_CSP_P010_SHIFT_TO_10BIT = 6;
+
 static RGY_ERR WriteY4MHeader(FILE *fp, const VideoInfo *info, const RGY_CSP csp) {
     char buffer[256] = { 0 };
     char *ptr = buffer;
@@ -1072,7 +1075,7 @@ RGY_ERR RGYOutputRaw::WriteNextFrame(RGYFrame *pSurface) {
     return RGY_ERR_UNSUPPORTED;
 }
 
-RGYOutFrame::RGYOutFrame() : m_bY4m(true) {
+RGYOutFrame::RGYOutFrame() : m_bY4m(true), m_y4mTimestamp(false), m_outputTimebase() {
     m_strWriterName = _T("yuv writer");
     m_OutType = OUT_TYPE_SURFACE;
 };
@@ -1099,6 +1102,8 @@ RGY_ERR RGYOutFrame::Init(const TCHAR *strFileName, const VideoInfo *pVideoOutpu
     YUVWriterParam *writerParam = (YUVWriterParam *)prm;
 
     m_bY4m = writerParam->bY4m;
+    m_y4mTimestamp = writerParam->y4mTimestamp;
+    m_outputTimebase = writerParam->outputTimebase;
     m_sourceHWMem = true;
     m_inited = true;
 
@@ -1130,12 +1135,27 @@ RGY_ERR RGYOutFrame::WriteNextFrame(RGYFrame *pSurface) {
             if (csp == RGY_CSP_NV12) {
                 csp = RGY_CSP_YV12;
             } else if (csp == RGY_CSP_P010) {
-                csp = RGY_CSP_YV12_16;
+                csp = RGY_CSP_YV12_10;
             }
             WriteY4MHeader(m_fDest.get(), &m_VideoOutputInfo, csp);
             m_y4mHeaderWritten = true;
         }
-        WRITE_CHECK(fwrite("FRAME\n", 1, strlen("FRAME\n"), m_fDest.get()), strlen("FRAME\n"));
+        if (m_y4mTimestamp) {
+            char frameHeader[64] = { 0 };
+            const double timebaseSec = (double)m_outputTimebase.n() / m_outputTimebase.d();
+            const double timestampSec = pSurface->timestamp() * timebaseSec;
+            const int64_t duration = pSurface->duration();
+            const int frameHeaderLen = (duration > 0)
+                ? snprintf(frameHeader, sizeof(frameHeader), "FRAME Xts=%.6f Xdur=%.6f\n", timestampSec, duration * timebaseSec)
+                : snprintf(frameHeader, sizeof(frameHeader), "FRAME Xts=%.6f\n", timestampSec);
+            if (frameHeaderLen <= 0 || frameHeaderLen >= (int)sizeof(frameHeader)) {
+                return RGY_ERR_INVALID_PARAM;
+            }
+            const size_t frameHeaderSize = (size_t)frameHeaderLen;
+            WRITE_CHECK(fwrite(frameHeader, 1, frameHeaderSize, m_fDest.get()), frameHeaderSize);
+        } else {
+            WRITE_CHECK(fwrite("FRAME\n", 1, strlen("FRAME\n"), m_fDest.get()), strlen("FRAME\n"));
+        }
     }
 
     auto loadLineToBuffer = [](uint8_t *ptrBuf, uint8_t *ptrSrc, const int pitch) {
@@ -1170,15 +1190,31 @@ RGY_ERR RGYOutFrame::WriteNextFrame(RGYFrame *pSurface) {
     }
 #endif
     const int pixSize = RGY_CSP_BIT_DEPTH[pSurface->csp()] > 8 ? 2 : 1;
+    // P010は10bitの値を16bitコンテナのMSB側に詰めて保持しているため、y4m(420p10)として出力するにはLSB詰めに戻す
+    // (RGY_CSP_BIT_DEPTH[RGY_CSP_P010]は16を返すため、シフト量は16-10=6を直接指定する)
+    const int lumaShiftDown = (pSurface->csp() == RGY_CSP_P010) ? RGY_CSP_P010_SHIFT_TO_10BIT : 0;
     if (   RGY_CSP_CHROMA_FORMAT[pSurface->csp()] == RGY_CHROMAFMT_YUV420
         || RGY_CSP_CHROMA_FORMAT[pSurface->csp()] == RGY_CHROMAFMT_YUV444) {
         const uint32_t lumaWidthBytes = pSurface->width() * pixSize;
         const uint32_t cropOffset = crop.e.up * pSurface->pitch() + crop.e.left * pixSize;
-        if (m_sourceHWMem) {
+        if (m_sourceHWMem || lumaShiftDown > 0) {
+            if (m_readBuffer.get() == nullptr) {
+                m_readBuffer.reset((uint8_t *)_aligned_malloc(pSurface->pitch() + 128, 16));
+            }
             for (decltype(pSurface->height()) j = 0; j < pSurface->height(); j++) {
                 uint8_t *ptrBuf = m_readBuffer.get();
                 uint8_t *ptrSrc = pSurface->ptrY() + (crop.e.up + j) * pSurface->pitch();
-                loadLineToBuffer(ptrBuf, ptrSrc, pSurface->pitch());
+                if (m_sourceHWMem) {
+                    loadLineToBuffer(ptrBuf, ptrSrc, pSurface->pitch());
+                } else {
+                    memcpy(ptrBuf, ptrSrc, pSurface->pitch());
+                }
+                if (lumaShiftDown > 0) {
+                    uint16_t *ptrLine = (uint16_t *)(ptrBuf + crop.e.left * pixSize);
+                    for (decltype(pSurface->width()) i = 0; i < pSurface->width(); i++) {
+                        ptrLine[i] >>= lumaShiftDown;
+                    }
+                }
                 WRITE_CHECK(fwrite(ptrBuf + crop.e.left * pixSize, 1, lumaWidthBytes, m_fDest.get()), lumaWidthBytes);
             }
         } else {
@@ -1235,19 +1271,16 @@ RGY_ERR RGYOutFrame::WriteNextFrame(RGYFrame *pSurface) {
                 const uint16_t *ptrUV = (const uint16_t *)ptrLineUV;
                 uint16_t *ptrU = (uint16_t *)ptrLineU;
                 uint16_t *ptrV = (uint16_t *)ptrLineV;
-                switch (RGY_CSP_BIT_DEPTH[pSurface->csp()]) {
-                case 10: convert_nv12_to_yv12_line_c<uint16_t, 10, uint16_t, 16>(ptrU, ptrV, ptrUV, widthUV); break;
-                case 12: convert_nv12_to_yv12_line_c<uint16_t, 12, uint16_t, 16>(ptrU, ptrV, ptrUV, widthUV); break;
-                case 14: convert_nv12_to_yv12_line_c<uint16_t, 14, uint16_t, 16>(ptrU, ptrV, ptrUV, widthUV); break;
-                case 16:
-                default: convert_nv12_to_yv12_line_c<uint16_t, 16, uint16_t, 16>(ptrU, ptrV, ptrUV, widthUV); break;
-                }
+                // P010は10bitの値を16bitコンテナのMSB側に詰めて保持しているため、
+                // 入力を16bitとして扱い、LSB詰め10bit(=y4mの420p10)へ変換する
+                // テンプレート引数は<Tout, out_bit_depth, Tin, in_bit_depth>の順
+                convert_nv12_to_yv12_line_c<uint16_t, 16 - RGY_CSP_P010_SHIFT_TO_10BIT, uint16_t, 16>(ptrU, ptrV, ptrUV, widthUV);
             } else {
                 return RGY_ERR_INVALID_COLOR_FORMAT;
             }
         }
-        WRITE_CHECK(fwrite(m_UVBuffer.get(),                 1, widthUV * heightUV, m_fDest.get()), widthUV * heightUV);
-        WRITE_CHECK(fwrite(m_UVBuffer.get() + planeOffsetUV, 1, widthUV * heightUV, m_fDest.get()), widthUV * heightUV);
+        WRITE_CHECK(fwrite(m_UVBuffer.get(),                 1, widthUV * heightUV * pixSize, m_fDest.get()), widthUV * heightUV * pixSize);
+        WRITE_CHECK(fwrite(m_UVBuffer.get() + planeOffsetUV, 1, widthUV * heightUV * pixSize, m_fDest.get()), widthUV * heightUV * pixSize);
     } else if (RGY_CSP_CHROMA_FORMAT[pSurface->csp()] == RGY_CHROMAFMT_YUV420
             || RGY_CSP_CHROMA_FORMAT[pSurface->csp()] == RGY_CHROMAFMT_YUV444) {
         uint8_t *const ptrBuf = m_readBuffer.get();
@@ -1328,6 +1361,9 @@ static bool audioSelected(const AudioSelect *sel, const AVDemuxStream *stream) {
         const auto langs = split(sel->lang, ",");
         return std::none_of(langs.begin(), langs.end(), [&](const auto& lang) { return rgy_lang_equal(lang, stream->lang); });
     }
+    if (sel->trackID == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+        return std::find(sel->excludeTrackIDs.begin(), sel->excludeTrackIDs.end(), trackID(stream->trackId)) == sel->excludeTrackIDs.end();
+    }
     if (sel->trackID == TRACK_SELECT_BY_CODEC && stream->stream != nullptr && avcodec_equal(sel->selectCodec, stream->stream->codecpar->codec_id)) {
         return true;
     }
@@ -1344,6 +1380,9 @@ static bool subSelected(const SubtitleSelect *sel, const AVDemuxStream *stream) 
         const auto langs = split(sel->lang, ",");
         return std::none_of(langs.begin(), langs.end(), [&](const auto& lang) { return rgy_lang_equal(lang, stream->lang); });
     }
+    if (sel->trackID == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+        return std::find(sel->excludeTrackIDs.begin(), sel->excludeTrackIDs.end(), trackID(stream->trackId)) == sel->excludeTrackIDs.end();
+    }
     if (sel->trackID == TRACK_SELECT_BY_CODEC && stream->stream != nullptr && avcodec_equal(sel->selectCodec, stream->stream->codecpar->codec_id)) {
         return true;
     }
@@ -1355,6 +1394,13 @@ static bool dataSelected(const DataSelect *sel, const AVDemuxStream *stream) {
     }
     if (sel->trackID == TRACK_SELECT_BY_LANG && rgy_lang_equal(sel->lang, stream->lang)) {
         return true;
+    }
+    if (sel->trackID == TRACK_SELECT_BY_LANG_EXCLUDE) {
+        const auto langs = split(sel->lang, ",");
+        return std::none_of(langs.begin(), langs.end(), [&](const auto& lang) { return rgy_lang_equal(lang, stream->lang); });
+    }
+    if (sel->trackID == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+        return std::find(sel->excludeTrackIDs.begin(), sel->excludeTrackIDs.end(), trackID(stream->trackId)) == sel->excludeTrackIDs.end();
     }
     if (sel->trackID == TRACK_SELECT_BY_CODEC && stream->stream != nullptr && avcodec_equal(sel->selectCodec, stream->stream->codecpar->codec_id)) {
         return true;
@@ -1399,7 +1445,10 @@ RGY_ERR initWriters(
         && (((common->muxOutputFormat.length() > 0 && 0 == _tcscmp(common->muxOutputFormat.c_str(), _T("raw")))) //--formatにrawが指定されている
         || std::filesystem::path(common->outputFilename).extension().empty() //拡張子がない
         || check_ext(common->outputFilename.c_str(), { ".m2v", ".264", ".h264", ".avc", ".avc1", ".x264", ".265", ".h265", ".hevc", ".vp9", ".av1", ".raw" })); //特定の拡張子
-    if (!useESOutput) {
+    const bool useRawY4MOutput = outputVideoInfo.codec == RGY_CODEC_RAW && common->muxOutputFormat == _T("y4m") && common->y4mTimestamp;
+    if (useRawY4MOutput) {
+        common->AVMuxTarget &= ~RGY_MUX_VIDEO;
+    } else if (!useESOutput) {
         common->AVMuxTarget |= RGY_MUX_VIDEO;
     }
 
@@ -1560,7 +1609,7 @@ RGY_ERR initWriters(
                             pDataSelect = common->ppDataSelectList[i];
                         }
                     }
-                    if (pSubtitleSelect == nullptr) {
+                    if (pDataSelect == nullptr) {
                         //一致するTrackIDがなければ、trackID = 0 (全指定)を探す
                         for (int i = 0; i < common->nDataSelectCount; i++) {
                             if (common->ppDataSelectList[i]->trackID == 0) {
@@ -1573,6 +1622,9 @@ RGY_ERR initWriters(
                 if (pAudioSelect != nullptr || audioCopyAll || streamMediaType != AVMEDIA_TYPE_AUDIO) {
                     streamTrackUsed.push_back(stream.trackId);
                     if (pSubtitleSelect == nullptr && streamMediaType == AVMEDIA_TYPE_SUBTITLE) {
+                        continue;
+                    }
+                    if (pDataSelect == nullptr && streamMediaType == AVMEDIA_TYPE_DATA) {
                         continue;
                     }
                     AVOutputStreamPrm prm;
@@ -1760,6 +1812,8 @@ RGY_ERR initWriters(
             pFileWriter = std::make_shared<RGYOutFrame>();
             YUVWriterParam param;
             param.bY4m = common->muxOutputFormat != _T("raw");
+            param.y4mTimestamp = common->y4mTimestamp && param.bY4m;
+            param.outputTimebase = outputTimebase;
             auto sts = pFileWriter->Init(common->outputFilename.c_str(), &outputVideoInfo, &param, log, pStatus);
             if (sts != RGY_ERR_NONE) {
                 log->write(RGY_LOG_ERROR, RGY_LOGT_OUT, pFileWriter->GetOutputMessage());

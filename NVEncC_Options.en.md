@@ -150,6 +150,7 @@
   - [--seekto \[\<int\>:\]\[\<int\>:\]\<int\>\[.\<int\>\]](#--seekto-intintintint)
   - [--input-format \<string\>](#--input-format-string)
   - [-f, --output-format \<string\>](#-f---output-format-string)
+  - [--y4m-timestamp](#--y4m-timestamp)
   - [--video-track \<int\>](#--video-track-int-1)
   - [--video-streamid \<int\>](#--video-streamid-int)
   - [--video-tag \<string\>](#--video-tag-string)
@@ -179,10 +180,11 @@
   - [--keyfile \<string\>](#--keyfile-string)
   - [--sub-source \<string\>\[:{\<int\>?}\[;\<param1\>=\<value1\>...\]/\[\]...\]](#--sub-source-stringintparam1value1)
   - [--sub-copy \[\<int/string\>;\[,\<int/string\>\]...\]](#--sub-copy-intstringintstring)
+  - [--sub-codec \[\[\<int/string\>?\]\<string\>\]](#--sub-codec-intstringstring)
   - [--sub-disposition \[\<int/string\>?\]\<string\>](#--sub-disposition-intstringstring)
   - [--sub-metadata \[\<int/string\>?\]\<string\> or \[\<int/string\>?\]\<string\>=\<string\>](#--sub-metadata-intstringstring-or-intstringstringstring)
   - [--sub-bsf \[\<int/string\>?\]\<string\>](#--sub-bsf-intstringstring)
-  - [--data-copy \[\<int\>\[,\<int\>\]...\]](#--data-copy-intint)
+  - [--data-copy \[\<int/string\>\[,\<int/string\>\]...\]](#--data-copy-intstringintstring)
   - [--attachment-copy \[\<int\>\[,\<int\>\]...\]](#--attachment-copy-intint)
   - [--attachment-source \<string\>\[:{\<int\>?}\[;\<param1\>=\<value1\>\]...\]...](#--attachment-source-stringintparam1value1)
   - [--input-option \<string1\>:\<string2\>](#--input-option-string1string2)
@@ -232,6 +234,7 @@
   - [--vpp-smooth \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-smooth-param1value1param2value2)
   - [--vpp-msmooth \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-msmooth-param1value1param2value2)
   - [--vpp-denoise-dct \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-denoise-dct-param1value1param2value2)
+  - [--vpp-bm3d \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-bm3d-param1value1param2value2)
   - [--vpp-fft3d \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-fft3d-param1value1param2value2)
   - [--vpp-degrain \[\<param1\>=\<value1\>\]](#--vpp-degrain-param1value1)
   - [--vpp-knn \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-knn-param1value1param2value2)
@@ -599,7 +602,7 @@ If not specified, it will be same as the input resolution. (no resize)
   --output-res 1024x576 -> normal
   --output-res 960x0    -> resize to 960x720 (0 will be replaced to 720, same as input)
   --output-res 1920x-2  -> resize to 1920x1080 (calculated to keep aspect ratio)
-  
+
   --output-res 1440x1440,preserve_aspect_ratio=increase -> resize to 2560x1440
   --output-res 1440x1440,preserve_aspect_ratio=decrease -> resize to 1440x810
   ```
@@ -721,7 +724,13 @@ Set the QP offset for chroma. (default: 0)
 Set target quality when using VBR mode. (0.0-51.0, 0.0-63.0 for AV1, 0 = automatic)
 
 ### --dynamic-rc &lt;int&gt;:&lt;int&gt;:&lt;int&gt;&lt;int&gt;,&lt;param1&gt;=&lt;value1&gt;[,&lt;param2&gt;=&lt;value2&gt;],...  
-Change the rate control mode and rate control params within the specified range of input frames.
+Change the rate control mode and parameters within the specified input frame or presentation timestamp range.
+
+- **range parameters**
+  - `start=<int>`, `end=<int>`: Select by input frame number using the inclusive range `start <= frame number <= end`. `start` is required; omitting `end` selects through the end of the stream.
+  - `start-time=<float>`, `end-time=<float>`: Select by presentation timestamp in seconds using the half-open range `start-time <= timestamp < end-time`. An omitted bound means the beginning or end of the stream.
+
+  Frame-number and timestamp range parameters cannot be combined in the same `--dynamic-rc`. Separate `--dynamic-rc` options may use different range types; timestamp ranges take priority when zones overlap.
 
 - **required parameters**
   It is required to specify one of the params below.  
@@ -737,14 +746,17 @@ Change the rate control mode and rate control params within the specified range 
 
 - Examples
   ```
-  Example1: Encode by vbr(12000kbps) in output frame range 3000-3999,
-            encode by constant quality mode(29.0) in output frame range 5000-5999,
+  Example1: Encode by vbr(12000kbps) in input frame range 3000-3999,
+            encode by constant quality mode(29.0) in input frame range 5000-5999,
             and encode by constant quality mode(25.0) on other frame range.
     --vbr 0 --vbr-quality=25.0 --dynamic-rc 3000:3999,vbr=12000 --dynamic-rc 5000:5999,vbr=0,vbr-quality=29.0
   
-  Example2: Encode by vbr(6000kbps) to output frame number 2999,
-            and encode by vbr(12000kbps) from output frame number 3000 and later.
+  Example2: Encode by vbr(6000kbps) to input frame number 2999,
+            and encode by vbr(12000kbps) from input frame number 3000 and later.
     --vbr 6000 --dynamic-rc start=3000,vbr=12000
+
+  Example3: Encode by vbr(3000kbps) from presentation timestamp 120.5 seconds up to, but not including, 210.0 seconds.
+    --dynamic-rc start-time=120.5,end-time=210.0,vbr=3000
   ```
 
 ### --lookahead &lt;int&gt;
@@ -1206,7 +1218,11 @@ Specify input format for avhw / avsw reader.
 
   Specify output format for muxer.
 
-  Since the output format is automatically determined by the output extension, it is usually not necessary to specify it, but you can force the output format with this option.
+Since the output format is automatically determined by the output extension, it is usually not necessary to specify it, but you can force the output format with this option.
+
+### --y4m-timestamp
+Add the presentation timestamp relative to the stream start as `Xts=<seconds>` and the frame duration as `Xdur=<seconds>` to each y4m FRAME line. `Xdur` is omitted when the duration is unavailable.
+This option is effective only with `-c raw --output-format y4m`.
 
   Available formats can be checked with [--check-formats](#--check-formats). To output H.264 / HEVC as an Elementary Stream, specify "raw".
 
@@ -1277,6 +1293,7 @@ Copy audio track into output file. Available only when avhw / avsw reader is use
 If it does not work well, try encoding with [--audio-codec](#--audio-codec-intstring), which is more stable.
 
 You can also specify the audio track (1, 2, ...) to extract with [&lt;int&gt;], or select audio track to copy by language with [&lt;string&gt;].
+Prefix a track number with `!` to exclude that track (for example, `!1,!3`).
 Prefix languages with `!` to select all tracks except those languages (for example, `!eng,!jpn`).
 
 - Examples
@@ -1289,12 +1306,16 @@ Prefix languages with `!` to select all tracks except those languages (for examp
   
   Example: Extract audio tracks marked as English and Japanese
   --audio-copy eng,jpn
+
+  Example: Copy all audio tracks except track #1
+  --audio-copy !1
   ```
 
 ### --audio-codec [[&lt;int/string&gt;?]&lt;string&gt;[:&lt;string&gt;=&lt;string&gt;[,&lt;string&gt;=&lt;string&gt;]...]...]
 Encode audio track with the codec specified. If codec is not set, most suitable codec will be selected automatically. Codecs available could be checked with [--check-encoders](#--check-codecs---check-decoders---check-encoders).
 
 You can select audio track (1, 2, ...) to encode with [&lt;int&gt;], or select audio track to encode by language with [&lt;string&gt;].
+Prefix a track number with `!` to exclude that track (for example, `--audio-codec !1,!3?aac`).
 Prefix languages with `!` to select all tracks except those languages (for example, `--audio-codec !eng,!jpn?copy`).
 
 Also, after ":" you can specify params for audio encoder,  after "#" you can specify params for audio decoder.
@@ -1313,7 +1334,10 @@ Also, after ":" you can specify params for audio encoder,  after "#" you can spe
   Example 4: encode the English audio track and Japanese audio track to aac
   --audio-codec eng?aac --audio-codec jpn?aac
   
-  Example 5: set param "aac_coder" to "twoloop" which will improve quality at low bitrate for aac encoder
+  Example 5: encode all audio tracks except track #1 to aac
+  --audio-codec !1?aac
+
+  Example 6: set param "aac_coder" to "twoloop" which will improve quality at low bitrate for aac encoder
   --audio-codec aac:aac_coder=twoloop
   ```
 
@@ -1679,6 +1703,7 @@ Read subtitle from the specified file and mux into the output file.
 ### --sub-copy [&lt;int/string&gt;;[,&lt;int/string&gt;]...]
 Copy subtitle tracks from input file. Available only when avhw / avsw reader is used.
 It is also possible to specify subtitle tracks (1, 2, ...) to extract with [&lt;int&gt;], or select subtitle tracks to copy by language with [&lt;string&gt;].
+Prefix a track number with `!` to exclude that track (for example, `!1,!3`).
 Prefix languages with `!` to select all tracks except those languages (for example, `!eng,!jpn`).
 
 Supported subtitles are PGS / srt / txt / ttxt.
@@ -1693,6 +1718,18 @@ Supported subtitles are PGS / srt / txt / ttxt.
   
   Example: Copy subtitle tracks marked as English and Japanese
   --sub-copy eng,jpn
+
+  Example: Copy all subtitle tracks except track #1
+  --sub-copy !1
+  ```
+
+### --sub-codec [[&lt;int/string&gt;?]&lt;string&gt;]
+Convert subtitle tracks to the specified codec. Tracks can be selected by track number or language, and excluded by prefixing the selector with `!`.
+
+- Examples
+  ```
+  Example: Convert all subtitle tracks except track #1 to ass
+  --sub-codec !1?ass
   ```
 
 ### --sub-disposition [&lt;int/string&gt;?]&lt;string&gt;
@@ -1738,8 +1775,9 @@ Set metadata for subtitle track.
 ### --sub-bsf [&lt;int/string&gt;?]&lt;string&gt;
 Apply [bitstream filter](https://ffmpeg.org/ffmpeg-bitstream-filters.html) to subtitle track.
 
-### --data-copy [&lt;int&gt;[,&lt;int&gt;]...]
+### --data-copy [&lt;int/string&gt;[,&lt;int/string&gt;]...]
 Copy data stream from input file. Available only when avhw / avsw reader is used.
+Streams can be selected by track number or language. Prefix selectors with `!` to exclude those track numbers or languages (for example, `!1,!3` or `!eng,!jpn`).
 
 ### --attachment-copy [&lt;int&gt;[,&lt;int&gt;]...]
 Copy attachment stream from input file. Available only when avhw / avsw reader is used.
@@ -1877,6 +1915,7 @@ Vpp filters will be applied in fixed order, regardless of the order in the comma
 - [--vpp-nvvfx-artifact-reduction](#--vpp-nvvfx-artifact-reduction-param1value1param2value2)
 - [--vpp-smooth](#--vpp-smooth-param1value1param2value2)
 - [--vpp-denoise-dct](#--vpp-denoise-dct-param1value1param2value2)
+- [--vpp-bm3d](#--vpp-bm3d-param1value1param2value2)
 - [--vpp-fft3d](#--vpp-fft3d-param1value1param2value2)
 - [--vpp-knn](#--vpp-knn-param1value1param2value2)
 - [--vpp-nlmeans](#--vpp-nlmeans-param1value1param2value2)
@@ -3035,6 +3074,24 @@ Non local means noise reduction filter. Only supported in 64bit binary.
   --vpp-nlmeans d=1,search_t=7
   ```
 
+### --vpp-bm3d [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+BM3D denoising using block matching and collaborative 3D filtering. The filter runs a hard-threshold basic estimate followed by a Wiener final estimate. Planar YUV formats up to 12-bit are supported.
+
+- **Parameters**
+  - profile=&lt;string&gt; (default=fast)  
+    Set `block_step`, `group_size`, and `bm_range` together: `fast`, `lc`, `np`, or `high`. Parameters written after `profile` override the preset.
+  - sigma=&lt;float&gt; (default=3.0, 0 or 0.5-100)  
+    Noise standard deviation in 8-bit scale. `0` performs a bit-exact copy.
+  - block_step=&lt;int&gt; (default=8, 1-8)  
+    Stride between reference patches. The block size itself is fixed at 8.
+  - group_size=&lt;int&gt; (default=8, 1-32)  
+    Maximum number of similar blocks in one group. Temporal mode limits it to 16.
+  - bm_range=&lt;int&gt; (default=9, 1-32)  
+    Block matching search radius.
+  - radius=&lt;int&gt; (default=0, 0-4)  
+    Temporal history radius. `0` selects spatial BM3D. Processing starts with the available history, so the first `radius` frames use a partially filled history instead of falling back to spatial BM3D.
+  - chroma=&lt;bool&gt; (default=false)  
+    Also denoise the chroma planes.
 ### --vpp-pmd [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
 Rather weak noise reduction by modified pmd method, aimed to preserve edge while noise reduction.
 

@@ -146,6 +146,7 @@
   - [--seekto \[\[\<int\>:\]\<int\>:\]\<int\>\[.\<int\>\]](#--seekto-intintintint)
   - [--input-format \<string\>](#--input-format-string)
   - [-f, --output-format \<string\>](#-f---output-format-string)
+  - [--y4m-timestamp](#--y4m-timestamp)
   - [--video-track \<int\>](#--video-track-int)
   - [--video-streamid \<int\>](#--video-streamid-int)
   - [--video-tag \<string\>](#--video-tag-string)
@@ -175,10 +176,11 @@
   - [--keyfile \<string\>](#--keyfile-string)
   - [--sub-source \<string\>\[:{\<int\>?}\[;\<param1\>=\<value1\>\]...\]...](#--sub-source-stringintparam1value1)
   - [--sub-copy \[\<int/string\>;\[,\<int/string\>\]...\]](#--sub-copy-intstringintstring)
+  - [--sub-codec \[\[\<int/string\>?\]\<string\>\]](#--sub-codec-intstringstring)
   - [--sub-disposition \[\<int/string\>?\]\<string\>\[,\<string\>\]\[\]...](#--sub-disposition-intstringstringstring)
   - [--sub-metadata \[\<int/string\>?\]\<string\> or \[\<int/string\>?\]\<string\>=\<string\>](#--sub-metadata-intstringstring-or-intstringstringstring)
   - [--sub-bsf \[\<int/string\>?\]\<string\>](#--sub-bsf-intstringstring)
-  - [--data-copy \[\<int\>\[,\<int\>\]...\]](#--data-copy-intint)
+  - [--data-copy \[\<int/string\>\[,\<int/string\>\]...\]](#--data-copy-intstringintstring)
   - [--attachment-copy \[\<int\>\[,\<int\>\]...\]](#--attachment-copy-intint)
   - [--attachment-source \<string\>\[:{\<int\>?}\[;\<param1\>=\<value1\>\]...\]...](#--attachment-source-stringintparam1value1)
   - [--input-option \<string1\>:\<string2\>](#--input-option-string1string2)
@@ -228,6 +230,7 @@
   - [--vpp-smooth \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-smooth-param1value1param2value2)
   - [--vpp-msmooth \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-msmooth-param1value1param2value2)
   - [--vpp-denoise-dct \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-denoise-dct-param1value1param2value2)
+  - [--vpp-bm3d \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-bm3d-param1value1param2value2)
   - [--vpp-fft3d \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-fft3d-param1value1param2value2)
   - [--vpp-degrain \[\<param1\>=\<value1\>\]](#--vpp-degrain-param1value1)
   - [--vpp-knn \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-knn-param1value1param2value2)
@@ -599,7 +602,7 @@ raw形式の場合のみ有効で、その他の場合は無視されるか、fp
   --output-res 1024x576 -> 通常の指定方法
   --output-res 960x0    -> 960x720にリサイズ (0のほうは720のまま)
   --output-res 1920x-2  -> 1920x1080にリサイズ (アスペクト比が維持できるように調整)
-  
+
   --output-res 1440x1440,preserve_aspect_ratio=increase -> 2560x1440にリサイズ
   --output-res 1440x1440,preserve_aspect_ratio=decrease -> 1440x810にリサイズ
   ```
@@ -725,7 +728,13 @@ VBVバッファサイズ(kbps単位)。 (default: auto)
 VBRモード使用時の目標品質を設定する。(0.0-51.0, AV1は0.0-63.0, 0 = 自動)
 
 ### --dynamic-rc &lt;int&gt;:&lt;int&gt;:&lt;int&gt;&lt;int&gt;,&lt;param1&gt;=&lt;value1&gt;[,&lt;param2&gt;=&lt;value2&gt;],...  
-"開始フレーム番号:終了フレーム番号"で指定した入力フレーム番号について、レート制御のパラメータを変更する。指定可能なパラメータは各レート制御モードと、最大ビットレート、目標品質(vbr-quality)、multipass。
+指定した入力フレーム番号または表示時刻の範囲について、レート制御のパラメータを変更する。指定可能なパラメータは各レート制御モードと、最大ビットレート、目標品質(vbr-quality)、multipass。
+
+- **範囲パラメータ**
+  - `start=<int>`, `end=<int>`: 入力フレーム番号で指定する。`start <= フレーム番号 <= end` の両端を含む範囲。`start` は必須で、`end` の省略時は終端まで。
+  - `start-time=<float>`, `end-time=<float>`: 秒単位の表示時刻で指定する。`start-time <= 表示時刻 < end-time` の終了を含まない範囲。省略した側はストリームの先頭または終端になる。
+
+  フレーム番号と表示時刻の範囲パラメータは、同じ `--dynamic-rc` 内では併用できない。複数の `--dynamic-rc` 間では混在でき、ゾーンが重なる場合は表示時刻指定が優先される。
 
 - **必須パラメータ**
   下記パラメータのうち、必ずひとつは指定が必要。
@@ -741,14 +750,17 @@ VBRモード使用時の目標品質を設定する。(0.0-51.0, AV1は0.0-63.0,
 
 - Examples
   ```
-  例1: 出力フレーム番号 3000-3999 の間はvbrの12000kbpsでエンコード、
-       出力フレーム番号 5000-5999 の間は固定品質の29.0でエンコードし、
+  例1: 入力フレーム番号 3000-3999 の間はvbrの12000kbpsでエンコード、
+       入力フレーム番号 5000-5999 の間は固定品質の29.0でエンコードし、
        その他の領域は固定品質の25.0でエンコードする。
     --vbr 0 --vbr-quality=25.0 --dynamic-rc 3000:3999,vbr=12000 --dynamic-rc 5000:5999,vbr=0,vbr-quality=29.0
   
-  例2: 出力フレーム番号 3000までは、vbrの6000kbpsでエンコードし、
-       出力フレーム番号 3000以降はvbrの12000kbpsでエンコードする。
+  例2: 入力フレーム番号 3000までは、vbrの6000kbpsでエンコードし、
+       入力フレーム番号 3000以降はvbrの12000kbpsでエンコードする。
     --vbr 6000 --dynamic-rc start=3000,vbr=12000
+
+  例3: 表示時刻120.5秒以上210.0秒未満をvbrの3000kbpsでエンコードする。
+    --dynamic-rc start-time=120.5,end-time=210.0,vbr=3000
   ```
 
 ### --lookahead &lt;int&gt;
@@ -1214,7 +1226,11 @@ avhw/avswリーダー使用時に、入力のフォーマットを指定する�
 
   muxerに出力フォーマットを指定して出力する。
 
-  出力フォーマットは出力拡張子から自動的に決定されるので、通常、特に指定する必要はないが、このオプションで出力フォーマットを強制できる。
+出力フォーマットは出力拡張子から自動的に決定されるので、通常、特に指定する必要はないが、このオプションで出力フォーマットを強制できる。
+
+### --y4m-timestamp
+y4m出力の各FRAME行に、ストリーム先頭を0秒とする表示時刻を `Xts=<秒>`、表示時間を `Xdur=<秒>` の形式で付加する。表示時間を取得できないフレームでは `Xdur` を省略する。
+`-c raw --output-format y4m` との併用時のみ有効。
 
   使用可能なフォーマットは[--check-formats](#--check-formats)で確認できる。H.264/HEVCをElementary Streamで出力する場合には、"raw"を指定する。
 
@@ -1284,6 +1300,7 @@ avcodec映像エンコーダのパラメータをkey=value形式でカンマ区�
 tsなどでエラーが出るなどしてうまく動作しない場合は、[--audio-codec](#--audio-codec-intstring)で一度エンコードしたほうが安定動作するかもしれない。
 
 [&lt;int&gt;[,&lt;int&gt;]...]で、抽出する音声トラック(1,2,...)を指定したり、[&lt;string&gt;]で指定した言語の音声トラックをコピーすることもできる。
+トラック番号の先頭に `!` を付けると、そのトラックを除外する (例: `!1,!3`)。
 言語の先頭に `!` を付けると、それらの言語以外のすべてのトラックを選択する (例: `!eng,!jpn`)。
 
 - 使用例
@@ -1296,12 +1313,16 @@ tsなどでエラーが出るなどしてうまく動作しない場合は、[--
   
   例: 日本語と英語の音声トラックを抽出
   --audio-copy jpn,eng
+
+  例: トラック番号#1を除外して抽出
+  --audio-copy !1
   ```
 
 ### --audio-codec [[&lt;int/string&gt;?]&lt;string&gt;[:&lt;string&gt;=&lt;string&gt;[,&lt;string&gt;=&lt;string&gt;]...]...]
 音声をエンコードして映像とともに出力する。使用可能なコーデックは[--check-encoders](#--check-codecs---check-decoders---check-encoders)で確認できる。
 
 [&lt;int&gt;]で音声トラック(1,2,...)を選択したり、[&lt;string&gt;]で指定した言語の音声トラックを選択することもできる。
+トラック番号の先頭に `!` を付けると、そのトラックを除外する (例: `--audio-codec !1,!3?aac`)。
 言語の先頭に `!` を付けると、それらの言語以外のすべてのトラックを選択する (例: `--audio-codec !eng,!jpn?copy`)。
 
 さらに、":"以降に音声エンコーダのオプションを指定したり、"#"以降に音声デコーダのオプションを指定することもできる。
@@ -1320,7 +1341,10 @@ tsなどでエラーが出るなどしてうまく動作しない場合は、[--
   例4: 日本語と英語の音声をaacに変換
   --audio-codec jpn?aac --audio-codec eng?aac
   
-  例5: aacエンコーダのパラメータ"aac_coder"に低ビットレートでより高品質な"twoloop"を指定
+  例5: 第1音声トラックを除外してaacに変換
+  --audio-codec !1?aac
+
+  例6: aacエンコーダのパラメータ"aac_coder"に低ビットレートでより高品質な"twoloop"を指定
   --audio-codec aac:aac_coder=twoloop
   ```
 
@@ -1675,6 +1699,7 @@ nero形式、apple形式、matroska形式に対応する。--chapter-copyとは�
 字幕をコピーする。avhw/avswリーダー使用時のみ有効。
 
 [&lt;int&gt;[,&lt;int&gt;]...]で、抽出する字幕トラック(1,2,...)を指定したり、[&lt;string&gt;[,&lt;string&gt;]...]で指定した言語の字幕トラックをコピーすることもできる。
+トラック番号の先頭に `!` を付けると、そのトラックを除外する (例: `!1,!3`)。
 言語の先頭に `!` を付けると、それらの言語以外のすべてのトラックを選択する (例: `!eng,!jpn`)。
 
 対応する字幕は、PGS/srt/txt/ttxtなど。
@@ -1689,6 +1714,18 @@ nero形式、apple形式、matroska形式に対応する。--chapter-copyとは�
   
   例: 日本語と英語の音声トラックを抽出
   --sub-copy jpn,eng
+
+  例: 字幕トラック#1を除外してコピー
+  --sub-copy !1
+  ```
+
+### --sub-codec [[&lt;int/string&gt;?]&lt;string&gt;]
+字幕を指定したコーデックへ変換する。トラック番号または言語による選択と、先頭に `!` を付けた除外指定を使用できる。
+
+- 使用例
+  ```
+  例: 字幕トラック#1を除外してassへ変換
+  --sub-codec !1?ass
   ```
 
 ### --sub-disposition [&lt;int/string&gt;?]&lt;string&gt;[,&lt;string&gt;][]...
@@ -1734,8 +1771,9 @@ nero形式、apple形式、matroska形式に対応する。--chapter-copyとは�
 ### --sub-bsf [&lt;int/string&gt;?]&lt;string&gt;
 字幕トラックにbitstream filterを適用する。使用可能なフィルタは、[こちら](https://ffmpeg.org/ffmpeg-bitstream-filters.html)の中から選択可能。
 
-### --data-copy [&lt;int&gt;[,&lt;int&gt;]...]
+### --data-copy [&lt;int/string&gt;[,&lt;int/string&gt;]...]
 データストリームをコピーする。avhw/avswリーダー使用時のみ有効。
+トラック番号または言語で対象を選択できる。先頭に `!` を付けると、そのトラック番号または言語を除外する (例: `!1,!3`, `!eng,!jpn`)。
 
 ### --attachment-copy [&lt;int&gt;[,&lt;int&gt;]...]
 attachmentストリームをコピーする。avhw/avswリーダー使用時のみ有効。
@@ -1873,6 +1911,7 @@ vppフィルタの適用順は固定で、コマンドラインの順序によ�
 - [--vpp-nvvfx-artifact-reduction](#--vpp-nvvfx-artifact-reduction-param1value1param2value2)
 - [--vpp-smooth](#--vpp-smooth-param1value1param2value2)
 - [--vpp-denoise-dct](#--vpp-denoise-dct-param1value1param2value2)
+- [--vpp-bm3d](#--vpp-bm3d-param1value1param2value2)
 - [--vpp-knn](#--vpp-knn-param1value1param2value2)
 - [--vpp-nlmeans](#--vpp-nlmeans-param1value1param2value2)
 - [--vpp-pmd](#--vpp-pmd-param1value1param2value2)
@@ -3086,6 +3125,24 @@ Non local meansを用いたノイズ除去フィルタ。Windowsでは64bit版�
   --vpp-nlmeans d=1,search_t=7
   ```
 
+### --vpp-bm3d [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+ブロックマッチングと3次元協調フィルタリングによるBM3Dノイズ除去。ハードしきい値による基本推定の後、Wienerフィルタで最終推定を行う。12bit以下のplanar YUV形式に対応する。
+
+- **パラメータ**
+  - profile=&lt;string&gt; (default=fast)
+    `block_step`、`group_size`、`bm_range`をまとめて設定する。`fast`、`lc`、`np`、`high`から選択する。`profile`より後に書いた個別パラメータを優先する。
+  - sigma=&lt;float&gt; (default=3.0, 0 または 0.5-100)  
+    8bit換算のノイズ標準偏差。`0`ではbit完全一致のコピーとなる。
+  - block_step=&lt;int&gt; (default=8, 1-8)  
+    参照パッチ間の間隔。ブロックサイズ自体は8固定。
+  - group_size=&lt;int&gt; (default=8, 1-32)  
+    1グループに含める類似ブロックの最大数。時間方向処理では16まで。
+  - bm_range=&lt;int&gt; (default=9, 1-32)  
+    ブロックマッチングの探索半径。
+  - radius=&lt;int&gt; (default=0, 0-4)  
+    時間方向の履歴半径。`0`では空間方向のみ処理する。先頭から利用可能な履歴を使うため、最初の`radius`フレームも空間版へ戻さず、蓄積済みの履歴だけで時間方向処理する。
+  - chroma=&lt;bool&gt; (default=false)  
+    色差プレーンもノイズ除去する。
 ### --vpp-pmd [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
 正則化pmd法によるノイズ除去。弱めのノイズ除去を行いたいときに使用する。
 

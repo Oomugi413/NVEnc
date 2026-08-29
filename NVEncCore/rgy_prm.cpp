@@ -87,7 +87,8 @@ static const auto VPPTYPE_TO_STR = make_array<std::pair<VppType, tstring>>(
     std::make_pair(VppType::CL_COLORSPACE,           _T("colorspace")),
     std::make_pair(VppType::CL_LIBPLACEBO_TONEMAP,   _T("libplacebo-tonemapping")),
     std::make_pair(VppType::CL_AFS,                  _T("afs")),
-    std::make_pair(VppType::CL_NNEDI,               _T("nnedi")),
+    std::make_pair(VppType::CL_NNEDI,                _T("nnedi")),
+    std::make_pair(VppType::CL_NNEDI_UPSCALE,        _T("nnedi-upscale")),
     std::make_pair(VppType::CL_BWDIF,                _T("bwdif")),
     std::make_pair(VppType::CL_MAA,                  _T("maa")),
     std::make_pair(VppType::CL_RTGMC,                _T("rtgmc")),
@@ -116,6 +117,7 @@ static const auto VPPTYPE_TO_STR = make_array<std::pair<VppType, tstring>>(
     std::make_pair(VppType::CL_ONNX,                 _T("onnx")),
     std::make_pair(VppType::CL_RIFE_OV,              _T("rife-ov")),
     std::make_pair(VppType::CL_DENOISE_DCT,          _T("denoise-dct")),
+    std::make_pair(VppType::CL_DENOISE_BM3D,         _T("bm3d")),
     std::make_pair(VppType::CL_DENOISE_SMOOTH,       _T("smooth")),
     std::make_pair(VppType::CL_DENOISE_FFT3D,        _T("fft3d")),
     std::make_pair(VppType::CL_DEGRAIN,            _T("degrain")),
@@ -141,6 +143,9 @@ static const auto VPPTYPE_TO_STR = make_array<std::pair<VppType, tstring>>(
     std::make_pair(VppType::CL_DEHALO,               _T("dehalo")),
     std::make_pair(VppType::CL_FINEDEHALO,           _T("finedehalo")),
     std::make_pair(VppType::CL_HQDERING,             _T("hqdering")),
+    std::make_pair(VppType::CL_GUIDEDFILTER,         _T("guidedfilter")),
+    std::make_pair(VppType::CL_CLAHE,                _T("clahe")),
+    std::make_pair(VppType::CL_DEHAZE,               _T("dehaze")),
     std::make_pair(VppType::CL_EDGELEVEL,            _T("edgelevel")),
     std::make_pair(VppType::CL_MSHARPEN,             _T("msharpen")),
     std::make_pair(VppType::CL_WARPSHARP,            _T("warpsharp")),
@@ -336,6 +341,22 @@ tstring VppLibplaceboResample::print() const {
     str += strsprintf(_T(", antiring=%.2f"), antiring);
     //str += strsprintf(_T(", cplace=%d"), cplace);
     return str;
+}
+
+VppResizeDpid::VppResizeDpid() :
+    lambda(FILTER_DEFAULT_RESIZE_DPID_LAMBDA) {
+}
+
+bool VppResizeDpid::operator==(const VppResizeDpid &x) const {
+    return lambda == x.lambda;
+}
+
+bool VppResizeDpid::operator!=(const VppResizeDpid &x) const {
+    return !(*this == x);
+}
+
+tstring VppResizeDpid::print() const {
+    return strsprintf(_T("lambda=%.2f"), lambda);
 }
 
 VppResizeFsr1::VppResizeFsr1() :
@@ -1290,6 +1311,39 @@ tstring VppNnedi::print() const {
         ((weightfile.length()) ? weightfile.c_str() : _T("internal")));
 }
 
+VppNnediUpscale::VppNnediUpscale() :
+    enable(false),
+    nnedi(),
+    shiftCubic(false) {
+    // upscaleではフィールド関連の設定を固定して既存の縦2倍処理を利用する。
+    nnedi.enable = true;
+    nnedi.planes = { true, true, true };
+    nnedi.field = VPP_NNEDI_FIELD_TOP;
+    nnedi.doubleHeight = true;
+}
+
+bool VppNnediUpscale::operator==(const VppNnediUpscale& x) const {
+    return enable == x.enable
+        && nnedi == x.nnedi
+        && shiftCubic == x.shiftCubic;
+}
+bool VppNnediUpscale::operator!=(const VppNnediUpscale& x) const {
+    return !(*this == x);
+}
+
+tstring VppNnediUpscale::print() const {
+    return strsprintf(
+        _T("nnedi-upscale: nsize %s, nns %d, quality %s, prescreen %d, errortype %s, clamp %d, shift %s, weight \"%s\""),
+        get_cx_desc(list_vpp_nnedi_nsize, nnedi.nsize),
+        nnedi.nns,
+        get_cx_desc(list_vpp_nnedi_quality, nnedi.quality),
+        nnedi.prescreen,
+        get_cx_desc(list_vpp_nnedi_error_type, nnedi.errortype),
+        nnedi.clamp,
+        shiftCubic ? _T("cubic") : _T("linear"),
+        nnedi.weightfile.length() ? nnedi.weightfile.c_str() : _T("internal"));
+}
+
 VppBwdif::VppBwdif() :
     enable(false),
     mode((VppBwdifMode)FILTER_DEFAULT_BWDIF_MODE),
@@ -1978,6 +2032,35 @@ bool VppHqdn3d::operator!=(const VppHqdn3d& x) const {
     return !(*this == x);
 }
 
+VppDenoiseBm3d::VppDenoiseBm3d() :
+    enable(false),
+    sigma(FILTER_DEFAULT_DENOISE_BM3D_SIGMA),
+    block_step(FILTER_DEFAULT_DENOISE_BM3D_BLOCK_STEP),
+    group_size(FILTER_DEFAULT_DENOISE_BM3D_GROUP_SIZE),
+    bm_range(FILTER_DEFAULT_DENOISE_BM3D_BM_RANGE),
+    radius(FILTER_DEFAULT_DENOISE_BM3D_RADIUS),
+    chroma(FILTER_DEFAULT_DENOISE_BM3D_CHROMA) {
+}
+
+bool VppDenoiseBm3d::operator==(const VppDenoiseBm3d &x) const {
+    return enable     == x.enable
+        && sigma      == x.sigma
+        && block_step == x.block_step
+        && group_size == x.group_size
+        && bm_range   == x.bm_range
+        && radius     == x.radius
+        && chroma     == x.chroma;
+}
+bool VppDenoiseBm3d::operator!=(const VppDenoiseBm3d &x) const {
+    return !(*this == x);
+}
+
+tstring VppDenoiseBm3d::print() const {
+    return strsprintf(_T("bm3d: sigma %.2f, block_step %d, group %d, bm_range %d, radius %d, chroma %s"),
+        sigma, block_step, group_size, bm_range, radius,
+        chroma ? _T("on") : _T("off"));
+}
+
 tstring VppHqdn3d::print() const {
     return strsprintf(_T("hqdn3d: luma_spatial %.2f, chroma_spatial %.2f, luma_temporal %.2f, chroma_temporal %.2f"),
         luma_spatial, chroma_spatial, luma_temporal, chroma_temporal);
@@ -2133,6 +2216,7 @@ VppRifeOV::VppRifeOV() :
     modelFile(),
     device(_T("GPU.0")),
     multi(2),
+    fps(),
     colormatrix(_T("auto")),
     colorrange(_T("auto")) {
 }
@@ -2142,6 +2226,7 @@ bool VppRifeOV::operator==(const VppRifeOV &x) const {
         && modelFile == x.modelFile
         && device == x.device
         && multi == x.multi
+        && fps == x.fps
         && colormatrix == x.colormatrix
         && colorrange == x.colorrange;
 }
@@ -3035,7 +3120,8 @@ VppDeblock::VppDeblock() :
     qp(FILTER_DEFAULT_DEBLOCK_QP),
     alpha(FILTER_DEFAULT_DEBLOCK_ALPHA),
     beta(FILTER_DEFAULT_DEBLOCK_BETA),
-    chroma(FILTER_DEFAULT_DEBLOCK_CHROMA) {
+    chroma(FILTER_DEFAULT_DEBLOCK_CHROMA),
+    grid(FILTER_DEFAULT_DEBLOCK_GRID) {
 }
 
 bool VppDeblock::operator==(const VppDeblock &x) const {
@@ -3043,15 +3129,16 @@ bool VppDeblock::operator==(const VppDeblock &x) const {
         && qp == x.qp
         && alpha == x.alpha
         && beta == x.beta
-        && chroma == x.chroma;
+        && chroma == x.chroma
+        && grid == x.grid;
 }
 bool VppDeblock::operator!=(const VppDeblock &x) const {
     return !(*this == x);
 }
 
 tstring VppDeblock::print() const {
-    return strsprintf(_T("deblock: qp %d, alpha %d, beta %d, chroma %s"),
-        qp, alpha, beta, chroma ? _T("true") : _T("false"));
+    return strsprintf(_T("deblock: grid %d, qp %d, alpha %d, beta %d, chroma %s"),
+        grid, qp, alpha, beta, chroma ? _T("true") : _T("false"));
 }
 
 VppDeflicker::VppDeflicker() :
@@ -3158,7 +3245,8 @@ VppColorFix::VppColorFix() :
     blackB(FILTER_DEFAULT_COLORFIX_BLACK),
     frames(FILTER_DEFAULT_COLORFIX_FRAMES),
     strength(FILTER_DEFAULT_COLORFIX_STRENGTH),
-    varianceThreshold(FILTER_DEFAULT_COLORFIX_VARIANCE_THRESHOLD) {
+    varianceThreshold(FILTER_DEFAULT_COLORFIX_VARIANCE_THRESHOLD),
+    temperature(FILTER_DEFAULT_COLORFIX_TEMPERATURE) {
 }
 
 bool VppColorFix::operator==(const VppColorFix &x) const {
@@ -3174,7 +3262,8 @@ bool VppColorFix::operator==(const VppColorFix &x) const {
         && blackB == x.blackB
         && frames == x.frames
         && strength == x.strength
-        && varianceThreshold == x.varianceThreshold;
+        && varianceThreshold == x.varianceThreshold
+        && temperature == x.temperature;
 }
 
 bool VppColorFix::operator!=(const VppColorFix &x) const {
@@ -3182,9 +3271,13 @@ bool VppColorFix::operator!=(const VppColorFix &x) const {
 }
 
 tstring VppColorFix::print() const {
-    return strsprintf(_T("colorfix: mode %s, space %s, matrix %s, white #%02x%02x%02x, black #%02x%02x%02x, frames %d, strength %.2f, variance_threshold %.2f"),
+    auto str = strsprintf(_T("colorfix: mode %s, space %s, matrix %s, white #%02x%02x%02x, black #%02x%02x%02x, frames %d, strength %.2f, variance_threshold %.2f"),
         vpp_colorfix_mode_str(mode), vpp_colorfix_space_str(space), vpp_colorfix_matrix_str(matrix),
         whiteR, whiteG, whiteB, blackR, blackG, blackB, frames, strength, varianceThreshold);
+    if (temperature != 0) {
+        str += strsprintf(_T(", temperature %dK"), temperature);
+    }
+    return str;
 }
 
 VppEdgelevel::VppEdgelevel() :
@@ -3366,6 +3459,76 @@ tstring VppDering::print() const {
 
 }
 
+VppGuidedfilter::VppGuidedfilter() :
+    enable(false),
+    radius(FILTER_DEFAULT_GUIDEDFILTER_RADIUS),
+    eps(FILTER_DEFAULT_GUIDEDFILTER_EPS),
+    chroma(false) {
+}
+
+bool VppGuidedfilter::operator==(const VppGuidedfilter& x) const {
+    return enable == x.enable
+        && radius == x.radius
+        && eps == x.eps
+        && chroma == x.chroma;
+}
+
+bool VppGuidedfilter::operator!=(const VppGuidedfilter& x) const {
+    return !(*this == x);
+}
+
+tstring VppGuidedfilter::print() const {
+    return strsprintf(_T("guidedfilter: radius %d, eps %.4f, chroma %s"),
+        radius, eps, chroma ? _T("on") : _T("off"));
+}
+
+VppClahe::VppClahe() :
+    enable(false),
+    tiles_x(FILTER_DEFAULT_CLAHE_TILES_X),
+    tiles_y(FILTER_DEFAULT_CLAHE_TILES_Y),
+    slope(FILTER_DEFAULT_CLAHE_SLOPE) {
+}
+
+bool VppClahe::operator==(const VppClahe& x) const {
+    return enable == x.enable
+        && tiles_x == x.tiles_x
+        && tiles_y == x.tiles_y
+        && slope == x.slope;
+}
+
+bool VppClahe::operator!=(const VppClahe& x) const {
+    return !(*this == x);
+}
+
+tstring VppClahe::print() const {
+    return strsprintf(_T("clahe: tiles %dx%d, slope %.2f"), tiles_x, tiles_y, slope);
+}
+
+VppDehaze::VppDehaze() :
+    enable(false),
+    patch_radius(FILTER_DEFAULT_DEHAZE_PATCH_RADIUS),
+    omega(FILTER_DEFAULT_DEHAZE_OMEGA),
+    t_floor(FILTER_DEFAULT_DEHAZE_T_FLOOR),
+    atm_light(FILTER_DEFAULT_DEHAZE_ATM_LIGHT) {
+}
+
+bool VppDehaze::operator==(const VppDehaze& x) const {
+    return enable == x.enable
+        && patch_radius == x.patch_radius
+        && omega == x.omega
+        && t_floor == x.t_floor
+        && atm_light == x.atm_light;
+}
+
+bool VppDehaze::operator!=(const VppDehaze& x) const {
+    return !(*this == x);
+}
+
+tstring VppDehaze::print() const {
+    return strsprintf(_T("dehaze: patch %d, omega %.3f, t_floor %.3f, atm_light %.3f"),
+        patch_radius, omega, t_floor, atm_light);
+}
+
 VppMsharpen::VppMsharpen() :
     enable(false),
     strength(FILTER_DEFAULT_MSHARPEN_STRENGTH),
@@ -3539,6 +3702,7 @@ VppTweak::VppTweak() :
     contrast(FILTER_DEFAULT_TWEAK_CONTRAST),
     gamma(FILTER_DEFAULT_TWEAK_GAMMA),
     saturation(FILTER_DEFAULT_TWEAK_SATURATION),
+    vibrance(FILTER_DEFAULT_TWEAK_VIBRANCE),
     hue(FILTER_DEFAULT_TWEAK_HUE),
     swapuv(false),
     coring(false),
@@ -3558,6 +3722,7 @@ bool VppTweak::operator==(const VppTweak &x) const {
         && contrast == x.contrast
         && gamma == x.gamma
         && saturation == x.saturation
+        && vibrance == x.vibrance
         && hue == x.hue
         && swapuv == x.swapuv
         && coring == x.coring
@@ -3575,9 +3740,9 @@ bool VppTweak::operator!=(const VppTweak &x) const {
 }
 
 tstring VppTweak::print(const bool print_rgb, const bool print_header) const {
-    auto str = strsprintf(_T("%sbrightness %.2f, contrast %.2f, saturation %.2f, gamma %.2f, hue %.2f, swapuv %s"),
+    auto str = strsprintf(_T("%sbrightness %.2f, contrast %.2f, saturation %.2f, vibrance %.2f, gamma %.2f, hue %.2f, swapuv %s"),
         (print_header) ? _T("tweak: ") : _T(""),
-        brightness, contrast, saturation, gamma, hue, swapuv ? _T("on") : _T("off"));
+        brightness, contrast, saturation, vibrance, gamma, hue, swapuv ? _T("on") : _T("off"));
     tstring indent = _T("         ");
     if (y.enabled())  { str += _T("\n") + indent + _T("y: ")  + y.print(false); }
     if (cb.enabled()) { str += _T("\n") + indent + _T("cb: ") + cb.print(false); }
@@ -3601,6 +3766,7 @@ bool VppTweak::yuv_filter_enabled() const {
         || brightness != 0.0f
         || gamma != 1.0f
         || saturation != 1.0f
+        || vibrance != 0.0f
         || hue != 0.0f
         || swapuv
         || coring
@@ -3731,7 +3897,8 @@ VppLensCorrection::VppLensCorrection() :
     k1(0.0f),
     k2(0.0f),
     cx(0.5f),
-    cy(0.5f) {
+    cy(0.5f),
+    vignette(0.0f) {
 }
 
 bool VppLensCorrection::operator==(const VppLensCorrection &x) const {
@@ -3739,14 +3906,19 @@ bool VppLensCorrection::operator==(const VppLensCorrection &x) const {
         && k1 == x.k1
         && k2 == x.k2
         && cx == x.cx
-        && cy == x.cy;
+        && cy == x.cy
+        && vignette == x.vignette;
 }
 bool VppLensCorrection::operator!=(const VppLensCorrection &x) const {
     return !(*this == x);
 }
 
 tstring VppLensCorrection::print() const {
-    return strsprintf(_T("lenscorrection: k1 %.4f, k2 %.4f, cx %.3f, cy %.3f"), k1, k2, cx, cy);
+    auto str = strsprintf(_T("lenscorrection: k1 %.4f, k2 %.4f, cx %.3f, cy %.3f"), k1, k2, cx, cy);
+    if (vignette != 0.0f) {
+        str += strsprintf(_T(", vignette %+.3f"), vignette);
+    }
+    return str;
 }
 
 VppV360::VppV360() :
@@ -3939,6 +4111,7 @@ RGYParamVpp::RGYParamVpp() :
     deintCsp(VppDeintCsp::Input),
     resize_libplacebo(),
     resize_fsr1(),
+    resize_dpid(),
     resize_nis(),
     resize_bicubic(),
     colorspace(),
@@ -3946,6 +4119,7 @@ RGYParamVpp::RGYParamVpp() :
     delogo(),
     afs(),
     nnedi(),
+    nnediUpscale(),
     bwdif(),
     rtgmc(),
     rtgmc_bob(),
@@ -4021,6 +4195,7 @@ bool RGYParamVpp::operator==(const RGYParamVpp& x) const {
         && deintCsp == x.deintCsp
         && resize_libplacebo == x.resize_libplacebo
         && resize_fsr1 == x.resize_fsr1
+        && resize_dpid == x.resize_dpid
         && resize_nis == x.resize_nis
         && resize_bicubic == x.resize_bicubic
         && resize_libplacebo == x.resize_libplacebo
@@ -4029,6 +4204,7 @@ bool RGYParamVpp::operator==(const RGYParamVpp& x) const {
         && delogo == x.delogo
         && afs == x.afs
         && nnedi == x.nnedi
+        && nnediUpscale == x.nnediUpscale
         && bwdif == x.bwdif
         && rtgmc == x.rtgmc
         && rtgmc_bob == x.rtgmc_bob
@@ -4049,6 +4225,7 @@ bool RGYParamVpp::operator==(const RGYParamVpp& x) const {
         && nlmeans == x.nlmeans
         && pmd == x.pmd
         && hqdn3d == x.hqdn3d
+        && bm3d == x.bm3d
         && descale == x.descale
         && anime4k == x.anime4k
         && onnx == x.onnx
@@ -4080,6 +4257,9 @@ bool RGYParamVpp::operator==(const RGYParamVpp& x) const {
         && dehalo == x.dehalo
         && finedehalo == x.finedehalo
         && dering == x.dering
+        && guidedfilter == x.guidedfilter
+        && clahe == x.clahe
+        && dehaze == x.dehaze
         && edgelevel == x.edgelevel
         && msharpen == x.msharpen
         && warpsharp == x.warpsharp
@@ -4155,6 +4335,7 @@ AudioSelect::AudioSelect() :
     disposition(),
     lang(),
     selectCodec(),
+    excludeTrackIDs(),
     metadata(),
     resamplerPrm() {
 }
@@ -4177,6 +4358,7 @@ SubtitleSelect::SubtitleSelect() :
     disposition(),
     lang(),
     selectCodec(),
+    excludeTrackIDs(),
     metadata() {
 
 }
@@ -4195,6 +4377,7 @@ DataSelect::DataSelect() :
     disposition(),
     lang(),
     selectCodec(),
+    excludeTrackIDs(),
     metadata() {
 
 }
@@ -4353,6 +4536,7 @@ RGYParamCommon::RGYParamCommon() :
     inputFilename(),
     outputFilename(),
     muxOutputFormat(),
+    y4mTimestamp(false),
     out_vui(),
     inputOpt(),
     maxCll(),

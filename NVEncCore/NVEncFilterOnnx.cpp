@@ -47,7 +47,7 @@ NVEncFilterOnnx::NVEncFilterOnnx() :
     m_matVR(0), m_matUG(0), m_matVG(0), m_matUB(0),
     m_matRY(0), m_matGY(0), m_matBY(0), m_matRU(0), m_matGU(0), m_matBU(0), m_matRV(0), m_matGV(0), m_matBV(0),
     m_inStaging(), m_outStaging(), m_inBuf(), m_outBuf(), m_u444(), m_v444(),
-    m_inputDevice(), m_outputDevice(), m_cropToRgb(), m_cropFromRgb(), m_cropToYuv444(), m_cropFromYuv444(),
+    m_inputDevice(), m_outputDevice(), m_cropToRgb(), m_cropFromRgb(), m_cropToYuv444(), m_cropFromYuv444(), m_lumaResize(),
     m_modelPath(), m_provider(RGYOnnxRTProvider::Auto), m_precision(), m_cacheDir(), m_deviceID(-1),
     m_cudaPathTried(false), m_cudaPath(false),
     m_temporalT(1), m_ring(), m_ringBaseIdx(0), m_recvCount(0), m_emitCount(0),
@@ -96,34 +96,19 @@ static bool onnx_supported_colorrange(CspColorRange range) {
         || range == RGY_COLORRANGE_FULL;
 }
 
-// Bilinear upscale of one 8-bit channel from (sw x sh) to (sw*scale x sh*scale)
-// on the CPU (host path).
-static void upscale_bilinear_u8(uint8_t *dst, const int dstPitch, const int dstStride,
-                                const uint8_t *src, const int srcPitch, const int srcStride,
-                                const int sw, const int sh, const int scale) {
-    const int dw = sw * scale;
-    const int dh = sh * scale;
-    const float inv = 1.0f / (float)scale;
-    for (int dy = 0; dy < dh; dy++) {
-        float sy = (dy + 0.5f) * inv - 0.5f;
-        int y0 = (int)std::floor(sy);
-        float fy = sy - (float)y0;
-        const uint8_t *row0 = src + (size_t)clampi(y0,     0, sh - 1) * srcPitch;
-        const uint8_t *row1 = src + (size_t)clampi(y0 + 1, 0, sh - 1) * srcPitch;
-        uint8_t *drow = dst + (size_t)dy * dstPitch;
-        for (int dx = 0; dx < dw; dx++) {
-            float sx = (dx + 0.5f) * inv - 0.5f;
-            int x0 = (int)std::floor(sx);
-            float fx = sx - (float)x0;
-            const int x0c = clampi(x0,     0, sw - 1) * srcStride;
-            const int x1c = clampi(x0 + 1, 0, sw - 1) * srcStride;
-            const float a = row0[x0c], b = row0[x1c];
-            const float c = row1[x0c], d = row1[x1c];
-            const float top = a + (b - a) * fx;
-            const float bot = c + (d - c) * fx;
-            const int v = (int)(top + (bot - top) * fy + 0.5f);
-            drow[dx * dstStride] = (uint8_t)clampi(v, 0, 255);
-        }
+static bool onnx_supported_csp(RGY_CSP csp) {
+    switch (csp) {
+    case RGY_CSP_NV12:
+    case RGY_CSP_P010:
+    case RGY_CSP_YV12:
+    case RGY_CSP_YV12_09:
+    case RGY_CSP_YV12_10:
+    case RGY_CSP_YV12_12:
+    case RGY_CSP_YV12_14:
+    case RGY_CSP_YV12_16:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -377,8 +362,8 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
     }
 
     const auto inCsp = prm->frameIn.csp;
-    if ((inCsp != RGY_CSP_YV12 && inCsp != RGY_CSP_NV12) || prm->frameIn.bitdepth != 8) {
-        AddMessage(RGY_LOG_ERROR, _T("onnx: supports 8-bit yuv420 (yv12/nv12) only; got %s %dbit.\n"),
+    if (!onnx_supported_csp(inCsp)) {
+        AddMessage(RGY_LOG_ERROR, _T("onnx: 対応する入力形式はYUV420の8/9/10/12/14/16bitのみです: %s %dbit。\n"),
             RGY_CSP_NAMES[inCsp], prm->frameIn.bitdepth);
         return RGY_ERR_UNSUPPORTED;
     }
@@ -435,6 +420,10 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
     m_inC  = m_ov->inChannels();
     m_outC = m_ov->outChannels();
     if (!prm->onnx.maskFile.empty()) {
+        if (RGY_CSP_BIT_DEPTH[inCsp] != 8) {
+            AddMessage(RGY_LOG_ERROR, _T("onnx: 9bit以上の入力ではmask=を使用できません。\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
         if (prm->onnx.frames > 1) {
             AddMessage(RGY_LOG_ERROR, _T("onnx: mask=とframes=は同時に指定できません。\n"));
             return RGY_ERR_UNSUPPORTED;
@@ -448,6 +437,10 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
     }
     m_temporalT = std::max(1, prm->onnx.frames);
     if (m_temporalT > 1) {
+        if (RGY_CSP_BIT_DEPTH[inCsp] != 8) {
+            AddMessage(RGY_LOG_ERROR, _T("onnx: 9bit以上の入力ではframes=を使用できません。\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
         if (m_inC != m_temporalT * 3 || m_outC != 3) {
             AddMessage(RGY_LOG_ERROR, _T("onnx: frames=%dには%dch入力と3ch出力のRGBモデルが必要です（現在%dch/%dch）。\n"),
                 m_temporalT, m_temporalT * 3, m_inC, m_outC);
@@ -479,7 +472,7 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
             (m_io == OnnxIO::Chroma) ? _T("chroma") : _T("gray+noise"), m_scale);
         return RGY_ERR_UNSUPPORTED;
     }
-    m_maxval = (float)((1 << prm->frameIn.bitdepth) - 1);
+    m_maxval = (float)((1 << RGY_CSP_BIT_DEPTH[inCsp]) - 1);
 
     m_ycbcr = (m_io == OnnxIO::Chroma) || (m_io == OnnxIO::RGB && prm->onnx.colorspace == _T("ycbcr"));
 
@@ -518,22 +511,38 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
         m_u444.resize((size_t)outW * outH);
         m_v444.resize((size_t)outW * outH);
     }
-    m_inStaging  = std::make_unique<CUFrameBuf>();
-    m_outStaging = std::make_unique<CUFrameBuf>();
-    if (m_inStaging->allocHost(inW, inH, inCsp) != RGY_ERR_NONE
-        || m_outStaging->allocHost(outW, outH, inCsp) != RGY_ERR_NONE) {
-        AddMessage(RGY_LOG_ERROR, _T("onnx: failed to allocate host staging frame buffers.\n"));
-        return RGY_ERR_MEMORY_ALLOC;
+    if (RGY_CSP_BIT_DEPTH[inCsp] == 8) {
+        m_inStaging  = std::make_unique<CUFrameBuf>();
+        m_outStaging = std::make_unique<CUFrameBuf>();
+        if (m_inStaging->allocHost(inW, inH, inCsp) != RGY_ERR_NONE
+            || m_outStaging->allocHost(outW, outH, inCsp) != RGY_ERR_NONE) {
+            AddMessage(RGY_LOG_ERROR, _T("onnx: failed to allocate host staging frame buffers.\n"));
+            return RGY_ERR_MEMORY_ALLOC;
+        }
     }
 
     m_cudaPathTried = false;
     m_cudaPath = false;
-    if (m_temporalT == 1 && (m_io == OnnxIO::GrayNoise || m_io == OnnxIO::Chroma || m_io == OnnxIO::RGB || m_io == OnnxIO::RGBNoise)) {
+    if (m_temporalT == 1) {
         m_inputDevice = std::make_unique<CUMemBuf>(m_inBuf.size() * sizeof(float));
         m_outputDevice = std::make_unique<CUMemBuf>(m_outBuf.size() * sizeof(float));
         if (m_inputDevice->alloc() != RGY_ERR_NONE || m_outputDevice->alloc() != RGY_ERR_NONE) {
             AddMessage(RGY_LOG_ERROR, _T("onnx: CUDAテンソルバッファの確保に失敗しました。\n"));
             return RGY_ERR_MEMORY_ALLOC;
+        }
+    }
+    if (m_temporalT == 1 && m_io == OnnxIO::LumaSR && m_scale != 1) {
+        auto resizeParam = std::make_shared<NVEncFilterParamResize>();
+        resizeParam->interp = RGY_VPP_RESIZE_BILINEAR;
+        resizeParam->frameIn = prm->frameIn;
+        resizeParam->frameOut = frameOut;
+        resizeParam->baseFps = prm->baseFps;
+        resizeParam->bOutOverwrite = false;
+        m_lumaResize = std::make_unique<NVEncFilterResize>();
+        err = m_lumaResize->init(resizeParam, m_pLog);
+        if (err != RGY_ERR_NONE) {
+            AddMessage(RGY_LOG_ERROR, _T("onnx: 輝度モデル用クロマ拡大の初期化に失敗しました: %s.\n"), get_err_mes(err));
+            return err;
         }
     }
     if (m_temporalT == 1 && (m_io == OnnxIO::RGB || m_io == OnnxIO::RGBNoise) && !m_ycbcr) {
@@ -726,6 +735,10 @@ RGY_ERR NVEncFilterOnnx::initCudaPath(cudaStream_t stream) {
         || session->inChannels() != m_inC || session->outChannels() != m_outC
         || session->outWidth() * session->outHeight() * session->outChannels() != (int)m_outBuf.size()) {
         const auto reason = !errorMessage.empty() ? errorMessage : session->lastError();
+        if (RGY_CSP_BIT_DEPTH[m_param->frameIn.csp] != 8) {
+            AddMessage(RGY_LOG_ERROR, _T("onnx: 9bit以上の入力に必要なCUDAゼロコピー経路を初期化できません: %s\n"), reason.c_str());
+            return (err != RGY_ERR_NONE) ? err : RGY_ERR_UNSUPPORTED;
+        }
         AddMessage(RGY_LOG_WARN, _T("onnx: CUDAゼロコピー経路を初期化できないためホスト経路を使用します: %s\n"), reason.c_str());
         const auto cudaPathErr = (err != RGY_ERR_NONE) ? err : RGY_ERR_UNSUPPORTED;
 
@@ -744,6 +757,29 @@ RGY_ERR NVEncFilterOnnx::initCudaPath(cudaStream_t stream) {
     m_cudaPath = true;
     AddMessage(RGY_LOG_INFO, _T("onnx: path cuda-zerocopy をフィルタストリーム上で初期化しました。\n"));
     return RGY_ERR_NONE;
+}
+
+RGY_ERR NVEncFilterOnnx::prepareLumaOutput(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream) {
+    RGY_ERR err = RGY_ERR_NONE;
+    if (m_lumaResize) {
+        auto inputFrame = *input;
+        RGYFrameInfo *resizeOutput[1] = { output };
+        int outputCount = 0;
+        err = m_lumaResize->filter(&inputFrame, resizeOutput, &outputCount, stream);
+    } else {
+        err = copyFrameAsync(output, input, stream);
+    }
+    return err;
+}
+
+RGY_ERR NVEncFilterOnnx::runCudaLuma(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream) {
+    auto err = prepareLumaOutput(input, output, stream);
+    if (err != RGY_ERR_NONE) return err;
+    err = run_onnx_pack_luma((float *)m_inputDevice->ptr, input, stream);
+    if (err != RGY_ERR_NONE) return err;
+    err = m_ov->inferDevice((const float *)m_inputDevice->ptr, (float *)m_outputDevice->ptr);
+    if (err != RGY_ERR_NONE) return err;
+    return run_onnx_unpack_luma(output, (const float *)m_outputDevice->ptr, stream);
 }
 
 RGY_ERR NVEncFilterOnnx::runCudaRGB(const RGYFrameInfo *input, RGYFrameInfo *output, cudaStream_t stream) {
@@ -826,7 +862,12 @@ RGY_ERR NVEncFilterOnnx::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInf
 
     RGY_ERR cerr = RGY_ERR_UNSUPPORTED;
     RGY_ERR cudaPathInitErr = RGY_ERR_NONE;
-    if ((m_io == OnnxIO::RGB || m_io == OnnxIO::RGBNoise) && !m_ycbcr) {
+    if (m_io == OnnxIO::LumaSR) {
+        cudaPathInitErr = initCudaPath(stream);
+        if (cudaPathInitErr == RGY_ERR_NONE) {
+            cerr = runCudaLuma(pInputFrame, coreFrame, stream);
+        }
+    } else if ((m_io == OnnxIO::RGB || m_io == OnnxIO::RGBNoise) && !m_ycbcr) {
         cudaPathInitErr = initCudaPath(stream);
         if (cudaPathInitErr == RGY_ERR_NONE) {
             cerr = runCudaRGB(pInputFrame, coreFrame, stream);
@@ -844,6 +885,12 @@ RGY_ERR NVEncFilterOnnx::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInf
     }
     if (m_cudaPath && cerr != RGY_ERR_NONE) {
         const auto cudaReason = m_ov ? m_ov->lastError() : tstring();
+        if (RGY_CSP_BIT_DEPTH[m_param->frameIn.csp] != 8) {
+            AddMessage(RGY_LOG_ERROR, cudaReason.empty()
+                ? strsprintf(_T("onnx: 9bit以上の入力でCUDAゼロコピー実行に失敗しました: %s。\n"), get_err_mes(cerr))
+                : strsprintf(_T("onnx: 9bit以上の入力でCUDAゼロコピー実行に失敗しました: %s。\n"), cudaReason.c_str()));
+            return cerr;
+        }
         AddMessage(RGY_LOG_WARN, cudaReason.empty()
             ? strsprintf(_T("onnx: CUDAゼロコピー実行に失敗したためホスト経路へフォールバックします: %s.\n"), get_err_mes(cerr))
             : strsprintf(_T("onnx: CUDAゼロコピー実行に失敗したためホスト経路へフォールバックします: %s.\n"), cudaReason.c_str()));
@@ -856,6 +903,9 @@ RGY_ERR NVEncFilterOnnx::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInf
         }
     }
     if (!m_cudaPath) {
+        if (RGY_CSP_BIT_DEPTH[m_param->frameIn.csp] != 8) {
+            return (cudaPathInitErr != RGY_ERR_NONE) ? cudaPathInitErr : RGY_ERR_UNSUPPORTED;
+        }
         if (!m_ov) {
             return (cudaPathInitErr != RGY_ERR_NONE) ? cudaPathInitErr : RGY_ERR_UNKNOWN;
         }
@@ -1133,6 +1183,7 @@ void NVEncFilterOnnx::fillInputHost(const RGYFrameInfo &hin) {
 
     switch (m_io) {
     case OnnxIO::LumaSR:
+        break;
     case OnnxIO::GrayNoise:
         for (int y = 0; y < inH; y++) {
             const uint8_t *srow = hin.ptr[0] + (size_t)y * hin.pitch[0];
@@ -1208,22 +1259,8 @@ void NVEncFilterOnnx::writeOutputHost(const RGYFrameInfo &hout, const RGYFrameIn
     const int oPitchV = nv12 ? hout.pitch[1] : hout.pitch[2];
 
     switch (m_io) {
-    case OnnxIO::LumaSR: {
-        for (int y = 0; y < outH; y++) {
-            const float *srow = ob + (size_t)y * outW;
-            uint8_t *drow = hout.ptr[0] + (size_t)y * hout.pitch[0];
-            for (int x = 0; x < outW; x++) { int v = (int)(srow[x] * m_maxval + 0.5f); drow[x] = (uint8_t)clampi(v, 0, pixMax); }
-        }
-        const int cInW = hin.width / 2, cInH = hin.height / 2;
-        if (!nv12) {
-            upscale_bilinear_u8(hout.ptr[1], hout.pitch[1], 1, hin.ptr[1], hin.pitch[1], 1, cInW, cInH, m_scale);
-            upscale_bilinear_u8(hout.ptr[2], hout.pitch[2], 1, hin.ptr[2], hin.pitch[2], 1, cInW, cInH, m_scale);
-        } else {
-            upscale_bilinear_u8(hout.ptr[1] + 0, hout.pitch[1], 2, hin.ptr[1] + 0, hin.pitch[1], 2, cInW, cInH, m_scale);
-            upscale_bilinear_u8(hout.ptr[1] + 1, hout.pitch[1], 2, hin.ptr[1] + 1, hin.pitch[1], 2, cInW, cInH, m_scale);
-        }
+    case OnnxIO::LumaSR:
         break;
-    }
     case OnnxIO::GrayNoise: {
         for (int y = 0; y < outH; y++) {
             const float *srow = ob + (size_t)y * outW;
@@ -1279,14 +1316,24 @@ void NVEncFilterOnnx::writeOutputHost(const RGYFrameInfo &hout, const RGYFrameIn
 }
 
 RGY_ERR NVEncFilterOnnx::runHost(const RGYFrameInfo *in, RGYFrameInfo *out, cudaStream_t stream) {
-    // 1. device input -> host staging, then wait for the copy so the CPU can read it.
-    auto err = copyFrameAsync(&m_inStaging->frame, in, stream);
-    if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: copy input to staging failed: %s.\n"), get_err_mes(err)); return err; }
-    err = err_to_rgy(cudaStreamSynchronize(stream));
-    if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: stream sync failed: %s.\n"), get_err_mes(err)); return err; }
-
-    // 2. pack the input frame into the network tensor (per I/O mode).
-    fillInputHost(m_inStaging->frame);
+    RGY_ERR err = RGY_ERR_NONE;
+    if (m_io == OnnxIO::LumaSR) {
+        // ホスト推論へのフォールバック時も、画素形式とテンソルの変換はCUDA側へ統一する。
+        err = run_onnx_pack_luma((float *)m_inputDevice->ptr, in, stream);
+        if (err != RGY_ERR_NONE) return err;
+        err = err_to_rgy(cudaMemcpyAsync(m_inBuf.data(), m_inputDevice->ptr,
+            m_inBuf.size() * sizeof(float), cudaMemcpyDeviceToHost, stream));
+        if (err != RGY_ERR_NONE) return err;
+        err = err_to_rgy(cudaStreamSynchronize(stream));
+        if (err != RGY_ERR_NONE) return err;
+    } else {
+        // device input -> host staging, then wait for the copy so the CPU can read it.
+        err = copyFrameAsync(&m_inStaging->frame, in, stream);
+        if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: copy input to staging failed: %s.\n"), get_err_mes(err)); return err; }
+        err = err_to_rgy(cudaStreamSynchronize(stream));
+        if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: stream sync failed: %s.\n"), get_err_mes(err)); return err; }
+        fillInputHost(m_inStaging->frame);
+    }
 
     // 3. inference.
     err = m_ov->infer(m_inBuf.data(), m_outBuf.data());
@@ -1300,13 +1347,19 @@ RGY_ERR NVEncFilterOnnx::runHost(const RGYFrameInfo *in, RGYFrameInfo *out, cuda
         return err;
     }
 
-    // 4. unpack the network output into the host output staging frame (per I/O mode).
-    writeOutputHost(m_outStaging->frame, m_inStaging->frame);
-
-    // 5. copy host staging -> device output.
-    err = copyFrameAsync(out, &m_outStaging->frame, stream);
-    if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: copy staging to output failed: %s.\n"), get_err_mes(err)); return err; }
-    return RGY_ERR_NONE;
+    if (m_io == OnnxIO::LumaSR) {
+        err = prepareLumaOutput(in, out, stream);
+        if (err != RGY_ERR_NONE) return err;
+        err = err_to_rgy(cudaMemcpyAsync(m_outputDevice->ptr, m_outBuf.data(),
+            m_outBuf.size() * sizeof(float), cudaMemcpyHostToDevice, stream));
+        if (err != RGY_ERR_NONE) return err;
+        return run_onnx_unpack_luma(out, (const float *)m_outputDevice->ptr, stream);
+    } else {
+        writeOutputHost(m_outStaging->frame, m_inStaging->frame);
+        err = copyFrameAsync(out, &m_outStaging->frame, stream);
+        if (err != RGY_ERR_NONE) { AddMessage(RGY_LOG_ERROR, _T("onnx: copy staging to output failed: %s.\n"), get_err_mes(err)); return err; }
+        return RGY_ERR_NONE;
+    }
 }
 
 void NVEncFilterOnnx::close() {
@@ -1315,6 +1368,7 @@ void NVEncFilterOnnx::close() {
     m_cropFromRgb.reset();
     m_cropToYuv444.reset();
     m_cropFromYuv444.reset();
+    m_lumaResize.reset();
     m_inputDevice.reset();
     m_outputDevice.reset();
     m_inStaging.reset();

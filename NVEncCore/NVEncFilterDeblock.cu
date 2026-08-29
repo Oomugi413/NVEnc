@@ -74,12 +74,12 @@ __device__ __forceinline__ int deblock_clip_pixel(int v) {
 
 template<typename Type, int max_val>
 __global__ void kernel_deblock_vertical(uint8_t *__restrict__ pBuf, const int bufPitch,
-    const int width, const int height, const int alpha, const int beta, const int tc0, const int is_chroma) {
+    const int width, const int height, const int alpha, const int beta, const int tc0, const int is_chroma, const int grid) {
     const int edge_index = blockIdx.x * blockDim.x + threadIdx.x;
     const int iy = blockIdx.y * blockDim.y + threadIdx.y;
     if (iy >= height) return;
 
-    const int boundary_x = (edge_index + 1) * 4;
+    const int boundary_x = (edge_index + 1) * grid;
     if (boundary_x < 3 || boundary_x > width - 3) return;
 
     Type *row = (Type *)(pBuf + iy * bufPitch);
@@ -122,12 +122,12 @@ __global__ void kernel_deblock_vertical(uint8_t *__restrict__ pBuf, const int bu
 
 template<typename Type, int max_val>
 __global__ void kernel_deblock_horizontal(uint8_t *__restrict__ pBuf, const int bufPitch,
-    const int width, const int height, const int alpha, const int beta, const int tc0, const int is_chroma) {
+    const int width, const int height, const int alpha, const int beta, const int tc0, const int is_chroma, const int grid) {
     const int ix = blockIdx.x * blockDim.x + threadIdx.x;
     const int edge_index = blockIdx.y * blockDim.y + threadIdx.y;
     if (ix >= width) return;
 
-    const int boundary_y = (edge_index + 1) * 4;
+    const int boundary_y = (edge_index + 1) * grid;
     if (boundary_y < 3 || boundary_y > height - 3) return;
 
 #define PIX(y) (*(Type *)(pBuf + (y) * bufPitch + ix * sizeof(Type)))
@@ -170,24 +170,24 @@ __global__ void kernel_deblock_horizontal(uint8_t *__restrict__ pBuf, const int 
 
 template<typename Type, int bit_depth>
 static RGY_ERR deblock_plane(RGYFrameInfo *pOutputFrame, const int alpha, const int beta, const int tc0,
-    const int is_chroma, cudaStream_t stream) {
+    const int is_chroma, const int grid, cudaStream_t stream) {
     static constexpr int max_val = (1 << bit_depth) - 1;
-    const int numVertEdges = (pOutputFrame->width / 4) - 1;
+    const int numVertEdges = (pOutputFrame->width / grid) - 1;
     if (numVertEdges > 0) {
         dim3 blockSize(8, 32);
         dim3 gridSize(divCeil(numVertEdges, blockSize.x), divCeil(pOutputFrame->height, blockSize.y));
         kernel_deblock_vertical<Type, max_val><<<gridSize, blockSize, 0, stream>>>((uint8_t *)pOutputFrame->ptr[0],
-            pOutputFrame->pitch[0], pOutputFrame->width, pOutputFrame->height, alpha, beta, tc0, is_chroma);
+            pOutputFrame->pitch[0], pOutputFrame->width, pOutputFrame->height, alpha, beta, tc0, is_chroma, grid);
         auto cudaerr = cudaGetLastError();
         if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
     }
 
-    const int numHorzEdges = (pOutputFrame->height / 4) - 1;
+    const int numHorzEdges = (pOutputFrame->height / grid) - 1;
     if (numHorzEdges > 0) {
         dim3 blockSize(DEBLOCK_BLOCK_X, DEBLOCK_BLOCK_Y);
         dim3 gridSize(divCeil(pOutputFrame->width, blockSize.x), divCeil(numHorzEdges, blockSize.y));
         kernel_deblock_horizontal<Type, max_val><<<gridSize, blockSize, 0, stream>>>((uint8_t *)pOutputFrame->ptr[0],
-            pOutputFrame->pitch[0], pOutputFrame->width, pOutputFrame->height, alpha, beta, tc0, is_chroma);
+            pOutputFrame->pitch[0], pOutputFrame->width, pOutputFrame->height, alpha, beta, tc0, is_chroma, grid);
         auto cudaerr = cudaGetLastError();
         if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
     }
@@ -196,7 +196,7 @@ static RGY_ERR deblock_plane(RGYFrameInfo *pOutputFrame, const int alpha, const 
 
 template<typename Type, int bit_depth>
 static RGY_ERR deblock_frame(RGYFrameInfo *pOutputFrame, const RGYFrameInfo *pInputFrame,
-    const int qp, const int alphaOffset, const int betaOffset, const bool chroma, cudaStream_t stream) {
+    const int qp, const int alphaOffset, const int betaOffset, const bool chroma, const int grid, cudaStream_t stream) {
     const int indexA = std::min(51, std::max(0, qp + alphaOffset));
     const int indexB = std::min(51, std::max(0, qp + betaOffset));
     const int bdShift = std::max(0, bit_depth - 8);
@@ -216,7 +216,7 @@ static RGY_ERR deblock_frame(RGYFrameInfo *pOutputFrame, const RGYFrameInfo *pIn
     for (int i = 0; i < planeMax; i++) {
         auto planeDst = getPlane(pOutputFrame, (RGY_PLANE)i);
         if (planeDst.width < 8 || planeDst.height < 8) continue;
-        auto sts = deblock_plane<Type, bit_depth>(&planeDst, alpha, beta, tc0, (i == 0) ? 0 : 1, stream);
+        auto sts = deblock_plane<Type, bit_depth>(&planeDst, alpha, beta, tc0, (i == 0) ? 0 : 1, grid, stream);
         if (sts != RGY_ERR_NONE) return sts;
     }
     return copyPlaneAlphaAsync(pOutputFrame, pInputFrame, stream);
@@ -338,7 +338,7 @@ RGY_ERR NVEncFilterDeblock::run_filter(const RGYFrameInfo *pInputFrame, RGYFrame
         return RGY_ERR_UNSUPPORTED;
     }
     sts = deblock_list.at(pInputFrame->csp)(ppOutputFrames[0], pInputFrame,
-        prm->deblock.qp, prm->deblock.alpha, prm->deblock.beta, prm->deblock.chroma, stream);
+        prm->deblock.qp, prm->deblock.alpha, prm->deblock.beta, prm->deblock.chroma, prm->deblock.grid, stream);
     if (sts != RGY_ERR_NONE) {
         AddMessage(RGY_LOG_ERROR, _T("error at deblock(%s): %s.\n"), RGY_CSP_NAMES[pInputFrame->csp], get_err_mes(sts));
         return sts;

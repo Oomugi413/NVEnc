@@ -32,6 +32,7 @@
 #include <iomanip>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include "rgy_util.h"
 #include "rgy_avutil.h"
 #if ENCODER_NVENC
@@ -449,10 +450,40 @@ int cmd_string_to_bool(bool *b, const tstring &str) {
     }
 }
 
+static void mergeTrackExclusions(std::vector<int>& trackIDs, const std::vector<int>& additionalTrackIDs) {
+    trackIDs.insert(trackIDs.end(), additionalTrackIDs.begin(), additionalTrackIDs.end());
+    std::sort(trackIDs.begin(), trackIDs.end());
+    trackIDs.erase(std::unique(trackIDs.begin(), trackIDs.end()), trackIDs.end());
+}
+
+static bool parseTrackExclusion(const std::string& str, std::vector<int>& trackIDs) {
+    if (str.empty() || str[0] != '!') {
+        return false;
+    }
+    std::vector<int> parsedTrackIDs;
+    for (const auto& token : split(str, ",")) {
+        if (token.size() <= 1 || token[0] != '!') {
+            return false;
+        }
+        try {
+            size_t parsedLength = 0;
+            const auto trackID = std::stoi(token.substr(1), &parsedLength);
+            if (trackID < 1 || parsedLength != token.size() - 1) {
+                return false;
+            }
+            parsedTrackIDs.push_back(trackID);
+        } catch (...) {
+            return false;
+        }
+    }
+    mergeTrackExclusions(trackIDs, parsedTrackIDs);
+    return !trackIDs.empty();
+}
+
 static int getAudioTrackIdx(const RGYParamCommon *common, const int iTrack, const std::string& lang, const std::string& selectCodec) {
-    if (iTrack == TRACK_SELECT_BY_LANG_EXCLUDE) {
+    if (iTrack == TRACK_SELECT_BY_LANG_EXCLUDE || iTrack == TRACK_SELECT_BY_TRACK_EXCLUDE) {
         for (int i = 0; i < common->nAudioSelectCount; i++) {
-            if (common->ppAudioSelectList[i]->trackID == TRACK_SELECT_BY_LANG_EXCLUDE) {
+            if (common->ppAudioSelectList[i]->trackID == iTrack) {
                 return i;
             }
         }
@@ -492,9 +523,9 @@ static int getFreeAudioTrack(const RGYParamCommon *common) {
 }
 
 static int getSubTrackIdx(const RGYParamCommon *common, const int iTrack, const std::string& lang, const std::string& selectCodec) {
-    if (iTrack == TRACK_SELECT_BY_LANG_EXCLUDE) {
+    if (iTrack == TRACK_SELECT_BY_LANG_EXCLUDE || iTrack == TRACK_SELECT_BY_TRACK_EXCLUDE) {
         for (int i = 0; i < common->nSubtitleSelectCount; i++) {
-            if (common->ppSubtitleSelectList[i]->trackID == TRACK_SELECT_BY_LANG_EXCLUDE) {
+            if (common->ppSubtitleSelectList[i]->trackID == iTrack) {
                 return i;
             }
         }
@@ -523,7 +554,13 @@ static int getSubTrackIdx(const RGYParamCommon *common, const int iTrack, const 
 }
 
 static int getDataTrackIdx(const RGYParamCommon *common, const int iTrack, const std::string& lang, const std::string& selectCodec) {
-    if (iTrack == TRACK_SELECT_BY_LANG) {
+    if (iTrack == TRACK_SELECT_BY_LANG_EXCLUDE || iTrack == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+        for (int i = 0; i < common->nDataSelectCount; i++) {
+            if (common->ppDataSelectList[i]->trackID == iTrack) {
+                return i;
+            }
+        }
+    } else if (iTrack == TRACK_SELECT_BY_LANG) {
         if (lang.length() == 0) return -1;
         for (int i = 0; i < common->nDataSelectCount; i++) {
             if (lang == common->ppDataSelectList[i]->lang) {
@@ -597,6 +634,158 @@ int handle_vpp_onnx_list_models(const RGYParamVpp *vpp) {
     return 1;
 }
 
+static const CX_DESC list_vpp_nnedi_upscale_shift[] = {
+    { _T("linear"), 0 },
+    { _T("cubic"),  1 },
+    { nullptr, 0 }
+};
+
+// NNEDIのネットワーク設定は通常版と2倍拡大版で共通化する。
+// 戻り値: 0=処理済み、1=エラー、-1=未知のパラメータ。
+static int parse_one_nnedi_param(VppNnedi& nnedi, const tstring& param_arg, const tstring& param_val,
+    const TCHAR *option_name, const bool allowFieldPlanes) {
+    const auto invalid = [&]() {
+        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+        return 1;
+    };
+    const auto parse_int = [&](int *dst) {
+        try {
+            size_t idx = 0;
+            *dst = std::stoi(param_val, &idx);
+            return (idx == param_val.length()) ? 0 : invalid();
+        } catch (...) {
+            return invalid();
+        }
+    };
+    const auto parse_bool = [&](bool *dst) {
+        bool value = false;
+        if (cmd_string_to_bool(&value, param_val)) return invalid();
+        *dst = value;
+        return 0;
+    };
+
+    if (allowFieldPlanes && param_arg == _T("enable")) {
+        return parse_bool(&nnedi.enable);
+    }
+    if (allowFieldPlanes && param_arg == _T("planes")) {
+        nnedi.planes = { false, false, false };
+        if (param_val == _T("all")) {
+            nnedi.planes = { true, true, true };
+        } else {
+            for (const auto& plane : split(param_val, _T(":"))) {
+                if      (plane == _T("y")) nnedi.planes[0] = true;
+                else if (plane == _T("u")) nnedi.planes[1] = true;
+                else if (plane == _T("v")) nnedi.planes[2] = true;
+                else {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val,
+                        _T("Supported values: all, or \":\"-separated list of y, u, v (e.g. y:u:v)."));
+                    return 1;
+                }
+            }
+        }
+        return 0;
+    }
+    if (allowFieldPlanes && param_arg == _T("field")) {
+        int value = 0;
+        if (!get_list_value(list_vpp_nnedi_field, param_val.c_str(), &value)) {
+            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_vpp_nnedi_field);
+            return 1;
+        }
+        nnedi.field = (VppNnediField)value;
+        return 0;
+    }
+    if (param_arg == _T("nsize")) {
+        int value = 0;
+        if (!get_list_value(list_vpp_nnedi_nsize, param_val.c_str(), &value)) {
+            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_vpp_nnedi_nsize);
+            return 1;
+        }
+        nnedi.nsize = (VppNnediNSize)value;
+        return 0;
+    }
+    if (param_arg == _T("nns")) {
+        int value = 0;
+        if (!get_list_value(list_vpp_nnedi_nns, param_val.c_str(), &value)) {
+            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_vpp_nnedi_nns);
+            return 1;
+        }
+        nnedi.nns = value;
+        return 0;
+    }
+    if (param_arg == _T("quality")) {
+        int value = 0;
+        if (!get_list_value(list_vpp_nnedi_quality, param_val.c_str(), &value)) {
+            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_vpp_nnedi_quality);
+            return 1;
+        }
+        nnedi.quality = (VppNnediQuality)value;
+        return 0;
+    }
+    if (param_arg == _T("prescreen")) {
+        if (parse_int(&nnedi.prescreen)) return 1;
+        if (nnedi.prescreen < 2 || nnedi.prescreen > 4) {
+            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val,
+                _T("prescreen should be 2, 3, or 4."));
+            return 1;
+        }
+        return 0;
+    }
+    if (param_arg == _T("errortype")) {
+        int value = 0;
+        if (!get_list_value(list_vpp_nnedi_error_type, param_val.c_str(), &value)) {
+            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_vpp_nnedi_error_type);
+            return 1;
+        }
+        nnedi.errortype = (VppNnediErrorType)value;
+        return 0;
+    }
+    if (param_arg == _T("prec")) {
+        return 0;
+    }
+    if (param_arg == _T("clamp")) {
+        if (parse_int(&nnedi.clamp)) return 1;
+        if (nnedi.clamp < 0 || nnedi.clamp > 4) {
+            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val,
+                _T("clamp should be 0 - 4."));
+            return 1;
+        }
+        return 0;
+    }
+    if (allowFieldPlanes && param_arg == _T("double_height")) {
+        return parse_bool(&nnedi.doubleHeight);
+    }
+    if (param_arg == _T("weightfile")) {
+        nnedi.weightfile = trim(param_val, _T("\"")).c_str();
+        if (nnedi.weightfile.empty()) return invalid();
+        return 0;
+    }
+    return -1;
+}
+
+static int parse_one_nnedi_upscale_param(VppNnediUpscale& upscale, const tstring& param_arg,
+    const tstring& param_val, const TCHAR *option_name) {
+    if (param_arg == _T("enable")) {
+        bool value = false;
+        if (cmd_string_to_bool(&value, param_val)) {
+            print_cmd_error_invalid_value(tstring(option_name) + _T(" enable="), param_val);
+            return 1;
+        }
+        upscale.enable = value;
+        return 0;
+    }
+    if (param_arg == _T("shift")) {
+        int value = 0;
+        if (!get_list_value(list_vpp_nnedi_upscale_shift, param_val.c_str(), &value)) {
+            print_cmd_error_invalid_value(tstring(option_name) + _T(" shift="), param_val,
+                list_vpp_nnedi_upscale_shift);
+            return 1;
+        }
+        upscale.shiftCubic = value != 0;
+        return 0;
+    }
+    return parse_one_nnedi_param(upscale.nnedi, param_arg, param_val, option_name, false);
+}
+
 int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int &i, int nArgNum, RGYParamVpp *vpp, sArgsData *argData) {
     if (IS_OPTION("vpp-order") && ENABLE_VPP_ORDER) {
         i++;
@@ -627,7 +816,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
     if (IS_OPTION("vpp-resize")
         || (IS_OPTION("vpp-scaling") && ENCODER_QSV)) {
         i++;
-        if (ENABLE_LIBPLACEBO) {
+        if (ENABLE_LIBPLACEBO || ENABLE_OPENCL || ENCODER_NVENC) {
             ///////////////////////////////////////////////////////////////////////////////////////
             // パラメータを追加したら、paramsResizeLibPlaceboにも追加する！！
             ///////////////////////////////////////////////////////////////////////////////////////
@@ -654,6 +843,9 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
             vector_cat(paramList, paramListResizeFsr1);
             for (const auto& prm : paramListResizeNis) {
                 if (ENABLE_OPENCL || prm != "opt") paramList.push_back(prm); // optはOpenCLフィルタ実装でのみ対応
+            }
+            for (size_t ielem = 0; ielem < _countof(paramsResizeDpid); ielem++) {
+                paramList.push_back(paramsResizeDpid[ielem]);
             }
             for (size_t ielem = 0; ielem < _countof(paramsResizeBicubic); ielem++) {
                 paramList.push_back(paramsResizeBicubic[ielem]);
@@ -760,6 +952,23 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                         const float val = (preScanAlgo == RGY_VPP_RESIZE_NIS) ? vpp->resize_nis.sharpness : vpp->resize_fsr1.sharpness;
                         if (val < 0.0f || val > 1.0f) {
                             print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, _T("sharpness should be 0.0 - 1.0."));
+                            return 1;
+                        }
+                        continue;
+                    }
+                    if (param_arg == _T("dpid_lambda")) {
+                        try {
+                            size_t idx = 0;
+                            const float value = std::stof(param_val, &idx);
+                            if (idx != param_val.length() || !std::isfinite(value)
+                                || value < FILTER_MIN_RESIZE_DPID_LAMBDA || value > FILTER_MAX_RESIZE_DPID_LAMBDA) {
+                                print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val,
+                                    _T("dpid_lambda should be 0.0 - 4.0."));
+                                return 1;
+                            }
+                            vpp->resize_dpid.lambda = value;
+                        } catch (...) {
+                            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
                             return 1;
                         }
                         continue;
@@ -2124,141 +2333,42 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
             return 0;
         }
         i++;
-
         const auto paramList = std::vector<std::string>{ "enable", "planes", "field", "nsize", "nns", "quality", "prescreen", "errortype", "prec", "clamp", "double_height", "weightfile" };
-        const auto parse_nnedi_int = [&](int *dst, const tstring& param_arg, const tstring& param_val) {
-            try {
-                size_t idx = 0;
-                *dst = std::stoi(param_val, &idx);
-                if (idx != param_val.length()) {
-                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
-                    return 1;
-                }
-            } catch (...) {
-                print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
-                return 1;
-            }
-            return 0;
-        };
-        const auto parse_nnedi_bool = [&](bool *dst, const tstring& param_arg, const tstring& param_val) {
-            bool b = false;
-            if (!cmd_string_to_bool(&b, param_val)) {
-                *dst = b;
-            } else {
-                print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
-                return 1;
-            }
-            return 0;
-        };
-
         for (const auto& param : split(strInput[i], _T(","))) {
-            auto pos = param.find_first_of(_T("="));
-            if (pos != std::string::npos) {
-                auto param_arg = tolowercase(param.substr(0, pos));
-                auto param_val = param.substr(pos + 1);
-                if (param_arg == _T("enable")) {
-                    if (parse_nnedi_bool(&vpp->nnedi.enable, param_arg, param_val)) return 1;
-                    continue;
-                }
-                if (param_arg == _T("planes")) {
-                    //y,u,v(,)区切り、または all
-                    vpp->nnedi.planes = { false, false, false };
-                    if (param_val == _T("all")) {
-                        vpp->nnedi.planes = { true, true, true };
-                    } else {
-                        for (const auto& plane : split(param_val, _T(":"))) {
-                            if      (plane == _T("y")) vpp->nnedi.planes[0] = true;
-                            else if (plane == _T("u")) vpp->nnedi.planes[1] = true;
-                            else if (plane == _T("v")) vpp->nnedi.planes[2] = true;
-                            else {
-                                print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, _T("Supported values: all, or \":\"-separated list of y, u, v (e.g. y:u:v)."));
-                                return 1;
-                            }
-                        }
-                    }
-                    continue;
-                }
-                if (param_arg == _T("field")) {
-                    int value = 0;
-                    if (get_list_value(list_vpp_nnedi_field, param_val.c_str(), &value)) {
-                        vpp->nnedi.field = (VppNnediField)value;
-                    } else {
-                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_vpp_nnedi_field);
-                        return 1;
-                    }
-                    continue;
-                }
-                if (param_arg == _T("nsize")) {
-                    int value = 0;
-                    if (get_list_value(list_vpp_nnedi_nsize, param_val.c_str(), &value)) {
-                        vpp->nnedi.nsize = (VppNnediNSize)value;
-                    } else {
-                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_vpp_nnedi_nsize);
-                        return 1;
-                    }
-                    continue;
-                }
-                if (param_arg == _T("nns")) {
-                    int value = 0;
-                    if (get_list_value(list_vpp_nnedi_nns, param_val.c_str(), &value)) {
-                        vpp->nnedi.nns = value;
-                    } else {
-                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_vpp_nnedi_nns);
-                        return 1;
-                    }
-                    continue;
-                }
-                if (param_arg == _T("quality")) {
-                    int value = 0;
-                    if (get_list_value(list_vpp_nnedi_quality, param_val.c_str(), &value)) {
-                        vpp->nnedi.quality = (VppNnediQuality)value;
-                    } else {
-                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_vpp_nnedi_quality);
-                        return 1;
-                    }
-                    continue;
-                }
-                if (param_arg == _T("prescreen")) {
-                    if (parse_nnedi_int(&vpp->nnedi.prescreen, param_arg, param_val)) return 1;
-                    if (vpp->nnedi.prescreen < 2 || vpp->nnedi.prescreen > 4) {
-                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, _T("prescreen should be 2, 3, or 4."));
-                        return 1;
-                    }
-                    continue;
-                }
-                if (param_arg == _T("errortype")) {
-                    int value = 0;
-                    if (get_list_value(list_vpp_nnedi_error_type, param_val.c_str(), &value)) {
-                        vpp->nnedi.errortype = (VppNnediErrorType)value;
-                    } else {
-                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_vpp_nnedi_error_type);
-                        return 1;
-                    }
-                    continue;
-                }
-                if (param_arg == _T("prec")) {
-                    continue;
-                }
-                if (param_arg == _T("clamp")) {
-                    if (parse_nnedi_int(&vpp->nnedi.clamp, param_arg, param_val)) return 1;
-                    if (vpp->nnedi.clamp < 0 || vpp->nnedi.clamp > 4) {
-                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, _T("clamp should be 0 - 4."));
-                        return 1;
-                    }
-                    continue;
-                }
-                if (param_arg == _T("double_height")) {
-                    if (parse_nnedi_bool(&vpp->nnedi.doubleHeight, param_arg, param_val)) return 1;
-                    continue;
-                }
-                if (param_arg == _T("weightfile")) {
-                    vpp->nnedi.weightfile = trim(param_val, _T("\"")).c_str();
-                    continue;
-                }
+            const auto pos = param.find_first_of(_T("="));
+            if (pos == std::string::npos) {
+                print_cmd_error_unknown_opt_param(option_name, param, paramList);
+                return 1;
+            }
+            const auto param_arg = tolowercase(param.substr(0, pos));
+            const auto param_val = param.substr(pos + 1);
+            const auto result = parse_one_nnedi_param(vpp->nnedi, param_arg, param_val, option_name, true);
+            if (result > 0) return 1;
+            if (result < 0) {
                 print_cmd_error_unknown_opt_param(option_name, param_arg, paramList);
                 return 1;
-            } else {
+            }
+        }
+        return 0;
+    }
+
+    if (IS_OPTION("vpp-nnedi-upscale") && ENABLE_VPP_FILTER_NNEDI_UPSCALE) {
+        vpp->nnediUpscale.enable = true;
+        if (i + 1 >= nArgNum || strInput[i + 1][0] == _T('-')) return 0;
+        i++;
+        const auto paramList = std::vector<std::string>{ "enable", "nsize", "nns", "quality", "prescreen", "errortype", "prec", "clamp", "shift", "weightfile" };
+        for (const auto& param : split(strInput[i], _T(","))) {
+            const auto pos = param.find_first_of(_T("="));
+            if (pos == std::string::npos) {
                 print_cmd_error_unknown_opt_param(option_name, param, paramList);
+                return 1;
+            }
+            const auto param_arg = tolowercase(param.substr(0, pos));
+            const auto param_val = param.substr(pos + 1);
+            const auto result = parse_one_nnedi_upscale_param(vpp->nnediUpscale, param_arg, param_val, option_name);
+            if (result > 0) return 1;
+            if (result < 0) {
+                print_cmd_error_unknown_opt_param(option_name, param_arg, paramList);
                 return 1;
             }
         }
@@ -5583,6 +5693,99 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
         }
         return 0;
     }
+    if (IS_OPTION("vpp-bm3d") && ENABLE_VPP_FILTER_DENOISE_BM3D) {
+        vpp->bm3d.enable = true;
+        if (i+1 >= nArgNum || strInput[i+1][0] == _T('-')) {
+            return 0;
+        }
+        i++;
+        const auto paramList = std::vector<std::string>{ "enable", "profile", "sigma", "block_step", "group_size", "bm_range", "radius", "chroma" };
+        for (const auto& param : split(strInput[i], _T(","))) {
+            auto pos = param.find_first_of(_T("="));
+            if (pos != std::string::npos) {
+                auto param_arg = param.substr(0, pos);
+                auto param_val = param.substr(pos+1);
+                param_arg = tolowercase(param_arg);
+                if (param_arg == _T("enable")) {
+                    bool b = false;
+                    if (!cmd_string_to_bool(&b, param_val)) {
+                        vpp->bm3d.enable = b;
+                    } else {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                        return 1;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("profile")) {
+                    // Presets for block_step / group_size / bm_range. Anything
+                    // given after profile= overrides the preset.
+                    static const CX_DESC bm3d_profile_list[] = {
+                        { _T("fast"), 0 }, { _T("lc"), 1 }, { _T("np"), 2 }, { _T("high"), 3 }, { NULL, 0 }
+                    };
+                    int p = 0;
+                    if (!get_list_value(bm3d_profile_list, param_val.c_str(), &p)) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, bm3d_profile_list);
+                        return 1;
+                    }
+                    switch (p) {
+                    case 1: vpp->bm3d.block_step = 6; vpp->bm3d.group_size = 8;  vpp->bm3d.bm_range = 9;  break;
+                    case 2: vpp->bm3d.block_step = 4; vpp->bm3d.group_size = 16; vpp->bm3d.bm_range = 16; break;
+                    case 3: vpp->bm3d.block_step = 3; vpp->bm3d.group_size = 16; vpp->bm3d.bm_range = 16; break;
+                    default: vpp->bm3d.block_step = 8; vpp->bm3d.group_size = 8; vpp->bm3d.bm_range = 9;  break;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("sigma")) {
+                    try {
+                        size_t parsed = 0;
+                        const float value = std::stof(param_val, &parsed);
+                        if (parsed != param_val.length() || !std::isfinite(value)) {
+                            throw std::invalid_argument("invalid float");
+                        }
+                        vpp->bm3d.sigma = value;
+                    } catch (...) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                        return 1;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("chroma")) {
+                    bool b = false;
+                    if (!cmd_string_to_bool(&b, param_val)) {
+                        vpp->bm3d.chroma = b;
+                    } else {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                        return 1;
+                    }
+                    continue;
+                }
+                int *ivalue = nullptr;
+                if      (param_arg == _T("block_step")) ivalue = &vpp->bm3d.block_step;
+                else if (param_arg == _T("group_size")) ivalue = &vpp->bm3d.group_size;
+                else if (param_arg == _T("bm_range"))   ivalue = &vpp->bm3d.bm_range;
+                else if (param_arg == _T("radius"))     ivalue = &vpp->bm3d.radius;
+                if (ivalue != nullptr) {
+                    try {
+                        size_t parsed = 0;
+                        const int value = std::stoi(param_val, &parsed);
+                        if (parsed != param_val.length()) {
+                            throw std::invalid_argument("trailing characters");
+                        }
+                        *ivalue = value;
+                    } catch (...) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                        return 1;
+                    }
+                    continue;
+                }
+                print_cmd_error_unknown_opt_param(option_name, param_arg, paramList);
+                return 1;
+            }
+            print_cmd_error_unknown_opt_param(option_name, param, paramList);
+            return 1;
+        }
+        return 0;
+    }
     if (IS_OPTION("vpp-hqdn3d") && ENABLE_VPP_FILTER_HQDN3D) {
         vpp->hqdn3d.enable = true;
         if (i + 1 >= nArgNum || strInput[i + 1][0] == _T('-')) {
@@ -6171,7 +6374,9 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
             return 0;
         }
         i++;
-        const auto paramList = std::vector<std::string>{ "enable", "model", "device", "multi", "colormatrix", "colorrange" };
+        const auto paramList = std::vector<std::string>{ "enable", "model", "device", "multi", "fps", "colormatrix", "colorrange" };
+        bool multiSpecified = false;
+        bool fpsSpecified = false;
         for (const auto& param : split(strInput[i], _T(","))) {
             const auto pos = param.find_first_of(_T("="));
             if (pos == tstring::npos) {
@@ -6190,6 +6395,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
             } else if (name == _T("device")) {
                 vpp->rife_ov.device = touppercase(value);
             } else if (name == _T("multi")) {
+                multiSpecified = true;
                 try {
                     vpp->rife_ov.multi = std::stoi(value);
                 } catch (...) {
@@ -6199,6 +6405,48 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                     print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + name + _T("="), value, _T("multi must be an integer >= 2"));
                     return 1;
                 }
+            } else if (name == _T("fps")) {
+                fpsSpecified = true;
+                int fpsN = 0, fpsD = 0;
+                const auto parseInt = [](const tstring& str, int& result) {
+                    size_t parsed = 0;
+                    try {
+                        result = std::stoi(str, &parsed);
+                    } catch (...) {
+                        return false;
+                    }
+                    return parsed == str.size();
+                };
+                const auto slash = value.find(_T('/'));
+                if (slash != tstring::npos) {
+                    if (slash == 0 || slash + 1 >= value.size() || value.find(_T('/'), slash + 1) != tstring::npos
+                        || !parseInt(value.substr(0, slash), fpsN) || !parseInt(value.substr(slash + 1), fpsD)) {
+                        fpsN = 0;
+                        fpsD = 0;
+                    }
+                } else {
+                    double fpsValue = 0.0;
+                    size_t parsed = 0;
+                    try {
+                        fpsValue = std::stod(value, &parsed);
+                    } catch (...) {
+                        fpsValue = 0.0;
+                    }
+                    if (parsed == value.size() && std::isfinite(fpsValue) && fpsValue > 0.0
+                        && fpsValue <= (double)std::numeric_limits<int>::max() / 1000.0) {
+                        if (std::abs(fpsValue - 24000.0 / 1001.0) < 0.01) { fpsN = 24000; fpsD = 1001; }
+                        else if (std::abs(fpsValue - 30000.0 / 1001.0) < 0.01) { fpsN = 30000; fpsD = 1001; }
+                        else if (std::abs(fpsValue - 60000.0 / 1001.0) < 0.01) { fpsN = 60000; fpsD = 1001; }
+                        else if (std::abs(fpsValue - 120000.0 / 1001.0) < 0.01) { fpsN = 120000; fpsD = 1001; }
+                        else { fpsN = (int)(fpsValue * 1000.0 + 0.5); fpsD = 1000; }
+                    }
+                }
+                if (fpsN <= 0 || fpsD <= 0) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + name + _T("="), value,
+                        _T("fps must be a positive rate, given as a ratio or a decimal"));
+                    return 1;
+                }
+                vpp->rife_ov.fps = rgy_rational<int>(fpsN, fpsD);
             } else if (name == _T("colormatrix")) {
                 const auto normalized = tolowercase(value);
                 if (normalized != _T("auto") && normalized != _T("bt601") && normalized != _T("bt709") && normalized != _T("bt2020")) {
@@ -6217,6 +6465,9 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                 print_cmd_error_unknown_opt_param(option_name, name, paramList);
                 return 1;
             }
+        }
+        if (multiSpecified && fpsSpecified) {
+            _ftprintf(stderr, _T("Warning: --vpp-rife-ov fps= overrides multi=.\n"));
         }
         return 0;
     }
@@ -7790,7 +8041,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
             return 0;
         }
         i++;
-        const auto paramList = std::vector<std::string>{ "enable", "qp", "alpha", "beta", "chroma" };
+        const auto paramList = std::vector<std::string>{ "enable", "qp", "alpha", "beta", "chroma", "grid" };
         for (const auto &param : split(strInput[i], _T(","))) {
             auto pos = param.find_first_of(_T("="));
             if (pos != std::string::npos) {
@@ -7831,6 +8082,21 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                         print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
                         return 1;
                     }
+                    continue;
+                }
+                if (param_arg == _T("grid")) {
+                    static const CX_DESC deblock_grid_list[] = {
+                        { _T("4"), 4 }, { _T("8"), 8 },
+                        { _T("h264"), 4 }, { _T("avc"), 4 },
+                        { _T("mpeg2"), 8 }, { _T("mpeg4"), 8 },
+                        { NULL, 0 }
+                    };
+                    int v = 0;
+                    if (!get_list_value(deblock_grid_list, param_val.c_str(), &v)) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, deblock_grid_list);
+                        return 1;
+                    }
+                    vpp->deblock.grid = v;
                     continue;
                 }
                 if (param_arg == _T("chroma")) {
@@ -8021,7 +8287,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
             return 0;
         }
         i++;
-        const auto paramList = std::vector<std::string>{ "enable", "mode", "space", "matrix", "white", "black", "white_r", "white_g", "white_b", "black_r", "black_g", "black_b", "frames", "strength", "variance_threshold" };
+        const auto paramList = std::vector<std::string>{ "enable", "mode", "space", "matrix", "white", "black", "white_r", "white_g", "white_b", "black_r", "black_g", "black_b", "frames", "strength", "variance_threshold", "temperature" };
         auto parse_color = [&](const tstring& value, int& r, int& g, int& b) {
             auto v = tolowercase(value);
             if (v.size() == 7 && v[0] == _T('#')) {
@@ -8122,9 +8388,16 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                 }
                 if (param_arg == _T("white_r") || param_arg == _T("white_g") || param_arg == _T("white_b")
                     || param_arg == _T("black_r") || param_arg == _T("black_g") || param_arg == _T("black_b")
-                    || param_arg == _T("frames")) {
+                    || param_arg == _T("frames") || param_arg == _T("temperature")) {
                     try {
-                        const auto value = std::stoi(param_val);
+                        size_t idx = 0;
+                        const auto value = std::stoi(param_val, &idx);
+                        if (idx != param_val.length()
+                            || (param_arg == _T("temperature") && value != FILTER_DEFAULT_COLORFIX_TEMPERATURE
+                                && (value < FILTER_MIN_COLORFIX_TEMPERATURE || value > FILTER_MAX_COLORFIX_TEMPERATURE))) {
+                            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                            return 1;
+                        }
                         if (param_arg == _T("white_r")) vpp->colorfix.whiteR = value;
                         if (param_arg == _T("white_g")) vpp->colorfix.whiteG = value;
                         if (param_arg == _T("white_b")) vpp->colorfix.whiteB = value;
@@ -8132,6 +8405,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                         if (param_arg == _T("black_g")) vpp->colorfix.blackG = value;
                         if (param_arg == _T("black_b")) vpp->colorfix.blackB = value;
                         if (param_arg == _T("frames"))  vpp->colorfix.frames = value;
+                        if (param_arg == _T("temperature")) vpp->colorfix.temperature = value;
                     } catch (...) {
                         print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
                         return 1;
@@ -8550,6 +8824,179 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
         }
         if (searchRadeSet && !searchRadiSet) {
             vpp->finedehalo.searchRadi = vpp->finedehalo.searchRade;
+        }
+        return 0;
+    }
+    if (IS_OPTION("vpp-guidedfilter") && ENABLE_VPP_FILTER_GUIDEDFILTER) {
+        vpp->guidedfilter.enable = true;
+        if (i + 1 >= nArgNum || strInput[i + 1][0] == _T('-')) {
+            return 0;
+        }
+        i++;
+        const auto paramList = std::vector<std::string>{ "enable", "radius", "eps", "chroma" };
+        for (const auto& param : split(strInput[i], _T(","))) {
+            const auto pos = param.find_first_of(_T("="));
+            if (pos == tstring::npos) {
+                print_cmd_error_unknown_opt_param(option_name, param, paramList);
+                return 1;
+            }
+            const auto param_arg = tolowercase(param.substr(0, pos));
+            const auto param_val = param.substr(pos + 1);
+            if (param_arg == _T("enable")) {
+                bool value = false;
+                if (cmd_string_to_bool(&value, param_val)) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                    return 1;
+                }
+                vpp->guidedfilter.enable = value;
+            } else if (param_arg == _T("radius")) {
+                try {
+                    size_t parsed = 0;
+                    vpp->guidedfilter.radius = std::stoi(param_val, &parsed);
+                    if (parsed != param_val.length()) {
+                        throw std::invalid_argument("trailing characters");
+                    }
+                } catch (...) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                    return 1;
+                }
+            } else if (param_arg == _T("eps")) {
+                try {
+                    size_t parsed = 0;
+                    vpp->guidedfilter.eps = std::stof(param_val, &parsed);
+                    if (parsed != param_val.length() || !std::isfinite(vpp->guidedfilter.eps)) {
+                        throw std::invalid_argument("invalid float");
+                    }
+                } catch (...) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                    return 1;
+                }
+            } else if (param_arg == _T("chroma")) {
+                bool value = false;
+                if (cmd_string_to_bool(&value, param_val)) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                    return 1;
+                }
+                vpp->guidedfilter.chroma = value;
+            } else {
+                print_cmd_error_unknown_opt_param(option_name, param_arg, paramList);
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if (IS_OPTION("vpp-clahe") && ENABLE_VPP_FILTER_CLAHE) {
+        vpp->clahe.enable = true;
+        if (i + 1 >= nArgNum || strInput[i + 1][0] == _T('-')) {
+            return 0;
+        }
+        i++;
+        const auto paramList = std::vector<std::string>{ "enable", "tiles_x", "tiles_y", "slope" };
+        for (const auto& param : split(strInput[i], _T(","))) {
+            const auto pos = param.find_first_of(_T("="));
+            if (pos == tstring::npos) {
+                print_cmd_error_unknown_opt_param(option_name, param, paramList);
+                return 1;
+            }
+            const auto param_arg = tolowercase(param.substr(0, pos));
+            const auto param_val = param.substr(pos + 1);
+            if (param_arg == _T("enable")) {
+                bool value = false;
+                if (cmd_string_to_bool(&value, param_val)) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                    return 1;
+                }
+                vpp->clahe.enable = value;
+            } else if (param_arg == _T("tiles_x") || param_arg == _T("tiles_y")) {
+                try {
+                    size_t parsed = 0;
+                    const int value = std::stoi(param_val, &parsed);
+                    if (parsed != param_val.length()) {
+                        throw std::invalid_argument("trailing characters");
+                    }
+                    if (param_arg == _T("tiles_x")) {
+                        vpp->clahe.tiles_x = value;
+                    } else {
+                        vpp->clahe.tiles_y = value;
+                    }
+                } catch (...) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                    return 1;
+                }
+            } else if (param_arg == _T("slope")) {
+                try {
+                    size_t parsed = 0;
+                    vpp->clahe.slope = std::stof(param_val, &parsed);
+                    if (parsed != param_val.length() || !std::isfinite(vpp->clahe.slope)) {
+                        throw std::invalid_argument("invalid float");
+                    }
+                } catch (...) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                    return 1;
+                }
+            } else {
+                print_cmd_error_unknown_opt_param(option_name, param_arg, paramList);
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if (IS_OPTION("vpp-dehaze") && ENABLE_VPP_FILTER_DEHAZE) {
+        vpp->dehaze.enable = true;
+        if (i + 1 >= nArgNum || strInput[i + 1][0] == _T('-')) {
+            return 0;
+        }
+        i++;
+        const auto paramList = std::vector<std::string>{ "enable", "patch_radius", "omega", "t_floor", "atm_light" };
+        for (const auto& param : split(strInput[i], _T(","))) {
+            const auto pos = param.find_first_of(_T("="));
+            if (pos == tstring::npos) {
+                print_cmd_error_unknown_opt_param(option_name, param, paramList);
+                return 1;
+            }
+            const auto paramArg = tolowercase(param.substr(0, pos));
+            const auto paramValue = param.substr(pos + 1);
+            if (paramArg == _T("enable")) {
+                bool value = false;
+                if (cmd_string_to_bool(&value, paramValue)) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + paramArg + _T("="), paramValue);
+                    return 1;
+                }
+                vpp->dehaze.enable = value;
+            } else if (paramArg == _T("patch_radius")) {
+                try {
+                    size_t parsed = 0;
+                    vpp->dehaze.patch_radius = std::stoi(paramValue, &parsed);
+                    if (parsed != paramValue.length()) {
+                        throw std::invalid_argument("trailing characters");
+                    }
+                } catch (...) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + paramArg + _T("="), paramValue);
+                    return 1;
+                }
+            } else if (paramArg == _T("omega") || paramArg == _T("t_floor") || paramArg == _T("atm_light")) {
+                float value = 0.0f;
+                try {
+                    size_t parsed = 0;
+                    value = std::stof(paramValue, &parsed);
+                    if (parsed != paramValue.length() || !std::isfinite(value)) {
+                        throw std::invalid_argument("invalid float");
+                    }
+                } catch (...) {
+                    print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + paramArg + _T("="), paramValue);
+                    return 1;
+                }
+                if (paramArg == _T("omega")) {
+                    vpp->dehaze.omega = value;
+                } else if (paramArg == _T("t_floor")) {
+                    vpp->dehaze.t_floor = value;
+                } else {
+                    vpp->dehaze.atm_light = value;
+                }
+            } else {
+                print_cmd_error_unknown_opt_param(option_name, paramArg, paramList);
+                return 1;
+            }
         }
         return 0;
     }
@@ -9225,7 +9672,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
         }
         i++;
 
-        auto paramList = std::vector<std::string>{ "contrast", "brightness", "gamma", "saturation", "swapuv", "hue", "coring", "start_hue", "end_hue" };
+        auto paramList = std::vector<std::string>{ "contrast", "brightness", "gamma", "saturation", "vibrance", "swapuv", "hue", "coring", "start_hue", "end_hue" };
         for (auto& channel : { "y", "cb", "cr", "r", "g", "b" }) {
             paramList.push_back(std::string(channel) + "_offset");
             paramList.push_back(std::string(channel) + "_gain");
@@ -9280,6 +9727,22 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                 if (param_arg == _T("saturation")) {
                     try {
                         vpp->tweak.saturation = std::stof(param_val);
+                    } catch (...) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                        return 1;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("vibrance")) {
+                    try {
+                        size_t idx = 0;
+                        vpp->tweak.vibrance = std::stof(param_val, &idx);
+                        if (idx != param_val.length() || !std::isfinite(vpp->tweak.vibrance)
+                            || vpp->tweak.vibrance < FILTER_MIN_TWEAK_VIBRANCE
+                            || vpp->tweak.vibrance > FILTER_MAX_TWEAK_VIBRANCE) {
+                            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                            return 1;
+                        }
                     } catch (...) {
                         print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
                         return 1;
@@ -9525,7 +9988,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
             return 0;
         }
         i++;
-        const auto paramList = std::vector<std::string>{ "k1", "k2", "cx", "cy" };
+        const auto paramList = std::vector<std::string>{ "k1", "k2", "cx", "cy", "vignette" };
         for (const auto &param : split(strInput[i], _T(","))) {
             auto pos = param.find_first_of(_T("="));
             if (pos != std::string::npos) {
@@ -9556,6 +10019,21 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                 }
                 if (param_arg == _T("cy")) {
                     try { vpp->lenscorrection.cy = std::stof(param_val); } catch (...) { print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val); return 1; }
+                    continue;
+                }
+                if (param_arg == _T("vignette")) {
+                    try {
+                        size_t idx = 0;
+                        vpp->lenscorrection.vignette = std::stof(param_val, &idx);
+                        if (idx != param_val.length() || !std::isfinite(vpp->lenscorrection.vignette)
+                            || vpp->lenscorrection.vignette < -1.0f || vpp->lenscorrection.vignette > 4.0f) {
+                            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                            return 1;
+                        }
+                    } catch (...) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                        return 1;
+                    }
                     continue;
                 }
                 print_cmd_error_unknown_opt_param(option_name, param_arg, paramList);
@@ -10888,6 +11366,10 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         }
         return 0;
     }
+    if (IS_OPTION("y4m-timestamp")) {
+        common->y4mTimestamp = true;
+        return 0;
+    }
     if (IS_OPTION("input-format")) {
         if (i+1 < nArgNum && strInput[i+1][0] != _T('-')) {
             i++;
@@ -10905,6 +11387,8 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         int trackId = 0;
         std::string lang;
         std::string selectCodec;
+        std::vector<int> excludeTrackIDs;
+        bool invalidTrackSelector = false;
         if (i+1 < nArgNum) {
             int test_val = 0;
             if ((strInput[i+1][0] != _T('-') || (_stscanf_s(strInput[i+1], _T("%d"), &test_val) == 1 && test_val < 0)) && strInput[i+1][0] != _T('\0')) {
@@ -10927,12 +11411,25 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
                     if (std::all_of(langList.begin(), langList.end(), [](const auto& lang) { return rgy_lang_exist(lang); })) {
                         trackId = excludeLang ? TRACK_SELECT_BY_LANG_EXCLUDE : TRACK_SELECT_BY_LANG;
                         lang = langCode;
+                    } else if (parseTrackExclusion(tempc, excludeTrackIDs)) {
+                        trackId = TRACK_SELECT_BY_TRACK_EXCLUDE;
                     } else if (avcodec_exists_audio(tempc)) {
                         trackId = TRACK_SELECT_BY_CODEC;
                         selectCodec = tempc;
+                    } else if (excludeLang) {
+                        invalidTrackSelector = true;
                     }
                 }
             }
+        }
+        if (invalidTrackSelector) {
+            print_cmd_error_invalid_value(option_name, strInput[i]);
+            return 1;
+        }
+        if ((trackId == TRACK_SELECT_BY_TRACK_EXCLUDE && getAudioTrackIdx(common, TRACK_SELECT_BY_LANG_EXCLUDE, "", "") >= 0)
+            || (trackId == TRACK_SELECT_BY_LANG_EXCLUDE && getAudioTrackIdx(common, TRACK_SELECT_BY_TRACK_EXCLUDE, "", "") >= 0)) {
+            print_cmd_error_invalid_value(option_name, strInput[i], _T("language and track exclusions cannot be mixed"));
+            return 1;
         }
         if (ptr == nullptr && !allowNoValue) {
             print_cmd_error_invalid_value(option_name, tstring(), _T("value not specified"));
@@ -10964,6 +11461,9 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         } else {
             pAudioSelect->lang = lang;
         }
+        if (trackId == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+            mergeTrackExclusions(pAudioSelect->excludeTrackIDs, excludeTrackIDs);
+        }
         func_set(pAudioSelect, trackId, ptr);
         if (trackId == 0) {
             for (int itrack = 0; itrack < common->nAudioSelectCount; itrack++) {
@@ -10987,6 +11487,8 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         int trackId = 0;
         std::string lang;
         std::string selectCodec;
+        std::vector<int> excludeTrackIDs;
+        bool invalidTrackSelector = false;
         if (i+1 < nArgNum) {
             if (strInput[i+1][0] != _T('-') && strInput[i+1][0] != _T('\0')) {
                 i++;
@@ -11008,12 +11510,25 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
                     if (std::all_of(langList.begin(), langList.end(), [](const auto& lang) { return rgy_lang_exist(lang); })) {
                         trackId = excludeLang ? TRACK_SELECT_BY_LANG_EXCLUDE : TRACK_SELECT_BY_LANG;
                         lang = langCode;
+                    } else if (parseTrackExclusion(tempc, excludeTrackIDs)) {
+                        trackId = TRACK_SELECT_BY_TRACK_EXCLUDE;
                     } else if (avcodec_exists_subtitle(tempc)) {
                         trackId = TRACK_SELECT_BY_CODEC;
                         selectCodec = tempc;
+                    } else if (excludeLang) {
+                        invalidTrackSelector = true;
                     }
                 }
             }
+        }
+        if (invalidTrackSelector) {
+            print_cmd_error_invalid_value(option_name, strInput[i]);
+            return 1;
+        }
+        if ((trackId == TRACK_SELECT_BY_TRACK_EXCLUDE && getSubTrackIdx(common, TRACK_SELECT_BY_LANG_EXCLUDE, "", "") >= 0)
+            || (trackId == TRACK_SELECT_BY_LANG_EXCLUDE && getSubTrackIdx(common, TRACK_SELECT_BY_TRACK_EXCLUDE, "", "") >= 0)) {
+            print_cmd_error_invalid_value(option_name, strInput[i], _T("language and track exclusions cannot be mixed"));
+            return 1;
         }
         if (ptr == nullptr && !allowNoValue) {
             print_cmd_error_invalid_value(option_name, tstring(), _T("value not specified"));
@@ -11045,6 +11560,9 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         } else {
             pSubSelect->lang = lang;
         }
+        if (trackId == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+            mergeTrackExclusions(pSubSelect->excludeTrackIDs, excludeTrackIDs);
+        }
         func_set(pSubSelect, trackId, ptr);
         if (trackId == 0) {
             for (int itrack = 0; itrack < common->nSubtitleSelectCount; itrack++) {
@@ -11068,6 +11586,8 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         int trackId = 0;
         std::string lang;
         std::string selectCodec;
+        std::vector<int> excludeTrackIDs;
+        bool invalidTrackSelector = false;
         if (i + 1 < nArgNum) {
             if (strInput[i + 1][0] != _T('-') && strInput[i + 1][0] != _T('\0')) {
                 i++;
@@ -11080,15 +11600,34 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
                     trackId = std::stoi(temp);
                 } catch (...) {
                     auto tempc = tchar_to_string(temp);
-                    if (rgy_lang_exist(tempc)) {
-                        trackId = TRACK_SELECT_BY_LANG;
-                        lang = tempc;
+                    const bool excludeLang = !tempc.empty() && tempc[0] == '!';
+                    auto langCode = excludeLang ? tempc.substr(1) : tempc;
+                    if (excludeLang) {
+                        langCode = str_replace(langCode, ",!", ",");
+                    }
+                    const auto langList = split(langCode, ",");
+                    if (std::all_of(langList.begin(), langList.end(), [](const auto& lang) { return rgy_lang_exist(lang); })) {
+                        trackId = excludeLang ? TRACK_SELECT_BY_LANG_EXCLUDE : TRACK_SELECT_BY_LANG;
+                        lang = langCode;
+                    } else if (parseTrackExclusion(tempc, excludeTrackIDs)) {
+                        trackId = TRACK_SELECT_BY_TRACK_EXCLUDE;
                     } else if (avcodec_exists_data(tempc)) {
                         trackId = TRACK_SELECT_BY_CODEC;
                         selectCodec = tempc;
+                    } else if (excludeLang) {
+                        invalidTrackSelector = true;
                     }
                 }
             }
+        }
+        if (invalidTrackSelector) {
+            print_cmd_error_invalid_value(option_name, strInput[i]);
+            return 1;
+        }
+        if ((trackId == TRACK_SELECT_BY_TRACK_EXCLUDE && getDataTrackIdx(common, TRACK_SELECT_BY_LANG_EXCLUDE, "", "") >= 0)
+            || (trackId == TRACK_SELECT_BY_LANG_EXCLUDE && getDataTrackIdx(common, TRACK_SELECT_BY_TRACK_EXCLUDE, "", "") >= 0)) {
+            print_cmd_error_invalid_value(option_name, strInput[i], _T("language and track exclusions cannot be mixed"));
+            return 1;
         }
         if (ptr == nullptr && !allowNoValue) {
             print_cmd_error_invalid_value(option_name, tstring(), _T("value not specified"));
@@ -11115,7 +11654,14 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         } else {
             pSelect = common->ppDataSelectList[dataIdx];
         }
-        pSelect->lang = lang;
+        if (trackId == TRACK_SELECT_BY_LANG_EXCLUDE && !pSelect->lang.empty()) {
+            pSelect->lang += "," + lang;
+        } else {
+            pSelect->lang = lang;
+        }
+        if (trackId == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+            mergeTrackExclusions(pSelect->excludeTrackIDs, excludeTrackIDs);
+        }
         func_set(pSelect, trackId, ptr);
         if (trackId == 0) {
             for (int itrack = 0; itrack < common->nDataSelectCount; itrack++) {
@@ -11137,6 +11683,7 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         using trackID_Lang = std::pair<int, std::string>;
         std::set<trackID_Lang> trackSet; //重複しないよう、setを使う
         std::string excludeLangs;
+        std::vector<int> excludeTrackIDs;
         if (i+1 < nArgNum && (strInput[i+1][0] != _T('-') && strInput[i+1][0] != _T('\0'))) {
             i++;
             auto trackListStr = split(strInput[i], _T(","));
@@ -11152,6 +11699,7 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
                         } else {
                             trackSet.insert(std::make_pair(TRACK_SELECT_BY_LANG, langCode));
                         }
+                    } else if (parseTrackExclusion(strTrack, excludeTrackIDs)) {
                     } else if (avcodec_exists_audio(tchar_to_string(str))) {
                         trackSet.insert(std::make_pair(TRACK_SELECT_BY_CODEC, tchar_to_string(str)));
                     } else {
@@ -11168,6 +11716,17 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         if (!excludeLangs.empty()) {
             trackSet.insert(std::make_pair(TRACK_SELECT_BY_LANG_EXCLUDE, excludeLangs));
         }
+        if (!excludeTrackIDs.empty()) {
+            if (!excludeLangs.empty() || getAudioTrackIdx(common, TRACK_SELECT_BY_LANG_EXCLUDE, "", "") >= 0) {
+                print_cmd_error_invalid_value(option_name, strInput[i], _T("language and track exclusions cannot be mixed"));
+                return 1;
+            }
+            trackSet.insert(std::make_pair(TRACK_SELECT_BY_TRACK_EXCLUDE, ""));
+        }
+        if (!excludeLangs.empty() && getAudioTrackIdx(common, TRACK_SELECT_BY_TRACK_EXCLUDE, "", "") >= 0) {
+            print_cmd_error_invalid_value(option_name, strInput[i], _T("language and track exclusions cannot be mixed"));
+            return 1;
+        }
 
         for (auto it = trackSet.begin(); it != trackSet.end(); it++) {
             AudioSelect *pAudioSelect = nullptr;
@@ -11179,6 +11738,9 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
                 pAudioSelect = common->ppAudioSelectList[audioIdx];
             }
             pAudioSelect->lang = it->second;
+            if (it->first == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+                mergeTrackExclusions(pAudioSelect->excludeTrackIDs, excludeTrackIDs);
+            }
             pAudioSelect->encCodec = RGY_AVCODEC_COPY;
 
             if (audioIdx < 0) {
@@ -11464,6 +12026,7 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         using trackID_Lang = std::pair<int, std::string>;
         std::map<trackID_Lang, SubtitleSelect> trackSet; //重複しないように
         std::string excludeLangs;
+        std::vector<int> excludeTrackIDs;
         if (i+1 < nArgNum && (strInput[i+1][0] != _T('-') && strInput[i+1][0] != _T('\0'))) {
             i++;
             auto trackListStr = split(strInput[i], _T(","));
@@ -11488,6 +12051,7 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
                                 trackSet[track].encCodec = RGY_AVCODEC_COPY;
                                 trackSet[track].lang = langCode;
                             }
+                        } else if (parseTrackExclusion(strTrack, excludeTrackIDs)) {
                         } else if (avcodec_exists(strTrack, AVMEDIA_TYPE_SUBTITLE)) {
                             auto track = std::make_pair(TRACK_SELECT_BY_CODEC, strTrack);
                             trackSet[track].trackID = TRACK_SELECT_BY_CODEC;
@@ -11519,6 +12083,20 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
             trackSet[track].encCodec = RGY_AVCODEC_COPY;
             trackSet[track].lang = excludeLangs;
         }
+        if (!excludeTrackIDs.empty()) {
+            if (!excludeLangs.empty() || getSubTrackIdx(common, TRACK_SELECT_BY_LANG_EXCLUDE, "", "") >= 0) {
+                print_cmd_error_invalid_value(option_name, strInput[i], _T("language and track exclusions cannot be mixed"));
+                return 1;
+            }
+            auto track = std::make_pair(TRACK_SELECT_BY_TRACK_EXCLUDE, "");
+            trackSet[track].trackID = TRACK_SELECT_BY_TRACK_EXCLUDE;
+            trackSet[track].encCodec = RGY_AVCODEC_COPY;
+            trackSet[track].excludeTrackIDs = excludeTrackIDs;
+        }
+        if (!excludeLangs.empty() && getSubTrackIdx(common, TRACK_SELECT_BY_TRACK_EXCLUDE, "", "") >= 0) {
+            print_cmd_error_invalid_value(option_name, strInput[i], _T("language and track exclusions cannot be mixed"));
+            return 1;
+        }
 
         for (auto it = trackSet.begin(); it != trackSet.end(); it++) {
             auto& track = it->first;
@@ -11529,7 +12107,13 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
             } else {
                 pSubtitleSelect = common->ppSubtitleSelectList[subIdx];
             }
-            pSubtitleSelect[0] = it->second;
+            if (track.first == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+                mergeTrackExclusions(pSubtitleSelect->excludeTrackIDs, it->second.excludeTrackIDs);
+                pSubtitleSelect->trackID = track.first;
+                pSubtitleSelect->encCodec = it->second.encCodec;
+            } else {
+                pSubtitleSelect[0] = it->second;
+            }
 
             if (subIdx < 0) {
                 subIdx = common->nSubtitleSelectCount;
@@ -11542,7 +12126,7 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         return 0;
     }
     if (IS_OPTION("sub-codec")) {
-        common->AVMuxTarget |= (RGY_MUX_VIDEO | RGY_MUX_AUDIO);
+        common->AVMuxTarget |= (RGY_MUX_VIDEO | RGY_MUX_SUBTITLE);
         auto ret = set_sub_prm([](SubtitleSelect *pSubSelect, int trackId, const TCHAR *prmstr) {
             if (trackId != 0 || pSubSelect->encCodec.length() == 0) {
                 if (prmstr == nullptr) {
@@ -11674,21 +12258,31 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         common->AVMuxTarget |= (RGY_MUX_VIDEO | RGY_MUX_SUBTITLE);
         using trackID_Lang = std::pair<int, std::string>;
         std::map<trackID_Lang, DataSelect> trackSet; //重複しないように
+        std::string excludeLangs;
+        std::vector<int> excludeTrackIDs;
         if (i+1 < nArgNum && (strInput[i+1][0] != _T('-') && strInput[i+1][0] != _T('\0'))) {
             i++;
             auto trackListStr = split(strInput[i], _T(","));
             for (auto str : trackListStr) {
                 int iTrack = 0;
                 if (1 != _stscanf(str.c_str(), _T("%d"), &iTrack) || iTrack < 1) {
-                    if (rgy_lang_exist(tchar_to_string(str))) {
-                        auto track = std::make_pair(TRACK_SELECT_BY_LANG, tchar_to_string(str));
-                        trackSet[track].trackID = TRACK_SELECT_BY_LANG;
-                        trackSet[track].lang = tchar_to_string(str);
-                        trackSet[track].encCodec = RGY_AVCODEC_COPY;
-                    } else if (avcodec_exists(tchar_to_string(str), AVMEDIA_TYPE_DATA)) {
-                        auto track = std::make_pair(TRACK_SELECT_BY_CODEC, tchar_to_string(str));
+                    const auto strTrack = tchar_to_string(str);
+                    const bool excludeLang = !strTrack.empty() && strTrack[0] == '!';
+                    const auto langCode = excludeLang ? strTrack.substr(1) : strTrack;
+                    if (rgy_lang_exist(langCode)) {
+                        if (excludeLang) {
+                            excludeLangs += (excludeLangs.empty() ? "" : ",") + langCode;
+                        } else {
+                            auto track = std::make_pair(TRACK_SELECT_BY_LANG, langCode);
+                            trackSet[track].trackID = TRACK_SELECT_BY_LANG;
+                            trackSet[track].lang = langCode;
+                            trackSet[track].encCodec = RGY_AVCODEC_COPY;
+                        }
+                    } else if (parseTrackExclusion(strTrack, excludeTrackIDs)) {
+                    } else if (avcodec_exists(strTrack, AVMEDIA_TYPE_DATA)) {
+                        auto track = std::make_pair(TRACK_SELECT_BY_CODEC, strTrack);
                         trackSet[track].trackID = TRACK_SELECT_BY_CODEC;
-                        trackSet[track].selectCodec = tchar_to_string(str);
+                        trackSet[track].selectCodec = strTrack;
                         trackSet[track].encCodec = RGY_AVCODEC_COPY;
                     } else {
                         print_cmd_error_invalid_value(option_name, strInput[i], _T("invalid track ID."));
@@ -11704,6 +12298,26 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
             auto track = std::make_pair(0, "");
             trackSet[track].trackID = 0;
         }
+        if (!excludeLangs.empty()) {
+            auto track = std::make_pair(TRACK_SELECT_BY_LANG_EXCLUDE, excludeLangs);
+            trackSet[track].trackID = TRACK_SELECT_BY_LANG_EXCLUDE;
+            trackSet[track].lang = excludeLangs;
+            trackSet[track].encCodec = RGY_AVCODEC_COPY;
+        }
+        if (!excludeTrackIDs.empty()) {
+            if (!excludeLangs.empty() || getDataTrackIdx(common, TRACK_SELECT_BY_LANG_EXCLUDE, "", "") >= 0) {
+                print_cmd_error_invalid_value(option_name, strInput[i], _T("language and track exclusions cannot be mixed"));
+                return 1;
+            }
+            auto track = std::make_pair(TRACK_SELECT_BY_TRACK_EXCLUDE, "");
+            trackSet[track].trackID = TRACK_SELECT_BY_TRACK_EXCLUDE;
+            trackSet[track].excludeTrackIDs = excludeTrackIDs;
+            trackSet[track].encCodec = RGY_AVCODEC_COPY;
+        }
+        if (!excludeLangs.empty() && getDataTrackIdx(common, TRACK_SELECT_BY_TRACK_EXCLUDE, "", "") >= 0) {
+            print_cmd_error_invalid_value(option_name, strInput[i], _T("language and track exclusions cannot be mixed"));
+            return 1;
+        }
 
         for (auto it = trackSet.begin(); it != trackSet.end(); it++) {
             const auto track = it->first;
@@ -11714,8 +12328,14 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
             } else {
                 pDataSelect = common->ppDataSelectList[dataIdx];
             }
-            pDataSelect[0] = it->second;
-            pDataSelect->encCodec = RGY_AVCODEC_COPY;
+            if (track.first == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+                mergeTrackExclusions(pDataSelect->excludeTrackIDs, it->second.excludeTrackIDs);
+                pDataSelect->trackID = track.first;
+                pDataSelect->encCodec = RGY_AVCODEC_COPY;
+            } else {
+                pDataSelect[0] = it->second;
+                pDataSelect->encCodec = RGY_AVCODEC_COPY;
+            }
 
             if (dataIdx < 0) {
                 dataIdx = common->nDataSelectCount;
@@ -13282,7 +13902,18 @@ tstring gen_cmd(const VideoInfo *param, const VideoInfo *defaultPrm, const RGYPa
     return cmd.str();
 }
 
+static tstring printTrackExclusions(const std::vector<int>& trackIDs) {
+    tstring trackList;
+    for (const auto trackID : trackIDs) {
+        trackList += strsprintf(_T(",!%d"), trackID);
+    }
+    return trackList.empty() ? tstring() : trackList.substr(1);
+}
+
 tstring printTrack(const AudioSelect *sel) {
+    if (sel->trackID == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+        return printTrackExclusions(sel->excludeTrackIDs);
+    }
     auto lang = char_to_tstring(sel->lang);
     if (sel->trackID == TRACK_SELECT_BY_LANG_EXCLUDE) {
         lang = str_replace(lang, _T(","), _T(",!"));
@@ -13291,6 +13922,9 @@ tstring printTrack(const AudioSelect *sel) {
     return sel->trackID == TRACK_SELECT_BY_LANG ? lang : std::to_tstring(sel->trackID);
 };
 tstring printTrack(const SubtitleSelect *sel) {
+    if (sel->trackID == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+        return printTrackExclusions(sel->excludeTrackIDs);
+    }
     auto lang = char_to_tstring(sel->lang);
     if (sel->trackID == TRACK_SELECT_BY_LANG_EXCLUDE) {
         lang = str_replace(lang, _T(","), _T(",!"));
@@ -13299,7 +13933,15 @@ tstring printTrack(const SubtitleSelect *sel) {
     return sel->trackID == TRACK_SELECT_BY_LANG ? lang : std::to_tstring(sel->trackID);
 };
 tstring printTrack(const DataSelect *sel) {
-    return sel->trackID == TRACK_SELECT_BY_LANG ? char_to_tstring(sel->lang) : std::to_tstring(sel->trackID);
+    if (sel->trackID == TRACK_SELECT_BY_TRACK_EXCLUDE) {
+        return printTrackExclusions(sel->excludeTrackIDs);
+    }
+    auto lang = char_to_tstring(sel->lang);
+    if (sel->trackID == TRACK_SELECT_BY_LANG_EXCLUDE) {
+        lang = str_replace(lang, _T(","), _T(",!"));
+        return _T("!") + lang;
+    }
+    return sel->trackID == TRACK_SELECT_BY_LANG ? lang : std::to_tstring(sel->trackID);
 };
 
 // "<トラック指定>?" を出力する
@@ -13349,6 +13991,12 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             }
         } else {
             OPT_LST(_T("--vpp-resize"), resize_algo, list_vpp_resize);
+            if (param->resize_algo == RGY_VPP_RESIZE_DPID) {
+                tmp.str(tstring());
+                tmp.clear();
+                ADD_FLOAT2(_T("dpid_lambda"), param->resize_dpid, defaultPrm->resize_dpid, lambda, 3);
+                cmd << tmp.str();
+            }
             if (param->resize_algo == RGY_VPP_RESIZE_FSR1
                 && param->resize_fsr1.sharpness != defaultPrm->resize_fsr1.sharpness) {
                 cmd << _T(",sharpness=") << std::setprecision(3) << param->resize_fsr1.sharpness;
@@ -13590,6 +14238,29 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             cmd << _T(" --vpp-nnedi ") << tmp.str().substr(1);
         } else if (param->nnedi.enable) {
             cmd << _T(" --vpp-nnedi");
+        }
+    }
+    if (param->nnediUpscale != defaultPrm->nnediUpscale) {
+        tmp.str(tstring());
+        if (!param->nnediUpscale.enable && save_disabled_prm) {
+            tmp << _T(",enable=false");
+        }
+        if (param->nnediUpscale.enable || save_disabled_prm) {
+            ADD_LST(_T("nsize"), nnediUpscale.nnedi.nsize, list_vpp_nnedi_nsize);
+            ADD_LST(_T("nns"), nnediUpscale.nnedi.nns, list_vpp_nnedi_nns);
+            ADD_LST(_T("quality"), nnediUpscale.nnedi.quality, list_vpp_nnedi_quality);
+            ADD_NUM(_T("prescreen"), nnediUpscale.nnedi.prescreen);
+            ADD_LST(_T("errortype"), nnediUpscale.nnedi.errortype, list_vpp_nnedi_error_type);
+            ADD_NUM(_T("clamp"), nnediUpscale.nnedi.clamp);
+            if (param->nnediUpscale.shiftCubic != defaultPrm->nnediUpscale.shiftCubic) {
+                tmp << _T(",shift=") << (param->nnediUpscale.shiftCubic ? _T("cubic") : _T("linear"));
+            }
+            ADD_PATH(_T("weightfile"), nnediUpscale.nnedi.weightfile.c_str());
+        }
+        if (!tmp.str().empty()) {
+            cmd << _T(" --vpp-nnedi-upscale ") << tmp.str().substr(1);
+        } else if (param->nnediUpscale.enable) {
+            cmd << _T(" --vpp-nnedi-upscale");
         }
     }
     if (param->yadif != defaultPrm->yadif) {
@@ -14071,6 +14742,25 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             cmd << _T(" --vpp-pmd");
         }
     }
+    if (param->bm3d != defaultPrm->bm3d) {
+        tmp.str(tstring());
+        if (!param->bm3d.enable && save_disabled_prm) {
+            tmp << _T(",enable=false");
+        }
+        if (param->bm3d.enable || save_disabled_prm) {
+            ADD_FLOAT(_T("sigma"), bm3d.sigma, 3);
+            ADD_NUM(_T("block_step"), bm3d.block_step);
+            ADD_NUM(_T("group_size"), bm3d.group_size);
+            ADD_NUM(_T("bm_range"), bm3d.bm_range);
+            ADD_NUM(_T("radius"), bm3d.radius);
+            ADD_BOOL(_T("chroma"), bm3d.chroma);
+        }
+        if (!tmp.str().empty()) {
+            cmd << _T(" --vpp-bm3d ") << tmp.str().substr(1);
+        } else if (param->bm3d.enable) {
+            cmd << _T(" --vpp-bm3d");
+        }
+    }
     if (param->hqdn3d != defaultPrm->hqdn3d) {
         tmp.str(tstring());
         if (!param->hqdn3d.enable && save_disabled_prm) {
@@ -14199,7 +14889,11 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
         if (param->rife_ov.enable || save_disabled_prm) {
             if (!param->rife_ov.modelFile.empty()) tmp << _T(",model=") << param->rife_ov.modelFile;
             tmp << _T(",device=") << param->rife_ov.device;
-            tmp << _T(",multi=") << param->rife_ov.multi;
+            if (param->rife_ov.fps.is_valid() && param->rife_ov.fps.n() > 0) {
+                tmp << _T(",fps=") << param->rife_ov.fps.n() << _T("/") << param->rife_ov.fps.d();
+            } else {
+                tmp << _T(",multi=") << param->rife_ov.multi;
+            }
             tmp << _T(",colormatrix=") << param->rife_ov.colormatrix;
             tmp << _T(",colorrange=") << param->rife_ov.colorrange;
         }
@@ -14596,6 +15290,7 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             ADD_NUM(_T("alpha"), deblock.alpha);
             ADD_NUM(_T("beta"), deblock.beta);
             ADD_BOOL(_T("chroma"), deblock.chroma);
+            ADD_NUM(_T("grid"), deblock.grid);
         }
         if (!tmp.str().empty()) {
             cmd << _T(" --vpp-deblock ") << tmp.str().substr(1);
@@ -14668,6 +15363,7 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             ADD_NUM(_T("frames"), colorfix.frames);
             ADD_FLOAT(_T("strength"), colorfix.strength, 3);
             ADD_FLOAT(_T("variance_threshold"), colorfix.varianceThreshold, 3);
+            ADD_NUM(_T("temperature"), colorfix.temperature);
         }
         if (!tmp.str().empty()) {
             cmd << _T(" --vpp-colorfix ") << tmp.str().substr(1);
@@ -14746,6 +15442,55 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             cmd << _T(" --vpp-finedehalo ") << tmp.str().substr(1);
         } else if (param->finedehalo.enable) {
             cmd << _T(" --vpp-finedehalo");
+        }
+    }
+    if (param->guidedfilter != defaultPrm->guidedfilter) {
+        tmp.str(tstring());
+        if (!param->guidedfilter.enable && save_disabled_prm) {
+            tmp << _T(",enable=false");
+        }
+        if (param->guidedfilter.enable || save_disabled_prm) {
+            ADD_NUM(_T("radius"), guidedfilter.radius);
+            ADD_FLOAT(_T("eps"), guidedfilter.eps, 4);
+            ADD_BOOL(_T("chroma"), guidedfilter.chroma);
+        }
+        if (!tmp.str().empty()) {
+            cmd << _T(" --vpp-guidedfilter ") << tmp.str().substr(1);
+        } else if (param->guidedfilter.enable) {
+            cmd << _T(" --vpp-guidedfilter");
+        }
+    }
+    if (param->clahe != defaultPrm->clahe) {
+        tmp.str(tstring());
+        if (!param->clahe.enable && save_disabled_prm) {
+            tmp << _T(",enable=false");
+        }
+        if (param->clahe.enable || save_disabled_prm) {
+            ADD_NUM(_T("tiles_x"), clahe.tiles_x);
+            ADD_NUM(_T("tiles_y"), clahe.tiles_y);
+            ADD_FLOAT(_T("slope"), clahe.slope, 3);
+        }
+        if (!tmp.str().empty()) {
+            cmd << _T(" --vpp-clahe ") << tmp.str().substr(1);
+        } else if (param->clahe.enable) {
+            cmd << _T(" --vpp-clahe");
+        }
+    }
+    if (param->dehaze != defaultPrm->dehaze) {
+        tmp.str(tstring());
+        if (!param->dehaze.enable && save_disabled_prm) {
+            tmp << _T(",enable=false");
+        }
+        if (param->dehaze.enable || save_disabled_prm) {
+            ADD_NUM(_T("patch_radius"), dehaze.patch_radius);
+            ADD_FLOAT(_T("omega"), dehaze.omega, 6);
+            ADD_FLOAT(_T("t_floor"), dehaze.t_floor, 6);
+            ADD_FLOAT(_T("atm_light"), dehaze.atm_light, 6);
+        }
+        if (!tmp.str().empty()) {
+            cmd << _T(" --vpp-dehaze ") << tmp.str().substr(1);
+        } else if (param->dehaze.enable) {
+            cmd << _T(" --vpp-dehaze");
         }
     }
     if (param->dering != defaultPrm->dering) {
@@ -14905,6 +15650,7 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             ADD_FLOAT(_T("contrast"), tweak.contrast, 3);
             ADD_FLOAT(_T("gamma"), tweak.gamma, 3);
             ADD_FLOAT(_T("saturation"), tweak.saturation, 3);
+            ADD_FLOAT(_T("vibrance"), tweak.vibrance, 3);
             ADD_FLOAT(_T("hue"), tweak.hue, 3);
             ADD_BOOL(_T("coring"), tweak.coring);
             ADD_FLOAT(_T("start_hue"), tweak.startHue, 3);
@@ -14986,6 +15732,7 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             ADD_FLOAT(_T("k2"), lenscorrection.k2, 3);
             ADD_FLOAT(_T("cx"), lenscorrection.cx, 3);
             ADD_FLOAT(_T("cy"), lenscorrection.cy, 3);
+            ADD_FLOAT(_T("vignette"), lenscorrection.vignette, 3);
         }
         if (!tmp.str().empty()) {
             cmd << _T(" --vpp-lenscorrection ") << tmp.str().substr(1);
@@ -15126,6 +15873,7 @@ tstring gen_cmd(const RGYParamCommon *param, const RGYParamCommon *defaultPrm, b
     OPT_FLOAT(_T("--seekto"), seekToSec, 2);
     OPT_TCHAR(_T("--input-format"), AVInputFormat);
     OPT_TSTR(_T("--output-format"), muxOutputFormat);
+    OPT_BOOL(_T("--y4m-timestamp"), _T(""), y4mTimestamp);
     OPT_STR(_T("--video-tag"), videoCodecTag);
     OPT_TSTR(_T("--avcodec-prms"), avcodec_videnc_prms);
     for (auto &m : param->videoMetadata) {
@@ -15358,8 +16106,13 @@ tstring gen_cmd(const RGYParamCommon *param, const RGYParamCommon *defaultPrm, b
     OPT_NUM(_T("--video-ignore-timestamp-error"), videoIgnoreTimestampError);
 
     tmp.str(tstring());
+    bool hasSubCopy = false;
     for (int i = 0; i < param->nSubtitleSelectCount; i++) {
         const SubtitleSelect *pSubSelect = param->ppSubtitleSelectList[i];
+        if (pSubSelect->encCodec != RGY_AVCODEC_COPY) {
+            continue;
+        }
+        hasSubCopy = true;
         // トラックID 0 はトラック指定なしを意味するので、トラック番号としては出力しない
         if (pSubSelect->trackID != 0) {
             tmp << _T(",") << printTrack(pSubSelect);
@@ -15370,10 +16123,34 @@ tstring gen_cmd(const RGYParamCommon *param, const RGYParamCommon *defaultPrm, b
             tmp << _T(",asdata");
         }
     }
-    if (param->nSubtitleSelectCount > 0) {
+    if (hasSubCopy) {
         cmd << _T(" --sub-copy");
         if (!tmp.str().empty()) {
             cmd << _T(" ") << tmp.str().substr(1);
+        }
+    }
+    for (int i = 0; i < param->nSubtitleSelectCount; i++) {
+        const SubtitleSelect *pSubSelect = param->ppSubtitleSelectList[i];
+        if (pSubSelect->encCodec.empty() || pSubSelect->encCodec == RGY_AVCODEC_COPY) {
+            continue;
+        }
+        tstring prm;
+        if (pSubSelect->trackID != 0) {
+            prm += printTrack(pSubSelect);
+        }
+        if (pSubSelect->encCodec != RGY_AVCODEC_AUTO) {
+            if (!prm.empty()) prm += _T("?");
+            prm += pSubSelect->encCodec;
+        }
+        if (!pSubSelect->encCodecPrm.empty()) {
+            prm += _T(":") + pSubSelect->encCodecPrm;
+        }
+        if (!pSubSelect->decCodecPrm.empty()) {
+            prm += _T("#") + pSubSelect->decCodecPrm;
+        }
+        cmd << _T(" --sub-codec");
+        if (!prm.empty()) {
+            cmd << _T(" ") << prm;
         }
     }
     for (int i = 0; i < param->nSubtitleSelectCount; i++) {
@@ -15442,7 +16219,7 @@ tstring gen_cmd(const RGYParamCommon *param, const RGYParamCommon *defaultPrm, b
     tmp.str(tstring());
     for (int i = 0; i < param->nDataSelectCount; i++) {
         if (param->ppDataSelectList[i]->trackID != 0) { // トラックID 0 はトラック指定なしなので出力しない
-            tmp << _T(",") << param->ppDataSelectList[i]->trackID;
+            tmp << _T(",") << printTrack(param->ppDataSelectList[i]);
         }
     }
     if (param->nDataSelectCount > 0) {
@@ -15926,11 +16703,13 @@ tstring gen_cmd_help_common() {
         _T("                                 if format is not specified, output format will\n")
         _T("                                 be guessed from output file extension.\n")
         _T("                                 set \"raw\" for H.264/ES output.\n")
+        _T("   --y4m-timestamp             add presentation timestamps and durations to y4m FRAME lines.\n")
         _T("   --audio-copy [<int/string>[,...]]\n")
         _T("                                mux audio with video during output.\n")
         _T("                                 could be only used with\n")
         _T("                                 avhw/avsw reader and avcodec muxer.\n")
         _T("                                 by default copies all audio tracks.\n")
+        _T("                                 prefix track number with ! to exclude it.\n")
         _T("                                 prefix language with ! to exclude it.\n")
         _T("                                 \"--audio-copy 1,2\" will extract\n")
         _T("                                 audio track #1 and #2.\n")
@@ -16017,11 +16796,14 @@ tstring gen_cmd_help_common() {
         _T("   --sub-source <string>        input extra subtitle file.\n")
         _T("   --sub-copy [<int/string>[,...]]\n")
         _T("                                copy subtitle to output file.\n")
+        _T("                                 prefix track number with ! to exclude it.\n")
         _T("                                 prefix language with ! to exclude it.\n")
         _T("                                 these could be only used with\n")
         _T("                                 avhw/avsw reader and avcodec muxer.\n")
         _T("                                 below are optional,\n")
         _T("                                  in [<int>?], specify track number to copy.\n")
+        _T("   --sub-codec [<int/string>?]<string>\n")
+        _T("                                convert subtitle to specified format.\n")
         _T("   --sub-disposition [<int>?]<string>\n")
         _T("                                set disposition for the specified subtitle track.\n")
         _T("                                disposition for the unspecified tracks will be reset.\n")
@@ -16030,7 +16812,9 @@ tstring gen_cmd_help_common() {
         _T("                                 - copy ... copy metadata from input (default)\n")
         _T("                                 - clear ... do not set metadata\n")
         _T("   --sub-bsf [<int>?]<string>   set bitstream filter to subtitle track.\n")
-        _T("   --data-copy [<int>[,...]]       copy data stream to output file.\n")
+        _T("   --data-copy [<int/string>[,...]]\n")
+        _T("                                copy data stream to output file.\n")
+        _T("                                 prefix track number or language with ! to exclude it.\n")
         _T("   --attachment-copy [<int>[,...]] copy attachment stream to output file.\n")
         _T("   --attachment-source <string> add file as attachment stream.\n")
         _T("\n")
@@ -16328,6 +17112,22 @@ tstring gen_cmd_help_vpp() {
         FILTER_DEFAULT_AFS_RFF     ? _T("on") : _T("off"),
         FILTER_DEFAULT_AFS_TIMECODE ? _T("on") : _T("off"),
         FILTER_DEFAULT_AFS_LOG      ? _T("on") : _T("off"));
+#endif
+#if ENABLE_VPP_FILTER_NNEDI_UPSCALE
+    str += strsprintf(_T("\n")
+        _T("   --vpp-nnedi-upscale [<param1>=<value>][,<param2>=<value>][...]\n")
+        _T("     edge-directed 2x upscale using the nnedi network.\n")
+        _T("     Output is exactly 2x the input; input width and height must be even.\n")
+        _T("     Progressive 4:2:0, 4:4:4, or monochrome input is required.\n")
+        _T("    params\n")
+        _T("      nsize=<string>        8x6, 16x6, 32x6, 48x6, 8x4, 16x4, 32x4 (default)\n")
+        _T("      nns=<int>             16, 32 (default), 64, 128, 256\n")
+        _T("      quality=<string>      fast (default), slow\n")
+        _T("      prescreen=<int>       2, 3, or 4 (default=2)\n")
+        _T("      errortype=<string>    abs (default), square\n")
+        _T("      clamp=<int>           clamp mode 0-4 (default=1)\n")
+        _T("      shift=<string>        half-pixel correction: linear (default), cubic\n")
+        _T("      weightfile=<string>   path of nnedi3_weights.bin\n"));
 #endif
 #if ENABLE_VPP_FILTER_NNEDI
     str += strsprintf(_T("\n")
@@ -16706,7 +17506,7 @@ tstring gen_cmd_help_vpp() {
         FILTER_DEFAULT_MPDECIMATE_FRAC, FILTER_DEFAULT_MPDECIMATE_MAX,
         FILTER_DEFAULT_DECIMATE_LOG ? _T("on") : _T("off"));
 #endif
-#if ENABLE_NVVFX || ENABLE_NVSDKNGX || ENCODER_QSV || ENCODER_VCEENC
+#if ENABLE_NVVFX || ENABLE_NVSDKNGX || ENCODER_NVENC || ENCODER_QSV || ENCODER_VCEENC
     {
         str += strsprintf(_T("\n")
             _T("--vpp-resize <string> or [<param1>=<value>][,<param2>=<value>][...]\n")
@@ -16730,6 +17530,10 @@ tstring gen_cmd_help_vpp() {
         str += strsprintf(_T("      sharpness=<float>         RCAS sharpness for fsr1 (default=%.2f, 0.0 - 1.0)\n")
             _T("                                 NIS USM strength for nis (default=%.2f, 0.0 - 1.0)\n"),
             FILTER_DEFAULT_RESIZE_FSR1_SHARPNESS, FILTER_DEFAULT_RESIZE_NIS_SHARPNESS);
+        str += strsprintf(_T("      dpid_lambda=<float>       for dpid: strength of detail preservation\n")
+            _T("                                 (default=%.2f, %.1f - %.1f; 0 is area-equivalent).\n"),
+            FILTER_DEFAULT_RESIZE_DPID_LAMBDA,
+            FILTER_MIN_RESIZE_DPID_LAMBDA, FILTER_MAX_RESIZE_DPID_LAMBDA);
         str += _T("      cascade=<string>          for nis: auto (default), on, off\n")
                _T("      hdr=<string>              for nis: auto (default), sdr, pq\n");
 #if ENABLE_OPENCL
@@ -16849,6 +17653,34 @@ tstring gen_cmd_help_vpp() {
         FILTER_DEFAULT_PMD_APPLY_COUNT, FILTER_DEFAULT_PMD_STRENGTH, FILTER_DEFAULT_PMD_THRESHOLD,
         FILTER_DEFAULT_PMD_USE_EXP ? _T("true") : _T("false"));
 #endif
+#if ENABLE_VPP_FILTER_DENOISE_BM3D
+    str += strsprintf(_T("\n")
+        _T("   --vpp-bm3d [<param1>=<value>][,<param2>=<value>][...]\n")
+        _T("     enable BM3D block matching and 3D collaborative denoise.\n")
+        _T("     Two step: a hard threshold basic estimate, then a Wiener\n")
+        _T("     final estimate against it.\n")
+        _T("    params\n")
+        _T("      profile=<string>      preset for block_step / group_size /\n")
+        _T("                              bm_range: fast, lc, np, high.\n")
+        _T("                              params given after profile= override it.\n")
+        _T("      sigma=<float>         noise standard deviation\n")
+        _T("                              (default=%.2f, 0 or 0.5 - 100)\n")
+        _T("      block_step=<int>      stride between reference patches\n")
+        _T("                              (default=%d, 1 - 8)\n")
+        _T("      group_size=<int>      max similar blocks per 3D group\n")
+        _T("                              (default=%d, 1 - 32)\n")
+        _T("      bm_range=<int>        half side of the block match window\n")
+        _T("                              (default=%d, 1 - 32)\n")
+        _T("      radius=<int>          temporal radius (default=%d, 0 - 4).\n")
+        _T("                              0 = spatial only, >0 enables V-BM3D.\n")
+        _T("      chroma=<bool>         also denoise chroma (default=%s)\n"),
+        FILTER_DEFAULT_DENOISE_BM3D_SIGMA,
+        FILTER_DEFAULT_DENOISE_BM3D_BLOCK_STEP,
+        FILTER_DEFAULT_DENOISE_BM3D_GROUP_SIZE,
+        FILTER_DEFAULT_DENOISE_BM3D_BM_RANGE,
+        FILTER_DEFAULT_DENOISE_BM3D_RADIUS,
+        FILTER_DEFAULT_DENOISE_BM3D_CHROMA ? _T("true") : _T("false"));
+#endif
 #if ENABLE_VPP_FILTER_HQDN3D
     str += strsprintf(_T("\n")
         _T("   --vpp-hqdn3d [<param1>=<value>][,<param2>=<value>][...]\n")
@@ -16943,6 +17775,9 @@ tstring gen_cmd_help_vpp() {
         _T("   --vpp-lenscorrection [<param1>=<value>][,<param2>=<value>][...]\n")
         _T("      k1=<float>, k2=<float>     radial distortion coefficients\n")
         _T("      cx=<float>, cy=<float>     correction centre (default=0.5,0.5)\n")
+        _T("      vignette=<float>           corner brightness, gain at the corner is\n")
+        _T("                                   1+vignette. Positive removes a falloff,\n")
+        _T("                                   negative adds one. (default=0.0, -1.0 - 4.0)\n")
         _T("   --vpp-v360 [<param1>=<value>][,<param2>=<value>][...]\n")
         _T("      in/out=equirect|flat|cubemap, yaw/pitch/roll=<float>, h_fov=<float>, w/h=<int>\n"));
     str += strsprintf(_T("\n")
@@ -16987,6 +17822,8 @@ tstring gen_cmd_help_vpp() {
         _T("      model=<name|path>           Registered RIFE model name or ONNX path (required)\n")
         _T("                                  Names require --vpp-onnx-model-dir (rife_ov_models.json).\n")
         _T("      multi=<int>                 frame-rate multiplier (>=2, default 2)\n")
+        _T("      fps=<rate>                  target frame rate as a ratio (30000/1001)\n")
+        _T("                                  or decimal (29.97); overrides multi.\n")
 #if ENABLE_OPENVINO
         _T("      device=<string>             GPU.0 (default) / GPU / CPU / AUTO / NPU\n")
 #endif
@@ -17284,9 +18121,13 @@ tstring gen_cmd_help_vpp() {
         _T("      qp=<int>                  filter strength QP (default=%d, 0-51)\n")
         _T("      alpha=<int>               alpha offset (default=%d, -6 - 6)\n")
         _T("      beta=<int>                beta offset (default=%d, -6 - 6)\n")
-        _T("      chroma=<bool>             process planar chroma planes (default=%s)\n"),
+        _T("      chroma=<bool>             process planar chroma planes (default=%s)\n")
+        _T("      grid=<int>                block boundary spacing (default=%d)\n")
+        _T("                                  4: H.264/AVC, 8: MPEG-2/MPEG-4 Part 2\n")
+        _T("                                  aliases: h264, avc, mpeg2, mpeg4\n"),
         FILTER_DEFAULT_DEBLOCK_QP, FILTER_DEFAULT_DEBLOCK_ALPHA, FILTER_DEFAULT_DEBLOCK_BETA,
-        FILTER_DEFAULT_DEBLOCK_CHROMA ? _T("true") : _T("false"));
+        FILTER_DEFAULT_DEBLOCK_CHROMA ? _T("true") : _T("false"),
+        FILTER_DEFAULT_DEBLOCK_GRID);
 #endif
 #if ENABLE_VPP_FILTER_DEFLICKER
     str += strsprintf(_T("\n")
@@ -17334,9 +18175,14 @@ tstring gen_cmd_help_vpp() {
         _T("      frames=<int>              analysis frames for auto/gray (default=%d, 10-5000)\n")
         _T("      strength=<float>          correction strength for auto/gray (default=%.2f, 0.0 - 1.0)\n")
         _T("      variance_threshold=<float>\n")
-        _T("                                flash/fade rejection threshold (default=%.2f, >0)\n"),
+        _T("                                flash/fade rejection threshold (default=%.2f, >0)\n")
+        _T("      temperature=<int>         color temperature in Kelvin of the source light;\n")
+        _T("                                  corrects it to %dK. mode=manual, space=rgb.\n")
+        _T("                                  (default=%d (off), %d - %d)\n"),
         FILTER_DEFAULT_COLORFIX_FRAMES, FILTER_DEFAULT_COLORFIX_STRENGTH,
-        FILTER_DEFAULT_COLORFIX_VARIANCE_THRESHOLD);
+        FILTER_DEFAULT_COLORFIX_VARIANCE_THRESHOLD,
+        FILTER_REF_COLORFIX_TEMPERATURE, FILTER_DEFAULT_COLORFIX_TEMPERATURE,
+        FILTER_MIN_COLORFIX_TEMPERATURE, FILTER_MAX_COLORFIX_TEMPERATURE);
 #endif
 #if ENABLE_VPP_FILTER_EDGELEVEL
     str += strsprintf(_T("\n")
@@ -17406,6 +18252,38 @@ tstring gen_cmd_help_vpp() {
         FILTER_DEFAULT_FINEDEHALO_EXCL ? _T("true") : _T("false"),
         FILTER_DEFAULT_FINEDEHALO_EDGEPROC,
         FILTER_DEFAULT_FINEDEHALO_EDGE);
+#endif
+#if ENABLE_VPP_FILTER_GUIDEDFILTER
+    str += strsprintf(_T("\n")
+        _T("   --vpp-guidedfilter [<param1>=<value>][,<param2>=<value>][...]\n")
+        _T("     edge-preserving smoothing by self-guided image filtering.\n")
+        _T("    params\n")
+        _T("      radius=<int>              box-filter radius (default=%d, 1 - 32)\n")
+        _T("      eps=<float>               smoothing strength (default=%.4f, 0.0001 - 1.0)\n")
+        _T("      chroma=<bool>             filter chroma planes (default=false)\n"),
+        FILTER_DEFAULT_GUIDEDFILTER_RADIUS, FILTER_DEFAULT_GUIDEDFILTER_EPS);
+#endif
+#if ENABLE_VPP_FILTER_CLAHE
+    str += strsprintf(_T("\n")
+        _T("   --vpp-clahe [<param1>=<value>][,<param2>=<value>][...]\n")
+        _T("     contrast limited adaptive histogram equalization.\n")
+        _T("    params\n")
+        _T("      tiles_x=<int>             horizontal tile count (default=%d, 2 - 32)\n")
+        _T("      tiles_y=<int>             vertical tile count (default=%d, 2 - 32)\n")
+        _T("      slope=<float>             contrast clip ratio (default=%.1f, 1.0 - 40.0)\n"),
+        FILTER_DEFAULT_CLAHE_TILES_X, FILTER_DEFAULT_CLAHE_TILES_Y, FILTER_DEFAULT_CLAHE_SLOPE);
+#endif
+#if ENABLE_VPP_FILTER_DEHAZE
+    str += strsprintf(_T("\n")
+        _T("   --vpp-dehaze [<param1>=<value>][,<param2>=<value>][...]\n")
+        _T("     luminance dehazing based on the dark channel prior.\n")
+        _T("    params\n")
+        _T("      patch_radius=<int>        local minimum radius (default=%d, 1 - 15)\n")
+        _T("      omega=<float>             haze removal strength (default=%.2f, 0.5 - 1.0)\n")
+        _T("      t_floor=<float>           transmission lower bound (default=%.2f, 0.01 - 0.5)\n")
+        _T("      atm_light=<float>         atmospheric light (default=%.2f, 0.1 - 1.0)\n"),
+        FILTER_DEFAULT_DEHAZE_PATCH_RADIUS, FILTER_DEFAULT_DEHAZE_OMEGA,
+        FILTER_DEFAULT_DEHAZE_T_FLOOR, FILTER_DEFAULT_DEHAZE_ATM_LIGHT);
 #endif
 #if ENABLE_VPP_FILTER_HQDERING
     str += strsprintf(_T("\n")
@@ -17550,6 +18428,9 @@ tstring gen_cmd_help_vpp() {
         _T("      contrast=<float>          (default=%.1f, -2.0 - 2.0)\n")
         _T("      gamma=<float>             (default=%.1f,  0.1 - 10.0)\n")
         _T("      saturation=<float>        (default=%.1f,  0.0 - 3.0)\n")
+        _T("      vibrance=<float>          (default=%.1f, -1.0 - 2.0)\n")
+        _T("                                  adjusts low-saturation colors more strongly\n")
+        _T("                                  while preserving highly saturated colors.\n")
         _T("      hue=<float>               (default=%.1f, -180 - 180)\n")
         _T("      coring=<bool>             clamp output to TV range (default=off)\n")
         _T("      start_hue=<float>         limit hue/saturation to a hue range\n")
@@ -17562,6 +18443,7 @@ tstring gen_cmd_help_vpp() {
         FILTER_DEFAULT_TWEAK_CONTRAST,
         FILTER_DEFAULT_TWEAK_GAMMA,
         FILTER_DEFAULT_TWEAK_SATURATION,
+        FILTER_DEFAULT_TWEAK_VIBRANCE,
         FILTER_DEFAULT_TWEAK_HUE,
         FILTER_DEFAULT_TWEAK_BRIGHTNESS,
         FILTER_DEFAULT_TWEAK_CONTRAST,

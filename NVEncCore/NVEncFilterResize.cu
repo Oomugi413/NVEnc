@@ -83,7 +83,8 @@ enum RESIZE_WEIGHT_TYPE {
     WEIGHT_BICUBIC_MITCHELL,    // tunable bicubic preset B=1/3, C=1/3
     WEIGHT_BICUBIC_CATMULL_ROM, // tunable bicubic preset B=0,   C=1/2
     WEIGHT_BICUBIC_HERMITE,     // tunable bicubic preset B=0,   C=0
-    WEIGHT_BILINEAR
+    WEIGHT_BILINEAR,
+    WEIGHT_AREA
 };
 
 // User-tunable B/C for algo=bicubic (set per-resize via cudaMemcpyToSymbolAsync on
@@ -200,6 +201,18 @@ float factor_bilinear(const float x) {
     return 1.0f - fabs(x) * (1.0f / radius);
 }
 
+// 入力画素と出力画素のフットプリントが重なる長さを重みにする。
+// deltaは出力画素単位で、入力画素の幅はratioClamped、出力画素の幅は1となる。
+// 大きな縮小ではbox、ratioClampedが1となる拡大ではbilinearの三角形と一致する。
+// 重みの合計で正規化するため、1 / ratioClampedの係数は不要。
+__inline__ __device__
+float factor_area(const float delta, const float ratioClamped) {
+    const float srcHalf = ratioClamped * 0.5f;
+    const float lo = fmaxf(delta - srcHalf, -0.5f);
+    const float hi = fminf(delta + srcHalf,  0.5f);
+    return fmaxf(hi - lo, 0.0f);
+}
+
 template<int radius>
 __inline__ __device__
 float factor_bicubic(float x, float B, float C) {
@@ -264,6 +277,7 @@ void __inline__ __device__ calc_weight(
         case WEIGHT_BICUBIC_CATMULL_ROM: weight = factor_bicubic<radius>(delta, 0.0f, 0.5f); break;
         case WEIGHT_BICUBIC_HERMITE:     weight = factor_bicubic<radius>(delta, 0.0f, 0.0f); break;
         case WEIGHT_BILINEAR: weight = factor_bilinear<radius>(delta); break;
+        case WEIGHT_AREA:     weight = factor_area(delta, ratioClamped); break;
         default:
             break;
         }
@@ -651,6 +665,82 @@ static RGY_ERR resize_fsr1_frame(RGYFrameInfo *pOutputFrame, const RGYFrameInfo 
     return RGY_ERR_NONE;
 }
 
+// Weberら(2016)のdetail preserving image downscaling。
+// 出力画素のfootprint平均から離れた入力画素ほど強く残すため、2回走査する。
+template<typename Type, int bit_depth>
+__global__ void kernel_resize_dpid(uint8_t *__restrict__ pDst, const int dstPitch, const int dstWidth, const int dstHeight,
+    const uint8_t *__restrict__ pSrc, const int srcPitch, const int srcWidth, const int srcHeight,
+    const float ratioX, const float ratioY, const float lambda) {
+    const int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    const int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    if (ix >= dstWidth || iy >= dstHeight) return;
+
+    const float invX = 1.0f / ratioX;
+    const float invY = 1.0f / ratioY;
+    const float x0f = (float)ix * invX;
+    const float x1f = (float)(ix + 1) * invX;
+    const float y0f = (float)iy * invY;
+    const float y1f = (float)(iy + 1) * invY;
+    const int sx0 = max((int)floorf(x0f), 0);
+    const int sx1 = min((int)ceilf(x1f), srcWidth);
+    const int sy0 = max((int)floorf(y0f), 0);
+    const int sy1 = min((int)ceilf(y1f), srcHeight);
+
+    float sum = 0.0f;
+    float wsum = 0.0f;
+    for (int sy = sy0; sy < sy1; sy++) {
+        const float oy = fminf((float)(sy + 1), y1f) - fmaxf((float)sy, y0f);
+        if (oy <= 0.0f) continue;
+        const Type *row = (const Type *)(pSrc + (size_t)sy * srcPitch);
+        for (int sx = sx0; sx < sx1; sx++) {
+            const float ox = fminf((float)(sx + 1), x1f) - fmaxf((float)sx, x0f);
+            if (ox <= 0.0f) continue;
+            const float overlap = ox * oy;
+            sum += overlap * (float)row[sx];
+            wsum += overlap;
+        }
+    }
+    const float avg = (wsum > 0.0f) ? (sum / wsum) : 0.0f;
+    const float maxval = (float)((1 << bit_depth) - 1);
+    const float invMaxval = 1.0f / maxval;
+    float dsum = 0.0f;
+    float dwsum = 0.0f;
+    for (int sy = sy0; sy < sy1; sy++) {
+        const float oy = fminf((float)(sy + 1), y1f) - fmaxf((float)sy, y0f);
+        if (oy <= 0.0f) continue;
+        const Type *row = (const Type *)(pSrc + (size_t)sy * srcPitch);
+        for (int sx = sx0; sx < sx1; sx++) {
+            const float ox = fminf((float)(sx + 1), x1f) - fmaxf((float)sx, x0f);
+            if (ox <= 0.0f) continue;
+            const float value = (float)row[sx];
+            const float detail = (lambda == 0.0f) ? 1.0f : powf(fabsf(value - avg) * invMaxval, lambda);
+            const float weight = ox * oy * detail;
+            dsum += weight * value;
+            dwsum += weight;
+        }
+    }
+    const float outValue = (dwsum > 0.0f) ? (dsum / dwsum) : avg;
+    Type *dst = (Type *)(pDst + (size_t)iy * dstPitch + (size_t)ix * sizeof(Type));
+    dst[0] = (Type)clamp((int)(outValue + 0.5f), 0, (1 << bit_depth) - 1);
+}
+
+template<typename Type, int bit_depth>
+static RGY_ERR resize_dpid_frame(RGYFrameInfo *pOutputFrame, const RGYFrameInfo *pInputFrame, const float lambda, cudaStream_t stream) {
+    dim3 blockSize(RESIZE_BLOCK_X, RESIZE_BLOCK_Y);
+    for (int i = 0; i < RGY_CSP_PLANES[pInputFrame->csp]; i++) {
+        const auto src = getPlane(pInputFrame, (RGY_PLANE)i);
+        auto dst = getPlane(pOutputFrame, (RGY_PLANE)i);
+        dim3 gridSize(divCeil(dst.width, blockSize.x), divCeil(dst.height, blockSize.y));
+        kernel_resize_dpid<Type, bit_depth><<<gridSize, blockSize, 0, stream>>>(
+            dst.ptr[0], dst.pitch[0], dst.width, dst.height,
+            src.ptr[0], src.pitch[0], src.width, src.height,
+            (float)dst.width / src.width, (float)dst.height / src.height, lambda);
+        const auto cudaerr = cudaGetLastError();
+        if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
+    }
+    return RGY_ERR_NONE;
+}
+
 static bool useTextureBilinear(const RGY_VPP_RESIZE_ALGO interp, const RGYFrameInfo *pOutputFrame, const RGYFrameInfo *pInputFrame) {
     return interp == RGY_VPP_RESIZE_NEAREST
        || (interp == RGY_VPP_RESIZE_BILINEAR
@@ -665,6 +755,7 @@ static RGY_ERR resize_frame(RGYFrameInfo *pOutputFrame, const RGYFrameInfo *pInp
     }
     switch (interp) {
     case RGY_VPP_RESIZE_BILINEAR: return resize_frame<Type, bit_depth, WEIGHT_BILINEAR, 1>(pOutputFrame, pInputFrame, pgFactor, stream);
+    case RGY_VPP_RESIZE_AREA:     return resize_frame<Type, bit_depth, WEIGHT_AREA,     1>(pOutputFrame, pInputFrame, pgFactor, stream);
     case RGY_VPP_RESIZE_BICUBIC:  return resize_frame<Type, bit_depth, WEIGHT_BICUBIC,  2>(pOutputFrame, pInputFrame, pgFactor, stream);
     case RGY_VPP_RESIZE_SPLINE16: return resize_frame<Type, bit_depth, WEIGHT_SPLINE,   2>(pOutputFrame, pInputFrame, pgFactor, stream);
     case RGY_VPP_RESIZE_SPLINE36: return resize_frame<Type, bit_depth, WEIGHT_SPLINE,   3>(pOutputFrame, pInputFrame, pgFactor, stream);
@@ -1313,6 +1404,19 @@ RGY_ERR NVEncFilterResize::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<
         AddMessage(RGY_LOG_ERROR, _T("Invalid parameter.\n"));
         return RGY_ERR_INVALID_PARAM;
     }
+    if (pResizeParam->interp == RGY_VPP_RESIZE_DPID) {
+        if (!std::isfinite(pResizeParam->dpid.lambda)
+            || pResizeParam->dpid.lambda < FILTER_MIN_RESIZE_DPID_LAMBDA
+            || pResizeParam->dpid.lambda > FILTER_MAX_RESIZE_DPID_LAMBDA) {
+            AddMessage(RGY_LOG_ERROR, _T("dpid_lambda must be in [%.1f, %.1f].\n"),
+                FILTER_MIN_RESIZE_DPID_LAMBDA, FILTER_MAX_RESIZE_DPID_LAMBDA);
+            return RGY_ERR_INVALID_PARAM;
+        }
+        if (pResizeParam->frameOut.width > pResizeParam->frameIn.width
+            || pResizeParam->frameOut.height > pResizeParam->frameIn.height) {
+            AddMessage(RGY_LOG_WARN, _T("DPID is intended for downscaling; upscaled axes may look nearest-neighbor-like.\n"));
+        }
+    }
 
     auto resizeInterp = pResizeParam->interp;
     if (isNvvfxResizeFiter(pResizeParam->interp)) {
@@ -1549,6 +1653,7 @@ NVEncFilterParamResize::NVEncFilterParamResize() :
     interp(RGY_VPP_RESIZE_SPLINE36),
     nvvfxSubAlgo(RGY_VPP_RESIZE_SPLINE36),
     fsr1(),
+    dpid(),
     nvvfxSuperRes(),
     ngxvsr(),
     libplaceboResample() {
@@ -1581,6 +1686,9 @@ tstring NVEncFilterParamResize::print() const {
     } else if (interp == RGY_VPP_RESIZE_FSR1) {
         str += _T("\n                 ");
         str += fsr1.print();
+    } else if (interp == RGY_VPP_RESIZE_DPID) {
+        str += _T("\n                 ");
+        str += dpid.print();
     }
     return str;
 }
@@ -1661,7 +1769,18 @@ RGY_ERR NVEncFilterResize::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameI
 
     if (   pInputFrame->width != ppOutputFrames[0]->width
         || pInputFrame->height != ppOutputFrames[0]->height) {
-        if (isJincResize(pResizeParam->interp)) {
+        if (pResizeParam->interp == RGY_VPP_RESIZE_DPID) {
+            static const std::map<RGY_DATA_TYPE, decltype(resize_dpid_frame<uint8_t, 8>)*> dpid_list = {
+                { RGY_DATA_TYPE_U8,  resize_dpid_frame<uint8_t,   8> },
+                { RGY_DATA_TYPE_U16, resize_dpid_frame<uint16_t, 16> }
+            };
+            if (dpid_list.count(RGY_CSP_DATA_TYPE[pInputFrame->csp]) == 0) {
+                AddMessage(RGY_LOG_ERROR, _T("unsupported csp %s for dpid.\n"), RGY_CSP_NAMES[pInputFrame->csp]);
+                return RGY_ERR_UNSUPPORTED;
+            }
+            sts = dpid_list.at(RGY_CSP_DATA_TYPE[pInputFrame->csp])(
+                ppOutputFrames[0], pInputFrame, pResizeParam->dpid.lambda, stream);
+        } else if (isJincResize(pResizeParam->interp)) {
             static const std::map<RGY_DATA_TYPE, decltype(resize_jinc_frame<uint8_t, 8>)*> jinc_list = {
                 { RGY_DATA_TYPE_U8,  resize_jinc_frame<uint8_t,   8> },
                 { RGY_DATA_TYPE_U16, resize_jinc_frame<uint16_t, 16> }
