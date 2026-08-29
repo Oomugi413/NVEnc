@@ -214,6 +214,37 @@ NVIDIA グラフィックドライバ 551.23
 今後の更新で設定ファイルの互換性がなくなるかもしれません。
 
 【メモ】
+2026.08.29 (9.33)
+- arm64ビルドに対応。
+- arm環境でのavhwの制限を解除。
+- --timecodeのraw出力に対応。
+- y4m入出力にタイムスタンプ拡張を追加。(--y4m-timestamp)
+- --dynamic-rcに新機能を追加し、一部を修正。
+  - フレーム番号と時刻指定が混在するゾーンの順序を修正。
+  - 時刻範囲指定start-time/end-timeを追加。
+  - フレーム指定をVPP前の入力フレームIDで判定するよう修正。
+- フィルタを追加。
+  - BM3Dデノイズフィルタを追加。(--vpp-bm3d)
+  - --vpp-dehazeを追加。
+  - --vpp-claheを追加。
+  - --vpp-guidedfilterを追加。
+  - --vpp-nnedi-upscale(NNEDIによる2倍拡大)を追加。
+  - --vpp-resizeにdpid(detail preserving downscaling)を追加。
+  - --vpp-resizeにarea補間を追加。
+  - --vpp-colorfixに光源色温度の指定temperature=を追加。
+  - --vpp-tweakにvibrance調整を追加。
+  - --vpp-lenscorrectionに周辺減光補正を追加。
+  - --vpp-rife-ovに任意フレームレート変換を追加。
+  - --vpp-rife-ovの10bit入力に対応。
+  - --vpp-deblockにブロック境界間隔指定を追加。
+  - --vpp-onnxの高ビット深度YUV入力に対応。 ( #794 )
+  - ONNX輝度モデルの前後処理をCUDAに統一。
+- 一部フィルタの修正。
+  - --vpp-rife-ov変換時の末尾フレーム欠落を修正。
+  - --vpp-ivtcの末尾フレーム欠落を修正。
+- 音声・字幕・データの!によるトラック除外指定に対応。
+- Linuxビルドでlibass_staticのデフォルトをfalseに。 ( #792 )
+
 2026.08.15 (9.32)
 - 使用するffmpegのライブラリを更新。
   - ffmpeg 8.0 -> 9.0.1
