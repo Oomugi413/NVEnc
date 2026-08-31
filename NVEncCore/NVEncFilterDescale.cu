@@ -48,6 +48,7 @@
 #include "rgy_cuda_util_kernel.h"
 
 static const int DESCALE_BLOCK = 32;
+static const int DESCALE_TAPS_BLOCK_Y = 8;
 
 static inline double dsq(double x) { return x * x; }
 static inline double dcb(double x) { return x * x * x; }
@@ -257,25 +258,15 @@ static RGY_ERR upload_buf(std::unique_ptr<CUMemBuf>& buf, const void *src, size_
 
 template<typename Type, int bit_depth>
 __global__ void kernel_descale_h(float *__restrict__ pDst, const int dstPitchFloats,
-    const uint8_t *__restrict__ pSrc, const int srcPitch,
     const int src_h, const int dst_w,
-    const int c_band, const int weights_columns,
-    const float *__restrict__ weights,
-    const int *__restrict__ left_idx, const int *__restrict__ right_idx,
+    const int c_band,
     const float *__restrict__ lower, const float *__restrict__ upper,
     const float *__restrict__ diagonal) {
     const int iy = blockIdx.x * blockDim.x + threadIdx.x;
     if (iy >= src_h) return;
     float *dstRow = pDst + iy * dstPitchFloats;
-    const Type *srcRow = (const Type *)(pSrc + iy * srcPitch);
     for (int j = 0; j < dst_w; ++j) {
-        const int lj = left_idx[j];
-        const int rj = right_idx[j];
-        float sum = 0.0f;
-        for (int k = lj; k < rj; ++k) {
-            const float src_f = (float)srcRow[k] * (1.0f / (float)((1 << bit_depth) - 1));
-            sum += weights[j * weights_columns + (k - lj)] * src_f;
-        }
+        float sum = dstRow[j];
         int start = j - c_band;
         if (start < 0) start = 0;
         for (int k = start; k < j; ++k) {
@@ -295,31 +286,48 @@ __global__ void kernel_descale_h(float *__restrict__ pDst, const int dstPitchFlo
 }
 
 template<typename Type, int bit_depth>
+__global__ void kernel_descale_h_taps(float *__restrict__ pDst, const int dstPitchFloats,
+    const uint8_t *__restrict__ pSrc, const int srcPitch,
+    const int src_h, const int dst_w, const int weights_columns,
+    const float *__restrict__ weights,
+    const int *__restrict__ left_idx, const int *__restrict__ right_idx) {
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    if (j >= dst_w || iy >= src_h) return;
+    const Type *srcRow = (const Type *)(pSrc + iy * srcPitch);
+    const int lj = left_idx[j];
+    const int rj = right_idx[j];
+    float sum = 0.0f;
+    for (int k = lj; k < rj; ++k) {
+        const float src_f = (float)srcRow[k] * (1.0f / (float)((1 << bit_depth) - 1));
+        sum += weights[j * weights_columns + (k - lj)] * src_f;
+    }
+    pDst[iy * dstPitchFloats + j] = sum;
+}
+
+template<typename Type, int bit_depth>
 __global__ void kernel_descale_v(uint8_t *__restrict__ pDst, const int dstPitch,
     float *__restrict__ pVScratch, const int scratchPitchFloats,
-    const float *__restrict__ pSrc, const int srcPitchFloats,
-    const int src_h, const int dst_w, const int dst_h,
-    const int c_band, const int weights_columns,
-    const float *__restrict__ weights,
-    const int *__restrict__ left_idx, const int *__restrict__ right_idx,
+    const int dst_w, const int dst_h,
+    const int c_band,
     const float *__restrict__ lower, const float *__restrict__ upper,
     const float *__restrict__ diagonal,
     const int writeIntegerOutput) {
     const int ix = blockIdx.x * blockDim.x + threadIdx.x;
     if (ix >= dst_w) return;
     for (int j = 0; j < dst_h; ++j) {
-        const int lj = left_idx[j];
-        const int rj = right_idx[j];
-        float sum = 0.0f;
-        for (int k = lj; k < rj; ++k) {
-            sum += weights[j * weights_columns + (k - lj)] * pSrc[k * srcPitchFloats + ix];
-        }
+        float sum = pVScratch[j * scratchPitchFloats + ix];
         int start = j - c_band;
         if (start < 0) start = 0;
         for (int k = start; k < j; ++k) {
             sum -= lower[(k - j + c_band) * dst_h + j] * pVScratch[k * scratchPitchFloats + ix];
         }
         pVScratch[j * scratchPitchFloats + ix] = sum * diagonal[j];
+    }
+    if (writeIntegerOutput) {
+        const float v = clamp(pVScratch[(dst_h - 1) * scratchPitchFloats + ix], 0.0f, 1.0f);
+        Type *outPtr = (Type *)(pDst + (dst_h - 1) * dstPitch);
+        outPtr[ix] = (Type)(v * (float)((1 << bit_depth) - 1) + 0.5f);
     }
     for (int j = dst_h - 2; j >= 0; --j) {
         int end = j + c_band;
@@ -328,16 +336,31 @@ __global__ void kernel_descale_v(uint8_t *__restrict__ pDst, const int dstPitch,
         for (int k = end; k > j; --k) {
             sum += upper[(k - j - 1) * dst_h + j] * pVScratch[k * scratchPitchFloats + ix];
         }
-        pVScratch[j * scratchPitchFloats + ix] -= sum;
-    }
-    if (writeIntegerOutput) {
-        for (int j = 0; j < dst_h; ++j) {
-            float v = pVScratch[j * scratchPitchFloats + ix];
-            v = clamp(v, 0.0f, 1.0f);
+        const float xj = pVScratch[j * scratchPitchFloats + ix] - sum;
+        pVScratch[j * scratchPitchFloats + ix] = xj;
+        if (writeIntegerOutput) {
+            const float v = clamp(xj, 0.0f, 1.0f);
             Type *outPtr = (Type *)(pDst + j * dstPitch);
             outPtr[ix] = (Type)(v * (float)((1 << bit_depth) - 1) + 0.5f);
         }
     }
+}
+
+__global__ void kernel_descale_v_taps(float *__restrict__ pVScratch, const int scratchPitchFloats,
+    const float *__restrict__ pSrc, const int srcPitchFloats,
+    const int dst_w, const int dst_h, const int weights_columns,
+    const float *__restrict__ weights,
+    const int *__restrict__ left_idx, const int *__restrict__ right_idx) {
+    const int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (ix >= dst_w || j >= dst_h) return;
+    const int lj = left_idx[j];
+    const int rj = right_idx[j];
+    float sum = 0.0f;
+    for (int k = lj; k < rj; ++k) {
+        sum += weights[j * weights_columns + (k - lj)] * pSrc[k * srcPitchFloats + ix];
+    }
+    pVScratch[j * scratchPitchFloats + ix] = sum;
 }
 
 __global__ void kernel_rescale_h(float *__restrict__ pDst, const int dstPitchFloats,
@@ -441,15 +464,18 @@ __global__ void kernel_descale_mse(float *__restrict__ pRowSums,
 template<typename Type, int bit_depth>
 static RGY_ERR launch_descale_h(RGYFrameInfo *pIntermediateFloat, const RGYFrameInfo *pInputPlane,
     const NVEncFilterDescaleCore& core, cudaStream_t stream) {
-    dim3 blockSize(DESCALE_BLOCK);
-    dim3 gridSize(divCeil(pInputPlane->height, DESCALE_BLOCK));
-    kernel_descale_h<Type, bit_depth><<<gridSize, blockSize, 0, stream>>>(
+    const dim3 tapsBlock(DESCALE_BLOCK, DESCALE_TAPS_BLOCK_Y);
+    const dim3 tapsGrid(divCeil(core.dst_dim, DESCALE_BLOCK), divCeil(pInputPlane->height, DESCALE_TAPS_BLOCK_Y));
+    kernel_descale_h_taps<Type, bit_depth><<<tapsGrid, tapsBlock, 0, stream>>>(
         (float *)pIntermediateFloat->ptr[0], pIntermediateFloat->pitch[0] / (int)sizeof(float),
         (const uint8_t *)pInputPlane->ptr[0], pInputPlane->pitch[0],
         pInputPlane->height, core.dst_dim,
-        core.c, core.weights_columns,
+        core.weights_columns,
         (const float *)core.weights->ptr,
-        (const int *)core.left_idx->ptr, (const int *)core.right_idx->ptr,
+        (const int *)core.left_idx->ptr, (const int *)core.right_idx->ptr);
+    kernel_descale_h<Type, bit_depth><<<divCeil(pInputPlane->height, DESCALE_BLOCK), DESCALE_BLOCK, 0, stream>>>(
+        (float *)pIntermediateFloat->ptr[0], pIntermediateFloat->pitch[0] / (int)sizeof(float),
+        pInputPlane->height, core.dst_dim, core.c,
         (const float *)core.lower->ptr, (const float *)core.upper->ptr, (const float *)core.diagonal->ptr);
     return err_to_rgy(cudaGetLastError());
 }
@@ -457,19 +483,42 @@ static RGY_ERR launch_descale_h(RGYFrameInfo *pIntermediateFloat, const RGYFrame
 template<typename Type, int bit_depth>
 static RGY_ERR launch_descale_v(RGYFrameInfo *pOutputPlane, const RGYFrameInfo *pIntermediateFloat,
     CUMemBuf *pVScratch, const NVEncFilterDescaleCore& core, cudaStream_t stream) {
-    dim3 blockSize(DESCALE_BLOCK);
-    dim3 gridSize(divCeil(pOutputPlane->width, DESCALE_BLOCK));
-    kernel_descale_v<Type, bit_depth><<<gridSize, blockSize, 0, stream>>>(
-        (uint8_t *)pOutputPlane->ptr[0], pOutputPlane->pitch[0],
+    const dim3 tapsBlock(DESCALE_BLOCK, DESCALE_TAPS_BLOCK_Y);
+    const dim3 tapsGrid(divCeil(pOutputPlane->width, DESCALE_BLOCK), divCeil(core.dst_dim, DESCALE_TAPS_BLOCK_Y));
+    kernel_descale_v_taps<<<tapsGrid, tapsBlock, 0, stream>>>(
         (float *)pVScratch->ptr, pOutputPlane->width,
         (const float *)pIntermediateFloat->ptr[0], pIntermediateFloat->pitch[0] / (int)sizeof(float),
-        core.src_dim, pOutputPlane->width, core.dst_dim,
-        core.c, core.weights_columns,
+        pOutputPlane->width, core.dst_dim, core.weights_columns,
         (const float *)core.weights->ptr,
-        (const int *)core.left_idx->ptr, (const int *)core.right_idx->ptr,
+        (const int *)core.left_idx->ptr, (const int *)core.right_idx->ptr);
+    kernel_descale_v<Type, bit_depth><<<divCeil(pOutputPlane->width, DESCALE_BLOCK), DESCALE_BLOCK, 0, stream>>>(
+        (uint8_t *)pOutputPlane->ptr[0], pOutputPlane->pitch[0],
+        (float *)pVScratch->ptr, pOutputPlane->width,
+        pOutputPlane->width, core.dst_dim, core.c,
         (const float *)core.lower->ptr, (const float *)core.upper->ptr, (const float *)core.diagonal->ptr,
         1);
     return err_to_rgy(cudaGetLastError());
+}
+
+template<typename Type, int bit_depth>
+static void launch_descale_probe(float *pDescaleH, float *pDescaleV,
+    const uint8_t *pSrc, const int srcPitchBytes,
+    const int src_h, const int dst_w, const int dst_h,
+    const NVEncFilterDescaleCore& coreH, const NVEncFilterDescaleCore& coreV) {
+    const dim3 tapsBlock(DESCALE_BLOCK, DESCALE_TAPS_BLOCK_Y);
+    kernel_descale_h_taps<Type, bit_depth><<<dim3(divCeil(dst_w, DESCALE_BLOCK), divCeil(src_h, DESCALE_TAPS_BLOCK_Y)), tapsBlock>>>(
+        pDescaleH, dst_w, pSrc, srcPitchBytes, src_h, dst_w, coreH.weights_columns,
+        (const float *)coreH.weights->ptr, (const int *)coreH.left_idx->ptr, (const int *)coreH.right_idx->ptr);
+    kernel_descale_h<Type, bit_depth><<<divCeil(src_h, DESCALE_BLOCK), DESCALE_BLOCK>>>(
+        pDescaleH, dst_w, src_h, dst_w, coreH.c,
+        (const float *)coreH.lower->ptr, (const float *)coreH.upper->ptr, (const float *)coreH.diagonal->ptr);
+    kernel_descale_v_taps<<<dim3(divCeil(dst_w, DESCALE_BLOCK), divCeil(dst_h, DESCALE_TAPS_BLOCK_Y)), tapsBlock>>>(
+        pDescaleV, dst_w, pDescaleH, dst_w, dst_w, dst_h, coreV.weights_columns,
+        (const float *)coreV.weights->ptr, (const int *)coreV.left_idx->ptr, (const int *)coreV.right_idx->ptr);
+    kernel_descale_v<Type, bit_depth><<<divCeil(dst_w, DESCALE_BLOCK), DESCALE_BLOCK>>>(
+        nullptr, 0, pDescaleV, dst_w,
+        dst_w, dst_h, coreV.c,
+        (const float *)coreV.lower->ptr, (const float *)coreV.upper->ptr, (const float *)coreV.diagonal->ptr, 0);
 }
 
 NVEncFilterDescale::NVEncFilterDescale() : NVEncFilter(), m_cores(), m_intermediateH(), m_intermediateV(), m_intermediatePitchFloats{}, m_frameIdx(0) {
@@ -677,39 +726,11 @@ RGY_ERR NVEncFilterDescale::scoreCandidates(std::vector<ProbeCandidate>& candida
             const auto& edge_buf = edgeWeightsBufs[fi];
             const dim3 block1(DESCALE_BLOCK);
             if (src_pixel_bytes == 1) {
-                kernel_descale_h<uint8_t, 8><<<divCeil(src_h, DESCALE_BLOCK), block1>>>(
-                    (float *)bufDescaleH->ptr, c.width,
-                    (const uint8_t *)luma_buf->ptr, src_pitch_bytes,
-                    src_h, c.width,
-                    coreH.c, coreH.weights_columns,
-                    (const float *)coreH.weights->ptr, (const int *)coreH.left_idx->ptr, (const int *)coreH.right_idx->ptr,
-                    (const float *)coreH.lower->ptr, (const float *)coreH.upper->ptr, (const float *)coreH.diagonal->ptr);
-                kernel_descale_v<uint8_t, 8><<<divCeil(c.width, DESCALE_BLOCK), block1>>>(
-                    (uint8_t *)bufDescaleV->ptr, c.width * src_pixel_bytes,
-                    (float *)bufDescaleV->ptr, c.width,
-                    (const float *)bufDescaleH->ptr, c.width,
-                    src_h, c.width, c.height,
-                    coreV.c, coreV.weights_columns,
-                    (const float *)coreV.weights->ptr, (const int *)coreV.left_idx->ptr, (const int *)coreV.right_idx->ptr,
-                    (const float *)coreV.lower->ptr, (const float *)coreV.upper->ptr, (const float *)coreV.diagonal->ptr,
-                    0);
+                launch_descale_probe<uint8_t, 8>((float *)bufDescaleH->ptr, (float *)bufDescaleV->ptr,
+                    (const uint8_t *)luma_buf->ptr, src_pitch_bytes, src_h, c.width, c.height, coreH, coreV);
             } else {
-                kernel_descale_h<uint16_t, 16><<<divCeil(src_h, DESCALE_BLOCK), block1>>>(
-                    (float *)bufDescaleH->ptr, c.width,
-                    (const uint8_t *)luma_buf->ptr, src_pitch_bytes,
-                    src_h, c.width,
-                    coreH.c, coreH.weights_columns,
-                    (const float *)coreH.weights->ptr, (const int *)coreH.left_idx->ptr, (const int *)coreH.right_idx->ptr,
-                    (const float *)coreH.lower->ptr, (const float *)coreH.upper->ptr, (const float *)coreH.diagonal->ptr);
-                kernel_descale_v<uint16_t, 16><<<divCeil(c.width, DESCALE_BLOCK), block1>>>(
-                    (uint8_t *)bufDescaleV->ptr, c.width * src_pixel_bytes,
-                    (float *)bufDescaleV->ptr, c.width,
-                    (const float *)bufDescaleH->ptr, c.width,
-                    src_h, c.width, c.height,
-                    coreV.c, coreV.weights_columns,
-                    (const float *)coreV.weights->ptr, (const int *)coreV.left_idx->ptr, (const int *)coreV.right_idx->ptr,
-                    (const float *)coreV.lower->ptr, (const float *)coreV.upper->ptr, (const float *)coreV.diagonal->ptr,
-                    0);
+                launch_descale_probe<uint16_t, 16>((float *)bufDescaleH->ptr, (float *)bufDescaleV->ptr,
+                    (const uint8_t *)luma_buf->ptr, src_pitch_bytes, src_h, c.width, c.height, coreH, coreV);
             }
             dim3 block2(32, 8);
             kernel_rescale_h<<<dim3(divCeil(src_w, 32), divCeil(c.height, 8)), block2>>>(
