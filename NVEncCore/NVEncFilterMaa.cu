@@ -39,6 +39,9 @@
 
 static const int MAA_BLOCK_X = 32;
 static const int MAA_BLOCK_Y = 8;
+// 1 threadで処理する連続出力数。隣接出力が共有する列の縦和を再利用する。
+// レジスタ使用量や速度が退行するGPUでは、この値を下げて再評価すること。
+static const int MAA_SMOOTH_X_PER_ITEM = 8;
 
 static int alignSsDim(int srcDim, float ss) {
     const float scaled = (float)srcDim * ss / 4.0f;
@@ -141,29 +144,37 @@ __global__ void kernel_maa_sangnom_prepare(const uint8_t *src, const int srcPitc
 template<typename Type, int bit_depth>
 __global__ void kernel_maa_sangnom_smooth_3d(const uint8_t *costPacked, uint8_t *smoothPacked,
     int bufPitch, int bufSliceBytes, int bufW, int bufH) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int x0 = (blockIdx.x * blockDim.x + threadIdx.x) * MAA_SMOOTH_X_PER_ITEM;
     const int ybuf = blockIdx.y * blockDim.y + threadIdx.y;
     const int bufIndex = blockIdx.z * blockDim.z + threadIdx.z;
-    if (x >= bufW || ybuf >= bufH || bufIndex >= 9) return;
+    if (x0 >= bufW || ybuf >= bufH || bufIndex >= 9) return;
 
     static const int max_val = (1 << bit_depth) - 1;
     const uint8_t *bufIn = costPacked + bufIndex * bufSliceBytes;
     uint8_t *bufOut = smoothPacked + bufIndex * bufSliceBytes;
 
-    int hsum = 0;
-    for (int dx = -3; dx <= 3; dx++) {
-        const int xc = clamp(x + dx, 0, bufW - 1);
+    int colsum[MAA_SMOOTH_X_PER_ITEM + 6];
+    for (int i = 0; i < MAA_SMOOTH_X_PER_ITEM + 6; i++) {
+        const int xc = clamp(x0 - 3 + i, 0, bufW - 1);
         int vsum = 0;
         for (int dy = -1; dy <= 1; dy++) {
             const int yc = clamp(ybuf + dy, 0, bufH - 1);
             vsum += (int)*(const Type *)(bufIn + yc * bufPitch + xc * sizeof(Type));
         }
-        hsum += vsum;
+        colsum[i] = vsum;
     }
 
-    int out = hsum >> 4;
-    out = clamp(out, 0, max_val);
-    ((Type *)(bufOut + ybuf * bufPitch))[x] = (Type)out;
+    Type *outRow = (Type *)(bufOut + ybuf * bufPitch);
+    for (int k = 0; k < MAA_SMOOTH_X_PER_ITEM; k++) {
+        const int x = x0 + k;
+        if (x >= bufW) break;
+        int hsum = 0;
+        for (int dx = 0; dx < 7; dx++) {
+            hsum += colsum[k + dx];
+        }
+        const int out = clamp(hsum >> 4, 0, max_val);
+        outRow[x] = (Type)out;
+    }
 }
 
 template<typename Type, int bit_depth>
@@ -432,7 +443,7 @@ static RGY_ERR maa_sangnom_plane_typed(RGYFrameInfo *pDst, const RGYFrameInfo *p
     if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
 
     dim3 blockSmooth(MAA_BLOCK_X, MAA_BLOCK_Y, 1);
-    dim3 gridSmooth(divCeil(bufW, blockSmooth.x), divCeil(bufH, blockSmooth.y), 9);
+    dim3 gridSmooth(divCeil(bufW, blockSmooth.x * MAA_SMOOTH_X_PER_ITEM), divCeil(bufH, blockSmooth.y), 9);
     kernel_maa_sangnom_smooth_3d<Type, bit_depth><<<gridSmooth, blockSmooth, 0, stream>>>(
         (const uint8_t *)costRaw->ptr, (uint8_t *)costSmooth->ptr, costPitch, costSliceBytes, bufW, bufH);
     cudaerr = cudaGetLastError();
