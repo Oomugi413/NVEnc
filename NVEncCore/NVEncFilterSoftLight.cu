@@ -26,7 +26,6 @@
 //
 // -----------------------------------------------------------------------------------------
 
-#include <array>
 #include "convert_csp.h"
 #include "NVEncFilterSoftLight.h"
 #include "NVEncParam.h"
@@ -163,11 +162,14 @@ __global__ void kernel_softlight_fused_u16(
     uint8_t *__restrict__ pB, const int pitchB,
     const int width, const int height,
     const VppSoftLightMode mode,
-    const float bR, const float bG, const float bB,
+    const float *__restrict__ bVals,
     const VppSoftLightFormula formula) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x < width && y < height) {
+        const float bR = bVals[0];
+        const float bG = bVals[1];
+        const float bB = bVals[2];
         auto ptrR = (uint16_t *)(pR + y * pitchR);
         auto ptrG = (uint16_t *)(pG + y * pitchG);
         auto ptrB = (uint16_t *)(pB + y * pitchB);
@@ -223,11 +225,25 @@ __global__ void kernel_softlight_fused_u16(
     }
 }
 
+// 集計結果から強度をデバイス上で算出し、フレームごとのreadbackと同期を除去する。
+__global__ void kernel_softlight_finalize_b(
+    const unsigned long long *__restrict__ sums,
+    const int64_t totalPx, const int skipblack,
+    float *__restrict__ bVals) {
+    const int i = threadIdx.x;
+    if (i < 3) {
+        const int64_t denom = totalPx - (skipblack ? (int64_t)sums[3 + i] : 0);
+        const float mean = (denom > 0) ? ((float)sums[i] / (float)denom) * (1.0f / 65535.0f) : 0.0f;
+        bVals[i] = 1.0f - mean;
+    }
+}
+
 NVEncFilterSoftLight::NVEncFilterSoftLight() :
     NVEncFilter(),
     m_convIn(),
     m_convOut(),
-    m_reduce() {
+    m_reduce(),
+    m_bVals() {
     m_name = _T("softlight");
 }
 
@@ -263,7 +279,15 @@ RGY_ERR NVEncFilterSoftLight::allocWork(const RGYFrameInfo& rgbFrame) {
         }
         return RGY_ERR_NONE;
     };
-    return allocBuf(m_reduce, sizeof(unsigned long long) * 6, _T("reduce"));
+    auto sts = allocBuf(m_reduce, sizeof(unsigned long long) * 6, _T("reduce"));
+    if (sts != RGY_ERR_NONE) return sts;
+    if (!m_bVals) {
+        sts = allocBuf(m_bVals, sizeof(float) * 3, _T("strength"));
+        if (sts != RGY_ERR_NONE) return sts;
+        const auto cudaerr = cudaMemset(m_bVals->ptr, 0, sizeof(float) * 3);
+        if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
+    }
+    return RGY_ERR_NONE;
 }
 
 RGY_ERR NVEncFilterSoftLight::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RGYLog> pPrintMes) {
@@ -386,7 +410,6 @@ RGY_ERR NVEncFilterSoftLight::procFrame(RGYFrameInfo *pFrame, cudaStream_t strea
 
     // boost以外は単一の融合カーネルで処理する。
     if (mode != VppSoftLightMode::BOOST) {
-        std::array<float, 3> b = { 0.0f, 0.0f, 0.0f };
         if (neutralize) {
             auto cudaerr = cudaMemsetAsync(m_reduce->ptr, 0, sizeof(unsigned long long) * 6, stream);
             if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
@@ -396,21 +419,14 @@ RGY_ERR NVEncFilterSoftLight::procFrame(RGYFrameInfo *pFrame, cudaStream_t strea
                 planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
                 width, height, (unsigned long long *)m_reduce->ptr);
             if (auto sts = err_to_rgy(cudaGetLastError()); sts != RGY_ERR_NONE) return sts;
-            std::array<unsigned long long, 6> host = {};
-            cudaerr = cudaMemcpyAsync(host.data(), m_reduce->ptr, sizeof(host[0]) * host.size(), cudaMemcpyDeviceToHost, stream);
-            if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
-            cudaerr = cudaStreamSynchronize(stream);
-            if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
-            const double totalPx = (double)total;
-            for (int i = 0; i < 3; i++) {
-                const double denom = totalPx - (prm->softlight.skipblack ? (double)host[3 + i] : 0.0);
-                const double mean = (denom > 0.0) ? ((double)host[i] / denom) / 65535.0 : 0.0;
-                b[i] = (float)(1.0 - mean);
-            }
+            kernel_softlight_finalize_b<<<1, 3, 0, stream>>>(
+                (const unsigned long long *)m_reduce->ptr, total,
+                prm->softlight.skipblack ? 1 : 0, (float *)m_bVals->ptr);
+            if (auto sts = err_to_rgy(cudaGetLastError()); sts != RGY_ERR_NONE) return sts;
         }
         kernel_softlight_fused_u16<<<grid2d, block2d, 0, stream>>>(
             planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
-            width, height, mode, b[0], b[1], b[2], formula);
+            width, height, mode, (const float *)m_bVals->ptr, formula);
         return err_to_rgy(cudaGetLastError());
     }
 
@@ -491,5 +507,6 @@ void NVEncFilterSoftLight::close() {
     m_convIn.reset();
     m_convOut.reset();
     m_reduce.reset();
+    m_bVals.reset();
     m_frameBuf.clear();
 }
