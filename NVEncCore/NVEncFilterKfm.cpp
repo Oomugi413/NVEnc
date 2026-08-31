@@ -6042,11 +6042,15 @@ RGY_ERR NVEncFilterKfm::analyzeAvailableSource(bool drain, cudaStream_t stream) 
     if (!m_analyzer || m_cachedSourceFrames <= 0) {
         return RGY_ERR_NONE;
     }
+    const auto prm = std::dynamic_pointer_cast<NVEncFilterParamKfm>(m_param);
+    // 固定60pは通常出力でKFMパターン判定を参照しないため、dump時だけ解析する。
+    if (prm && prm->kfm.mode == VppKfmMode::P60 && m_fpFMCount == nullptr && m_fpResult == nullptr) {
+        return RGY_ERR_NONE;
+    }
 
     const int readyCycles = drain
         ? divCeil(m_cachedSourceFrames, 5)
         : (m_cachedSourceFrames >= 8 ? ((m_cachedSourceFrames - 8) / 5 + 1) : 0);
-    const auto prm = std::dynamic_pointer_cast<NVEncFilterParamKfm>(m_param);
     const auto timing = prm ? prm->kfm.timing : VppKfmTiming::Realtime;
     while (m_nextFMCountSubmitCycle < readyCycles) {
         KfmProfileScope profile(m_kfmProfile, m_kfmProfile.submitFMCounts, m_nextFMCountSubmitCycle);
@@ -7495,7 +7499,7 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                 superWaitEvents.push_back(deintEvent);
             }
             RGYCudaEvent superEvent;
-            sts = renderTelecineSuper24(super24, m_nextTelecine24Frame, drain, stream, superWaitEvents, &superEvent);
+            sts = getCachedCleanSuper(KFM_CLEAN_SUPER_24, m_nextTelecine24Frame, super24, &super24, drain, stream, superWaitEvents, &superEvent);
             if (sts == RGY_ERR_MORE_DATA) {
                 break;
             }
@@ -7535,7 +7539,7 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                 if (sts != RGY_ERR_NONE) {
                     return sts;
                 }
-                sts = renderTelecineSuper24(superPrev24, m_nextTelecine24Frame - 1, true, stream, superWaitEvents, &prevSuperEvent);
+                sts = getCachedCleanSuper(KFM_CLEAN_SUPER_24, m_nextTelecine24Frame - 1, superPrev24, &superPrev24, true, stream, superWaitEvents, &prevSuperEvent);
                 if (sts != RGY_ERR_NONE) {
                     return sts;
                 }
@@ -7549,7 +7553,7 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                 if (sts != RGY_ERR_NONE) {
                     return sts;
                 }
-                sts = renderTelecineSuper24(superNext24, m_nextTelecine24Frame + 1, drain, stream, superWaitEvents, &nextSuperEvent);
+                sts = getCachedCleanSuper(KFM_CLEAN_SUPER_24, m_nextTelecine24Frame + 1, superNext24, &superNext24, drain, stream, superWaitEvents, &nextSuperEvent);
                 if (sts == RGY_ERR_MORE_DATA) {
                     break;
                 }
@@ -7570,12 +7574,22 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                 return sts;
             }
             RGYCudaEvent maskEvent;
+            uint32_t containsCombeCount = 0;
+            KfmContainsCombeReadback containsCombeReadback;
+            const bool patchCombe24Enabled = kfmDeint60BranchEnabled() && m_deint60Rtgmc && m_analyzer;
+            const bool needsContainsCombeCount = patchCombe24Enabled && prm->kfm.debugStage == VppKfmDebugStage::None;
+            const int maskDumpFrameIndex = super24->inputFrameId >= 0 ? super24->inputFrameId : m_nextTelecine24Frame;
+            bool fullCombeMaskGenerated = !kfmUseLazyCombeMask()
+                || prm->kfm.debugStage == VppKfmDebugStage::CombeMask
+                || m_fpFrameInfo != nullptr
+                || stageDumpRequested(maskDumpFrameIndex);
             sts = renderMaskBranch(switchFlag, containsCombe, combeMask, superPrev24, super24, superNext24,
-                "switch-flag-min", "contains-combe", "combe-mask-min", true, stream, maskWaitEvents, &maskEvent);
+                "switch-flag-min", "contains-combe", "combe-mask-min", fullCombeMaskGenerated,
+                stream, maskWaitEvents, &maskEvent, needsContainsCombeCount ? &containsCombeReadback : nullptr);
             if (sts != RGY_ERR_NONE) {
                 return sts;
             }
-            if (maskEvent() != nullptr) {
+            if (fullCombeMaskGenerated && maskEvent() != nullptr) {
                 removeWaitEvents.push_back(maskEvent);
             }
             RGYCudaEvent outputEvent;
@@ -7588,10 +7602,17 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
             } else {
                 sts = removeCombe24(out, deint24, super24, m_nextTelecine24Frame, stream, removeWaitEvents, &outputEvent);
                 if (sts != RGY_ERR_NONE) {
+                    resolveContainsCombeCount(containsCombeReadback, nullptr);
                     return sts;
                 }
+                if (needsContainsCombeCount) {
+                    sts = resolveContainsCombeCount(containsCombeReadback, &containsCombeCount);
+                    if (sts != RGY_ERR_NONE) {
+                        return sts;
+                    }
+                }
                 int patchN60 = -1;
-                if (kfmDeint60BranchEnabled() && m_deint60Rtgmc && m_analyzer) {
+                if (patchCombe24Enabled && containsCombeCount > 0) {
                     try {
                         static const int patchFieldIndex[4] = { 1, 3, 6, 8 };
                         const int frame24Cycle = m_nextTelecine24Frame / 4;
@@ -7616,6 +7637,17 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                     std::vector<RGYCudaEvent> patchWaitEvents = removeWaitEvents;
                     if (outputEvent() != nullptr) {
                         patchWaitEvents.push_back(outputEvent);
+                    }
+                    if (!fullCombeMaskGenerated) {
+                        RGYCudaEvent fullMaskEvent;
+                        sts = renderCombeMask(combeMask, switchFlag, super24, "combe-mask-min", stream, { maskEvent }, &fullMaskEvent);
+                        if (sts != RGY_ERR_NONE) {
+                            return sts;
+                        }
+                        fullCombeMaskGenerated = true;
+                        if (fullMaskEvent() != nullptr) {
+                            patchWaitEvents.push_back(fullMaskEvent);
+                        }
                     }
                     const auto *deint60 = findDeint60Frame(patchN60, &patchWaitEvents);
                     if (!deint60 || !deint60->ptr[0]) {
@@ -7645,6 +7677,9 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                     out = &m_patchCombeFrames[patchIndex]->frame;
                     outputEvent = patchEvent;
                 }
+                if (!fullCombeMaskGenerated) {
+                    m_kfmProfile.fullCombeMaskAvoided++;
+                }
             }
             if (prm->kfm.ucf && m_analyzer && !m_analyzerOutputResults.empty()) {
                 try {
@@ -7659,6 +7694,16 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                     sts = resolveUcfNoiseResults((lastUcfN60 >> 1) + 1, stream);
                     if (sts != RGY_ERR_NONE) {
                         return sts;
+                    }
+                    const auto ucf24Plan = planUcfDecomb24Frame(frameInfo);
+                    if (ucf24Plan.type == KFM_UCF24_SELECT_FRAME && ucf24Plan.n60 >= 0) {
+                        sts = ensureUcfRtgmcRange(ucf24Plan.lane, ucf24Plan.n60, ucf24Plan.n60 + 1, stream);
+                        if (sts == RGY_ERR_MORE_DATA) {
+                            break;
+                        }
+                        if (sts != RGY_ERR_NONE) {
+                            return sts;
+                        }
                     }
                     const auto ucf24 = selectUcfDecomb24Frame(frameInfo, out, &ucfWaitEvents);
                     if (ucf24.type == KFM_UCF24_SELECT_FRAME && ucf24.frame && ucf24.frame != out) {
