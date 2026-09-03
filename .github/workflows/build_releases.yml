@@ -5,50 +5,124 @@ on:
     branches:
       - master
       - actions
-    tags:
-      - '*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && 'prepare-release' || format('build-windows-{0}', github.ref) }}
+  cancel-in-progress: false
 
 jobs:
-  get_version_name:
-    name: Get version name
+  prepare:
+    name: Prepare build
     runs-on: ubuntu-latest
     outputs:
       rev_count: ${{ steps.rev.outputs.rev_count }}
+      release_sha: ${{ steps.rev.outputs.release_sha }}
+      version: ${{ steps.rev.outputs.version }}
       version_name: ${{ steps.rev.outputs.version_name }}
+      tag: ${{ steps.rev.outputs.tag }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
+        ref: ${{ github.sha }}
         fetch-depth: 0
-    - name: Verify tag matches VER_STR_FILEVERSION
-      if: startsWith(github.ref, 'refs/tags/')
-      run: |
-        cd ${{ github.workspace }}
-        TAG=$(echo "${{ github.ref }}" | sed -e 's#refs/tags/##g' | tr -d '\r\n')
-        VER=$(sed -n 's/^#define VER_STR_FILEVERSION[ \t]*"\([^"]*\)".*$/\1/p' NVEncCore/rgy_version.h | tr -d '\r\n')
-        if [ "$TAG" = "$VER" ] || [ "${TAG#v}" = "$VER" ]; then
-          echo "Version OK: tag=${TAG}, header=${VER}"
-        else
-          echo "ERROR: Tag version (${TAG}) does not match VER_STR_FILEVERSION (${VER})" >&2
-          exit 1
-        fi
     - name: Set version name
       id: rev
+      shell: bash
       run: |
-        cd ${{ github.workspace }}
-        REVCOUNT=`git rev-list --count HEAD`
-        echo "rev_count=${REVCOUNT}" >> $GITHUB_OUTPUT
-        if [[ "${{ github.ref }}" =~ "refs/tags/" ]]; then
-          VERSION=$(echo ${{ github.ref }} | sed -e "s#refs/tags/##g")
-        else
-          VERSION=r${REVCOUNT}
+        set -euo pipefail
+        RELEASE_SHA=$(git rev-parse HEAD)
+        if [ "$RELEASE_SHA" != "${{ github.sha }}" ]; then
+          echo "ERROR: checkout SHA ($RELEASE_SHA) does not match workflow SHA (${{ github.sha }})." >&2
+          exit 1
         fi
-        echo "version_name=${VERSION}" >> $GITHUB_OUTPUT
+
+        REVCOUNT=$(git rev-list --count HEAD)
+        echo "rev_count=$REVCOUNT" >> "$GITHUB_OUTPUT"
+        echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION=$(sh ./scripts/get-version.sh)
+          TAG="$VERSION"
+          VERSION_NAME="$TAG"
+        else
+          VERSION=""
+          TAG=""
+          VERSION_NAME="r$REVCOUNT"
+        fi
+
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "## Build target"
+          echo "- SHA: \`$RELEASE_SHA\`"
+          echo "- Version: \`${VERSION:-$VERSION_NAME}\`"
+          if [ -n "$TAG" ]; then echo "- Tag: \`$TAG\`"; fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Check release preconditions
+      if: github.event_name == 'workflow_dispatch'
+      uses: actions/github-script@v7
+      env:
+        RELEASE_SHA: ${{ steps.rev.outputs.release_sha }}
+        TAG: ${{ steps.rev.outputs.tag }}
+      with:
+        script: |
+          const owner = context.repo.owner;
+          const repo = context.repo.repo;
+          const tag = process.env.TAG;
+          const releaseSha = process.env.RELEASE_SHA;
+          const tagMarker = `github-actions-run:${context.runId}`;
+          const releaseMarker = `<!-- github-actions-run:${context.runId} -->`;
+          const isRetry = Number(process.env.GITHUB_RUN_ATTEMPT) > 1;
+
+          let tagData = null;
+          try {
+            tagData = (await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` })).data;
+          } catch (error) {
+            if (error.status !== 404) throw error;
+          }
+
+          let release = null;
+          try {
+            release = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
+          } catch (error) {
+            if (error.status !== 404) throw error;
+          }
+
+          if (!isRetry && (tagData || release)) {
+            core.setFailed(`ERROR: version ${tag} has already been released as tag ${tag}. Update VER_STR_FILEVERSION and commit it before preparing a release.`);
+            return;
+          }
+
+          if (isRetry && tagData) {
+            if (tagData.object.type !== 'tag') {
+              core.setFailed(`ERROR: existing tag ${tag} was not created by this workflow run.`);
+              return;
+            }
+            const annotatedTag = (await github.rest.git.getTag({ owner, repo, tag_sha: tagData.object.sha })).data;
+            if (annotatedTag.object.type !== 'commit' || annotatedTag.object.sha !== releaseSha || !annotatedTag.message.includes(tagMarker)) {
+              core.setFailed(`ERROR: existing tag ${tag} does not belong to this workflow run or points to another SHA.`);
+              return;
+            }
+          }
+
+          if (isRetry && release) {
+            if (!tagData || !release.draft || release.tag_name !== tag || !(release.body || '').includes(releaseMarker)) {
+              core.setFailed(`ERROR: existing release ${tag} is not the draft created by this workflow run.`);
+            }
+          }
 
   build:
-    name: Upload Release Asset
+    name: Build Windows Release Asset
     runs-on: windows-2022
-    needs: get_version_name
+    needs: prepare
 
     defaults:
       run:
@@ -75,8 +149,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
           submodules: true
           fetch-depth: 0
+
+      - name: Verify checkout SHA
+        shell: powershell
+        run: |
+          $actual = git rev-parse HEAD
+          if ($actual -ne '${{ needs.prepare.outputs.release_sha }}') {
+            throw "checkout SHA ($actual) does not match release SHA (${{ needs.prepare.outputs.release_sha }})."
+          }
 
       - name: Checkout dependencies
         run: |
@@ -139,7 +222,7 @@ jobs:
           if "${{ matrix.arch }}" == "x64" copy NVEncNVOFFRUCBin\*.dll NVEncC_Release
           if "${{ matrix.arch }}" == "x64" copy NVEncNVSDKNGXBin\*.dll NVEncC_Release
           if "${{ matrix.arch }}" == "x64" copy libvship_nvidia_5_0\*.dll NVEncC_Release
-          7z a -mx9 NVEncC_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}.7z .\NVEncC_Release\*
+          7z a -mx9 NVEncC_${{ needs.prepare.outputs.version_name }}_${{ matrix.platform }}.7z .\NVEncC_Release\*
 
       - name: Check dll
         run: |
@@ -154,41 +237,34 @@ jobs:
           "%NVENCC_EXE%" --check-cmd-parse
 
       - name: Check Version
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'workflow_dispatch'
         id: check_ver
         run: |
-          powershell "$ver = (Get-ItemProperty .\NVEncC_Release\NVEncC*.exe).VersionInfo.FileVersion; if ($ver -eq '${{ needs.get_version_name.outputs.version_name }}') { exit 0; } exit 1;"
+          powershell "$ver = (Get-ItemProperty .\NVEncC_Release\NVEncC*.exe).VersionInfo.FileVersion; if ($ver -eq '${{ needs.prepare.outputs.version }}') { exit 0; } exit 1;"
 
       - name: Calc hash
         id: calc_hash
         run: |
-          7z h -scrc* NVEncC_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}.7z
-
-      - name: Upload Release Asset
-        id: upload-release-asset 
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          files: NVEncC_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}.7z
+          7z h -scrc* NVEncC_${{ needs.prepare.outputs.version_name }}_${{ matrix.platform }}.7z
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NVEncC_release_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}
-          path: NVEncC_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}.7z
+          name: NVEncC_release_${{ needs.prepare.outputs.version_name }}_${{ matrix.platform }}
+          path: NVEncC_${{ needs.prepare.outputs.version_name }}_${{ matrix.platform }}.7z
+          retention-days: 30
 
       - name: Upload plugin artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NVEnc_plugin_release_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}
+          name: NVEnc_plugin_release_${{ needs.prepare.outputs.version_name }}_${{ matrix.platform }}
           path: _build\${{ matrix.platform }}\Release\NVEnc.${{ matrix.outext }}
+          retention-days: 30
 
   upload_aviutl_release:
-    name: Upload Aviutl Release Asset
+    name: Build Aviutl Release Asset
     runs-on: windows-2022
-    needs: [ get_version_name, build ]
+    needs: [ prepare, build ]
 
     defaults:
       run:
@@ -217,8 +293,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
           submodules: true
           fetch-depth: 0
+
+      - name: Verify checkout SHA
+        shell: powershell
+        run: |
+          $actual = git rev-parse HEAD
+          if ($actual -ne '${{ needs.prepare.outputs.release_sha }}') {
+            throw "checkout SHA ($actual) does not match release SHA (${{ needs.prepare.outputs.release_sha }})."
+          }
 
       - name: Download auo_setup Win32
         id: download_auosetup_win32
@@ -236,28 +321,28 @@ jobs:
         uses: actions/download-artifact@v4
         if: matrix.platform == 'Win32'
         with:
-          name: NVEnc_plugin_release_${{ needs.get_version_name.outputs.version_name }}_Win32
+          name: NVEnc_plugin_release_${{ needs.prepare.outputs.version_name }}_Win32
           path: plugin_win32
 
       - name: Download plugin x64
         uses: actions/download-artifact@v4
         if: matrix.platform == 'x64'
         with:
-          name: NVEnc_plugin_release_${{ needs.get_version_name.outputs.version_name }}_x64
+          name: NVEnc_plugin_release_${{ needs.prepare.outputs.version_name }}_x64
           path: plugin_x64
 
       - name: Download NVEncC Win32
         uses: actions/download-artifact@v4
         if: matrix.platform == 'Win32'
         with:
-          name: NVEncC_release_${{ needs.get_version_name.outputs.version_name }}_Win32
-          path: NVEncC_${{ needs.get_version_name.outputs.version_name }}_Win32.7z
+          name: NVEncC_release_${{ needs.prepare.outputs.version_name }}_Win32
+          path: .
 
       - name: Download NVEncC x64
         uses: actions/download-artifact@v4
         with:
-          name: NVEncC_release_${{ needs.get_version_name.outputs.version_name }}_x64
-          path: NVEncC_${{ needs.get_version_name.outputs.version_name }}_x64.7z
+          name: NVEncC_release_${{ needs.prepare.outputs.version_name }}_x64
+          path: .
           
       - name: Create package Win32
         id: archieve_win32
@@ -268,8 +353,8 @@ jobs:
           mkdir Aviutl_NVEnc_release\exe_files\NVEncC
           mkdir Aviutl_NVEnc_release\exe_files\NVEncC\x86
           mkdir Aviutl_NVEnc_release\exe_files\NVEncC\x64
-          7z x -oAviutl_NVEnc_release\exe_files\NVEncC\x86\ NVEncC_${{ needs.get_version_name.outputs.version_name }}_Win32.7z
-          7z x -oAviutl_NVEnc_release\exe_files\NVEncC\x64\ NVEncC_${{ needs.get_version_name.outputs.version_name }}_x64.7z
+          7z x -oAviutl_NVEnc_release\exe_files\NVEncC\x86\ NVEncC_${{ needs.prepare.outputs.version_name }}_Win32.7z
+          7z x -oAviutl_NVEnc_release\exe_files\NVEncC\x64\ NVEncC_${{ needs.prepare.outputs.version_name }}_x64.7z
           copy /y plugin_win32\NVEnc.auo Aviutl_NVEnc_release\plugins\
           copy /y NVEnc\NVEnc.ini Aviutl_NVEnc_release\plugins\
           copy /y NVEnc\NVEnc.en.ini Aviutl_NVEnc_release\plugins\
@@ -280,7 +365,7 @@ jobs:
           copy /y "NVEnc\NVENCが利用可能か確認 [ダブルクリック].bat" Aviutl_NVEnc_release\
           echo D | xcopy /y /e NVEnc\stg Aviutl_NVEnc_release\plugins\NVEnc_stg
           dir /b /s Aviutl_NVEnc_release\
-          7z a -mx9 Aviutl_NVEnc_${{ needs.get_version_name.outputs.version_name }}.zip .\Aviutl_NVEnc_release\*
+          7z a -mx9 Aviutl_NVEnc_${{ needs.prepare.outputs.version_name }}.zip .\Aviutl_NVEnc_release\*
 
       - name: Create package x64
         id: archieve_x64
@@ -290,7 +375,7 @@ jobs:
           7z x -oAviutl_NVEnc_release\ auo_setup.zip
           mkdir Aviutl_NVEnc_release\Plugin\exe_files\NVEncC
           mkdir Aviutl_NVEnc_release\Plugin\exe_files\NVEncC\x64
-          7z x -oAviutl_NVEnc_release\Plugin\exe_files\NVEncC\x64\ NVEncC_${{ needs.get_version_name.outputs.version_name }}_x64.7z
+          7z x -oAviutl_NVEnc_release\Plugin\exe_files\NVEncC\x64\ NVEncC_${{ needs.prepare.outputs.version_name }}_x64.7z
           copy /y plugin_x64\NVEnc.auo2 Aviutl_NVEnc_release\Plugin\
           copy /y NVEnc\NVEnc.ini Aviutl_NVEnc_release\Plugin\
           copy /y NVEnc\NVEnc.en.ini Aviutl_NVEnc_release\Plugin\
@@ -299,20 +384,20 @@ jobs:
           copy /y NVEnc\auo_setup.ini Aviutl_NVEnc_release\Plugin\exe_files\
           copy /y NVEnc\NVEnc_readme.txt Aviutl_NVEnc_release\
           echo D | xcopy /y /e NVEnc\stg Aviutl_NVEnc_release\Plugin\NVEnc_stg
-          7z a -t7z -m0=lzma -mx=9 -mmt Aviutl2_NVEnc_${{ needs.get_version_name.outputs.version_name }}.7z .\Aviutl_NVEnc_release\*
-          copy /b NVEnc\7zSD.noadmin.sfx + NVEnc\7zInstallerConfig.txt + Aviutl2_NVEnc_${{ needs.get_version_name.outputs.version_name }}.7z Aviutl2_NVEnc_${{ needs.get_version_name.outputs.version_name }}_install.exe
+          7z a -t7z -m0=lzma -mx=9 -mmt Aviutl2_NVEnc_${{ needs.prepare.outputs.version_name }}.7z .\Aviutl_NVEnc_release\*
+          copy /b NVEnc\7zSD.noadmin.sfx + NVEnc\7zInstallerConfig.txt + Aviutl2_NVEnc_${{ needs.prepare.outputs.version_name }}.7z Aviutl2_NVEnc_${{ needs.prepare.outputs.version_name }}_install.exe
 
       - name: Check Version Win32
         id: check_ver_win32
-        if: startsWith(github.ref, 'refs/tags/') && matrix.platform == 'Win32'
+        if: github.event_name == 'workflow_dispatch' && matrix.platform == 'Win32'
         run: |
-          powershell "$ver = (Get-ItemProperty .\plugin_win32\NVEnc.auo).VersionInfo.FileVersion; if ($ver -eq '${{ needs.get_version_name.outputs.version_name }}') { exit 0; } exit 1;"
+          powershell "$ver = (Get-ItemProperty .\plugin_win32\NVEnc.auo).VersionInfo.FileVersion; if ($ver -eq '${{ needs.prepare.outputs.version }}') { exit 0; } exit 1;"
 
       - name: Check Version x64
         id: check_ver_x64
-        if: startsWith(github.ref, 'refs/tags/') && matrix.platform == 'x64'
+        if: github.event_name == 'workflow_dispatch' && matrix.platform == 'x64'
         run: |
-          powershell "$ver = (Get-ItemProperty .\plugin_x64\NVEnc.auo2).VersionInfo.FileVersion; if ($ver -eq '${{ needs.get_version_name.outputs.version_name }}') { exit 0; } exit 1;"
+          powershell "$ver = (Get-ItemProperty .\plugin_x64\NVEnc.auo2).VersionInfo.FileVersion; if ($ver -eq '${{ needs.prepare.outputs.version }}') { exit 0; } exit 1;"
 
       - name: Check dll Win32
         id: check_dll_win32
@@ -331,44 +416,234 @@ jobs:
         id: calc_hash_win32
         if: matrix.platform == 'Win32'
         run: |
-          7z h -scrc* Aviutl_NVEnc_${{ needs.get_version_name.outputs.version_name }}.zip
+          7z h -scrc* Aviutl_NVEnc_${{ needs.prepare.outputs.version_name }}.zip
 
       - name: Calc hash x64
         id: calc_hash_x64
         if: matrix.platform == 'x64'
         run: |
-          7z h -scrc* Aviutl2_NVEnc_${{ needs.get_version_name.outputs.version_name }}_install.exe
-
-      - name: Upload Release Asset Win32
-        id: upload-release-asset-win32
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') && matrix.platform == 'Win32'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          files: |
-            Aviutl_NVEnc_${{ needs.get_version_name.outputs.version_name }}.zip
-
-      - name: Upload Release Asset x64
-        id: upload-release-asset-x64
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') && matrix.platform == 'x64'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          files: |
-            Aviutl2_NVEnc_${{ needs.get_version_name.outputs.version_name }}_install.exe
+          7z h -scrc* Aviutl2_NVEnc_${{ needs.prepare.outputs.version_name }}_install.exe
 
       - name: Upload artifact Win32
         uses: actions/upload-artifact@v4
         if: matrix.platform == 'Win32'
         with:
-          name: Aviutl_NVEnc_${{ needs.get_version_name.outputs.version_name }}
-          path: Aviutl_NVEnc_${{ needs.get_version_name.outputs.version_name }}.zip
+          name: Aviutl_NVEnc_${{ needs.prepare.outputs.version_name }}
+          path: Aviutl_NVEnc_${{ needs.prepare.outputs.version_name }}.zip
+          retention-days: 30
 
       - name: Upload artifact x64
         uses: actions/upload-artifact@v4
         if: matrix.platform == 'x64'
         with:
-          name: Aviutl2_NVEnc_${{ needs.get_version_name.outputs.version_name }}_install
-          path: Aviutl2_NVEnc_${{ needs.get_version_name.outputs.version_name }}_install.exe
+          name: Aviutl2_NVEnc_${{ needs.prepare.outputs.version_name }}_install
+          path: Aviutl2_NVEnc_${{ needs.prepare.outputs.version_name }}_install.exe
+          retention-days: 30
+
+  linux_packages:
+    name: Build Linux Packages
+    needs: prepare
+    uses: ./.github/workflows/build_packages.yml
+    with:
+      release_sha: ${{ needs.prepare.outputs.release_sha }}
+
+  release:
+    name: Create Draft Release
+    if: github.event_name == 'workflow_dispatch'
+    needs: [ prepare, build, upload_aviutl_release, linux_packages ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download NVEncC assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: NVEncC_release_${{ needs.prepare.outputs.version_name }}_*
+          path: downloaded-assets
+
+      - name: Download AviUtl asset
+        uses: actions/download-artifact@v4
+        with:
+          name: Aviutl_NVEnc_${{ needs.prepare.outputs.version_name }}
+          path: downloaded-assets/Aviutl
+
+      - name: Download AviUtl2 asset
+        uses: actions/download-artifact@v4
+        with:
+          name: Aviutl2_NVEnc_${{ needs.prepare.outputs.version_name }}_install
+          path: downloaded-assets/Aviutl2
+
+      - name: Download Linux assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nvencc_*
+          path: downloaded-assets
+
+      - name: Validate release assets
+        shell: bash
+        env:
+          VERSION_NAME: ${{ needs.prepare.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' FILES < <(find downloaded-assets -type f -print0)
+          if [ "${#FILES[@]}" -ne 6 ]; then
+            echo "ERROR: expected 6 release assets, but found ${#FILES[@]}." >&2
+            find downloaded-assets -type f -print >&2
+            exit 1
+          fi
+
+          declare -A SEEN
+          for file in "${FILES[@]}"; do
+            if [ ! -s "$file" ]; then
+              echo "ERROR: release asset is empty: $file" >&2
+              exit 1
+            fi
+            name=$(basename "$file")
+            if [ -n "${SEEN[$name]:-}" ]; then
+              echo "ERROR: duplicate release asset name: $name" >&2
+              exit 1
+            fi
+            SEEN[$name]=1
+          done
+
+          EXPECTED=(
+            "NVEncC_${VERSION_NAME}_Win32.7z"
+            "NVEncC_${VERSION_NAME}_x64.7z"
+            "Aviutl_NVEnc_${VERSION_NAME}.zip"
+            "Aviutl2_NVEnc_${VERSION_NAME}_install.exe"
+          )
+          for name in "${EXPECTED[@]}"; do
+            if [ -z "${SEEN[$name]:-}" ]; then
+              echo "ERROR: required release asset is missing: $name" >&2
+              exit 1
+            fi
+          done
+
+          if [ "$(find downloaded-assets -type f -name '*.deb' | wc -l)" -ne 1 ] || \
+             [ "$(find downloaded-assets -type f -name '*.rpm' | wc -l)" -ne 1 ]; then
+            echo "ERROR: exactly one deb and one rpm package are required." >&2
+            exit 1
+          fi
+
+          mkdir release-assets
+          for file in "${FILES[@]}"; do
+            cp "$file" release-assets/
+          done
+          find release-assets -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Create or resume draft release
+        id: create_release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "ERROR: RELEASE_PAT is not configured." >&2
+            exit 1
+          fi
+
+          TAG_MARKER="github-actions-run:${GITHUB_RUN_ID}"
+          RELEASE_MARKER="<!-- github-actions-run:${GITHUB_RUN_ID} -->"
+          API="repos/${GITHUB_REPOSITORY}"
+
+          api_get_optional() {
+            local endpoint=$1
+            local output=$2
+            local status
+            status=$(curl --silent --show-error \
+              --output "$output" \
+              --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/$endpoint") || {
+                echo "ERROR: GitHub API request failed for $endpoint." >&2
+                return 2
+              }
+            case "$status" in
+              200) return 0 ;;
+              404) return 4 ;;
+              *)
+                message=$(jq -r '.message // "unknown API error"' "$output" 2>/dev/null || true)
+                echo "ERROR: GitHub API returned HTTP $status for $endpoint: $message" >&2
+                return 2
+                ;;
+            esac
+          }
+
+          REF_FILE="$RUNNER_TEMP/release-tag-ref.json"
+          if api_get_optional "$API/git/ref/tags/$TAG" "$REF_FILE"; then
+            REF_JSON=$(<"$REF_FILE")
+            TYPE=$(jq -r '.object.type' <<< "$REF_JSON")
+            OBJECT_SHA=$(jq -r '.object.sha' <<< "$REF_JSON")
+            if [ "$TYPE" != "tag" ]; then
+              echo "ERROR: existing tag $TAG was not created by this workflow run." >&2
+              exit 1
+            fi
+            TAG_JSON=$(gh api "$API/git/tags/$OBJECT_SHA")
+            TAG_TARGET_TYPE=$(jq -r '.object.type' <<< "$TAG_JSON")
+            TAG_TARGET=$(jq -r '.object.sha' <<< "$TAG_JSON")
+            TAG_MESSAGE=$(jq -r '.message' <<< "$TAG_JSON")
+            if [ "$TAG_TARGET_TYPE" != "commit" ] || [ "$TAG_TARGET" != "$RELEASE_SHA" ] || [[ "$TAG_MESSAGE" != *"$TAG_MARKER"* ]]; then
+              echo "ERROR: existing tag $TAG does not belong to this workflow run or points to another SHA." >&2
+              exit 1
+            fi
+          else
+            API_STATUS=$?
+            if [ "$API_STATUS" -ne 4 ]; then
+              exit "$API_STATUS"
+            fi
+            TAG_OBJECT_SHA=$(gh api --method POST "$API/git/tags" \
+              -f tag="$TAG" \
+              -f message="$TAG_MARKER" \
+              -f object="$RELEASE_SHA" \
+              -f type=commit \
+              --jq '.sha')
+            gh api --method POST "$API/git/refs" \
+              -f ref="refs/tags/$TAG" \
+              -f sha="$TAG_OBJECT_SHA" >/dev/null
+          fi
+
+          RELEASE_FILE="$RUNNER_TEMP/release.json"
+          if api_get_optional "$API/releases/tags/$TAG" "$RELEASE_FILE"; then
+            RELEASE_JSON=$(<"$RELEASE_FILE")
+            IS_DRAFT=$(jq -r '.draft' <<< "$RELEASE_JSON")
+            RELEASE_TAG=$(jq -r '.tag_name' <<< "$RELEASE_JSON")
+            BODY=$(jq -r '.body // ""' <<< "$RELEASE_JSON")
+            if [ "$IS_DRAFT" != "true" ] || [ "$RELEASE_TAG" != "$TAG" ] || [[ "$BODY" != *"$RELEASE_MARKER"* ]]; then
+              echo "ERROR: existing release $TAG is not the draft created by this workflow run." >&2
+              exit 1
+            fi
+          else
+            API_STATUS=$?
+            if [ "$API_STATUS" -ne 4 ]; then
+              exit "$API_STATUS"
+            fi
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --title "$TAG" \
+              --notes "$RELEASE_MARKER"
+          fi
+
+          gh release upload "$TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          RELEASE_URL=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq '.url')
+          echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Add release URL to summary
+        shell: bash
+        env:
+          RELEASE_URL: ${{ steps.create_release.outputs.release_url }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+        run: |
+          {
+            echo "## Draft Release"
+            echo "- Tag: \`$TAG\`"
+            echo "- SHA: \`$RELEASE_SHA\`"
+            echo "- URL: $RELEASE_URL"
+          } >> "$GITHUB_STEP_SUMMARY"

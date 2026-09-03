@@ -3,11 +3,14 @@ name: Build Linux Packages
 on:
   push:
     branches:
-      - master
       - linux
       - ffmpeg5
-    tags:
-      - '*'
+  workflow_call:
+    inputs:
+      release_sha:
+        description: Release対象のcommit SHA
+        required: true
+        type: string
 
 jobs:
   build:
@@ -36,14 +39,13 @@ jobs:
       VAPOURSYNTH_HEADER_INC: /opt/nvenc_headers/vapoursynth-R72/include
       VSHIP_HEADER_INC: /opt/nvenc_headers/vship/src
 
-    name: Upload Release Asset
+    name: Build Linux Package
     runs-on: ubuntu-latest
     steps:
       - name: Prepare
         id: prep
         run: |
           REPOSITORY=$(echo ${{ github.repository }} | sed -e "s#.*/##")
-          VERSION=$(echo ${{ github.ref }} | sed -e "s#refs/tags/##g")
           NPROC=$(grep 'processor' /proc/cpuinfo | wc -l)
           OUTPUT_DIR=`pwd`/output
           LOCAL_USER_ID=$(id -u)
@@ -58,19 +60,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.release_sha || github.sha }}
           submodules: true
           fetch-depth: 0
 
-      - name: Verify tag matches VER_STR_FILEVERSION
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Verify checkout SHA
+        env:
+          EXPECTED_SHA: ${{ inputs.release_sha || github.sha }}
         run: |
-          cd ${{ github.workspace }}
-          TAG=$(echo ${{ github.ref }} | sed -e "s#refs/tags/##g")
-          VER=$(sed -n 's/^#define VER_STR_FILEVERSION[ \t]*"\([^"]*\)".*$/\1/p' NVEncCore/rgy_version.h | tr -d '\r\n')
-          if [ "$TAG" = "$VER" ] || [ "${TAG#v}" = "$VER" ]; then
-            echo "Version OK: tag=${TAG}, header=${VER}"
-          else
-            echo "ERROR: Tag version (${TAG}) does not match VER_STR_FILEVERSION (${VER})" >&2
+          set -euo pipefail
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: checkout SHA ($ACTUAL_SHA) does not match release SHA ($EXPECTED_SHA)." >&2
             exit 1
           fi
 
@@ -138,17 +139,9 @@ jobs:
         run: |
           7z h -scrc* ${{ steps.build_exec.outputs.pkgfile }}
 
-      - name: Upload Release Asset
-        id: upload-release-asset 
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          files: ${{ steps.build_exec.outputs.pkgfile }}
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nvencc_${{ matrix.dockerimg }}_${{ matrix.pkgtype }}
           path: ${{ steps.build_exec.outputs.pkgfile }}
+          retention-days: 30
