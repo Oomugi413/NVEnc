@@ -102,11 +102,24 @@ nvmlReturn_t NVMLMonitor::LoadDll() {
         return NVML_ERROR_NOT_FOUND; \
     } \
 }
-    LOAD_NVML_FUNC(nvmlInit);
+#define LOAD_NVML_FUNC_VERSIONED(x, versioned_name) { \
+    m_func.f_ ## x = (pf ## x)RGY_GET_PROC_ADDRESS(m_hDll, versioned_name); \
+    /* バージョン付きエントリポイントを持たない旧ドライバとの互換性を維持する。 */ \
+    if (m_func.f_ ## x == NULL) { \
+        m_func.f_ ## x = (pf ## x)RGY_GET_PROC_ADDRESS(m_hDll, #x); \
+    } \
+    if (m_func.f_ ## x == NULL) { \
+        memset(&m_func, 0, sizeof(m_func)); \
+        return NVML_ERROR_NOT_FOUND; \
+    } \
+}
+    // nvml.hではこれらのAPIは_v2に置換されるが、LOAD_NVML_FUNC内で文字列化すると
+    // マクロ展開が抑止され、旧APIをロードしてしまう。
+    LOAD_NVML_FUNC_VERSIONED(nvmlInit, "nvmlInit_v2");
     LOAD_NVML_FUNC(nvmlShutdown);
     LOAD_NVML_FUNC(nvmlErrorString);
-    LOAD_NVML_FUNC(nvmlDeviceGetCount);
-    LOAD_NVML_FUNC(nvmlDeviceGetHandleByPciBusId);
+    LOAD_NVML_FUNC_VERSIONED(nvmlDeviceGetCount, "nvmlDeviceGetCount_v2");
+    LOAD_NVML_FUNC_VERSIONED(nvmlDeviceGetHandleByPciBusId, "nvmlDeviceGetHandleByPciBusId_v2");
     LOAD_NVML_FUNC(nvmlDeviceGetUtilizationRates);
     LOAD_NVML_FUNC(nvmlDeviceGetEncoderUtilization);
     LOAD_NVML_FUNC(nvmlDeviceGetDecoderUtilization);
@@ -123,6 +136,7 @@ nvmlReturn_t NVMLMonitor::LoadDll() {
     return NVML_SUCCESS;
 
 #undef LOAD_NVML_FUNC
+#undef LOAD_NVML_FUNC_VERSIONED
 }
 
 nvmlReturn_t NVMLMonitor::Init(const std::string& pciBusId) {
