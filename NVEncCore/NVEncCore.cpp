@@ -1264,7 +1264,7 @@ RGY_ERR NVEncCore::GPUAutoSelect(std::vector<std::unique_ptr<NVGPUInfo>> &gpuLis
 
         NVMLMonitorInfo info;
 #if ENABLE_NVML
-        NVMLMonitor monitor;
+        NVMLMonitor monitor(m_pLog, RGY_LOGT_CORE_GPU_SELECT);
         auto nvml_ret = NVML_SUCCESS;
         if (gpu->pciBusId().length() > 0
             && (nvml_ret = monitor.Init(gpu->pciBusId())) == NVML_SUCCESS
