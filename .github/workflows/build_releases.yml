@@ -8,7 +8,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  packages: write
 
 concurrency:
   group: ${{ github.event_name == 'workflow_dispatch' && 'prepare-release' || format('build-windows-{0}', github.ref) }}
