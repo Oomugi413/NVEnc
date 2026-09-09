@@ -1,5 +1,10 @@
 # NVEnc Release Notes
 
+## 9.34
+
+- Fix issues with timestamp when using y4m reader.
+- Speed up [--vpp-kfm](./NVEncC_Options.en.md#--vpp-kfm-param1value1param2value2) `mode=24`.
+
 ## 9.33
 
 - Add ARM64 build support.
