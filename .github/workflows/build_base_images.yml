@@ -16,10 +16,10 @@ jobs:
       matrix:
         include:
           - dockerimg: ubuntu2404_cuda13
+          - dockerimg: fedora39_cuda12
           # Legacy distribution targets. Keep their Dockerfiles, but do not
           # publish them from the Oomugi413 fork by default.
           # - dockerimg: ubuntu2004_cuda11
-          # - dockerimg: fedora39_cuda12
 
     env:
       DOCKER_FILE: docker/docker_${{ matrix.dockerimg }}
