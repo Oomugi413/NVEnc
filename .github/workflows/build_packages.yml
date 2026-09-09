@@ -33,6 +33,10 @@ jobs:
             pkgtype: deb
             arch: x86_64
             package_suffix: ''
+          - dockerimg: fedora39_cuda12
+            pkgtype: rpm
+            arch: x86_64
+            package_suffix: ''
           # Legacy distribution targets. Keep their Dockerfiles, but do not
           # build release packages for them by default. Uncomment either entry
           # to produce a distinctly named legacy package.
