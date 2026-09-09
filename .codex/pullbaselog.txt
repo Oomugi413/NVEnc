@@ -1,0 +1,123 @@
+2m 2s
+Run docker pull ghcr.io/oomugi413/nvenc-build:ubuntu2404_cuda13
+  docker pull ghcr.io/oomugi413/nvenc-build:ubuntu2404_cuda13
+  shell: /usr/bin/bash -e {0}
+  env:
+    DOCKER_IMAGE: ubuntu2404_cuda13
+    PKG_TYPE: deb
+    FFMPEG_PREFIX: /opt/build_scripts/ffmpeg_dll/build_dll/x64/build
+    VMAF_PREFIX: /opt/build_scripts/ffmpeg_dll/x64/build
+    NVENC_HEADER_DIR: /opt/nvenc_headers
+    AVISYNTH_HEADER_INC: /opt/nvenc_headers/AviSynthPlus-3.7.5/avs_core/include
+    VAPOURSYNTH_HEADER_INC: /opt/nvenc_headers/vapoursynth-R72/include
+    VSHIP_HEADER_INC: /opt/nvenc_headers/vship/src
+ubuntu2404_cuda13: Pulling from oomugi413/nvenc-build
+b40150c1c271: Pulling fs layer
+2cdd254b12ef: Pulling fs layer
+8f4d8a40175c: Pulling fs layer
+780df6083fd7: Pulling fs layer
+4f4fb700ef54: Pulling fs layer
+e55c99c94f9e: Pulling fs layer
+c6202876bb83: Pulling fs layer
+00cd0c0d76b1: Pulling fs layer
+217e330c1391: Pulling fs layer
+ff9efdb88b3f: Pulling fs layer
+13ea876ef646: Pulling fs layer
+e689fbd508bd: Pulling fs layer
+a3a848dc9b9c: Pulling fs layer
+86c8aab771c6: Pulling fs layer
+59465e339bcf: Pulling fs layer
+2d10556a6cbd: Pulling fs layer
+83480e855096: Pulling fs layer
+1c1986220085: Pulling fs layer
+9432895a805f: Pulling fs layer
+1f88e97f90e0: Pulling fs layer
+972f2ec6bdac: Pulling fs layer
+2aa67545a122: Pulling fs layer
+a3a848dc9b9c: Waiting
+1c1986220085: Waiting
+86c8aab771c6: Waiting
+59465e339bcf: Waiting
+2d10556a6cbd: Waiting
+83480e855096: Waiting
+9432895a805f: Waiting
+972f2ec6bdac: Waiting
+2aa67545a122: Waiting
+1f88e97f90e0: Waiting
+00cd0c0d76b1: Waiting
+780df6083fd7: Waiting
+217e330c1391: Waiting
+4f4fb700ef54: Waiting
+13ea876ef646: Waiting
+e689fbd508bd: Waiting
+e55c99c94f9e: Waiting
+c6202876bb83: Waiting
+ff9efdb88b3f: Waiting
+8f4d8a40175c: Verifying Checksum
+8f4d8a40175c: Download complete
+b40150c1c271: Verifying Checksum
+b40150c1c271: Download complete
+2cdd254b12ef: Verifying Checksum
+2cdd254b12ef: Download complete
+4f4fb700ef54: Verifying Checksum
+4f4fb700ef54: Download complete
+e55c99c94f9e: Verifying Checksum
+e55c99c94f9e: Download complete
+c6202876bb83: Verifying Checksum
+c6202876bb83: Download complete
+217e330c1391: Verifying Checksum
+217e330c1391: Download complete
+ff9efdb88b3f: Verifying Checksum
+ff9efdb88b3f: Download complete
+13ea876ef646: Verifying Checksum
+13ea876ef646: Download complete
+b40150c1c271: Pull complete
+780df6083fd7: Verifying Checksum
+780df6083fd7: Download complete
+a3a848dc9b9c: Download complete
+86c8aab771c6: Verifying Checksum
+86c8aab771c6: Download complete
+00cd0c0d76b1: Verifying Checksum
+00cd0c0d76b1: Download complete
+2cdd254b12ef: Pull complete
+e689fbd508bd: Verifying Checksum
+e689fbd508bd: Download complete
+83480e855096: Verifying Checksum
+83480e855096: Download complete
+59465e339bcf: Verifying Checksum
+59465e339bcf: Download complete
+9432895a805f: Verifying Checksum
+9432895a805f: Download complete
+1f88e97f90e0: Verifying Checksum
+1f88e97f90e0: Download complete
+972f2ec6bdac: Verifying Checksum
+972f2ec6bdac: Download complete
+8f4d8a40175c: Pull complete
+2aa67545a122: Verifying Checksum
+2aa67545a122: Download complete
+2d10556a6cbd: Verifying Checksum
+2d10556a6cbd: Download complete
+780df6083fd7: Pull complete
+4f4fb700ef54: Pull complete
+e55c99c94f9e: Pull complete
+c6202876bb83: Pull complete
+00cd0c0d76b1: Pull complete
+217e330c1391: Pull complete
+ff9efdb88b3f: Pull complete
+13ea876ef646: Pull complete
+1c1986220085: Verifying Checksum
+1c1986220085: Download complete
+e689fbd508bd: Pull complete
+a3a848dc9b9c: Pull complete
+86c8aab771c6: Pull complete
+59465e339bcf: Pull complete
+2d10556a6cbd: Pull complete
+83480e855096: Pull complete
+1c1986220085: Pull complete
+9432895a805f: Pull complete
+1f88e97f90e0: Pull complete
+972f2ec6bdac: Pull complete
+2aa67545a122: Pull complete
+Digest: sha256:169ec670e543b61d00ecb676f8dbfdb6af19e27ff549e2fe45c1b7f51dcce725
+Status: Downloaded newer image for ghcr.io/oomugi413/nvenc-build:ubuntu2404_cuda13
+ghcr.io/oomugi413/nvenc-build:ubuntu2404_cuda13

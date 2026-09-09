@@ -22,6 +22,7 @@ FrameQueue::FrameQueue(CUvideoctxlock ctxLock): hEvent_(0)
     InitializeCriticalSection(&oCriticalSection_);
 #else
     pthread_mutex_init(&oCriticalSection_, NULL);
+    pthread_cond_init(&oQueueUpdateCondition_, NULL);
 #endif
 
     memset((void*)aIsFrameInUse_, 0, cnMaximumSize * sizeof(int));
@@ -33,6 +34,7 @@ FrameQueue::~FrameQueue()
     DeleteCriticalSection(&oCriticalSection_);
     CloseHandle(hEvent_);
 #else
+    pthread_cond_destroy(&oQueueUpdateCondition_);
     pthread_mutex_destroy(&oCriticalSection_);
 #endif
 }
@@ -42,6 +44,20 @@ FrameQueue::waitForQueueUpdate()
 {
 #ifdef _WIN32
     WaitForSingleObject(hEvent_, 10);
+#else
+    struct timespec timeout;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_nsec += 10 * 1000 * 1000;
+    if (timeout.tv_nsec >= 1000 * 1000 * 1000) {
+        timeout.tv_sec++;
+        timeout.tv_nsec -= 1000 * 1000 * 1000;
+    }
+
+    pthread_mutex_lock(&oCriticalSection_);
+    if (nFramesInQueue_ == 0 && !bEndOfDecode_) {
+        pthread_cond_timedwait(&oQueueUpdateCondition_, &oCriticalSection_, &timeout);
+    }
+    pthread_mutex_unlock(&oCriticalSection_);
 #endif
 }
 
@@ -71,6 +87,8 @@ FrameQueue::set_event(HANDLE event)
 {
 #ifdef _WIN32
    SetEvent(event);
+#else
+   pthread_cond_signal(&oQueueUpdateCondition_);
 #endif
 }
 
@@ -102,7 +120,13 @@ const
 void
 FrameQueue::endDecode()
 {
+#ifdef _WIN32
     bEndOfDecode_ = true;
+#else
+    pthread_mutex_lock(&oCriticalSection_);
+    bEndOfDecode_ = true;
+    pthread_mutex_unlock(&oCriticalSection_);
+#endif
     signalStatusChange();  // Signal for the display thread
 }
 

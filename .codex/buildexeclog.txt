@@ -1,0 +1,1455 @@
+35m 23s
+Run docker run -dit --rm \
+  docker run -dit --rm \
+    -v /home/runner/work/NVEnc/NVEnc:/work \
+     -v /home/runner/work/NVEnc/NVEnc/output:/output \
+    -u "$(id -u):$(id -g)" \
+    --workdir /work \
+    --name build_pkg ghcr.io/oomugi413/nvenc-build:ubuntu2404_cuda13
+  docker exec build_pkg bash -lc '
+    VMAFPKG="/opt/build_scripts/ffmpeg_dll/x64/build/lib/pkgconfig"
+    FFPKG="/opt/build_scripts/ffmpeg_dll/build_dll/x64/build/lib/pkgconfig:/opt/build_scripts/ffmpeg_dll/build_dll/x64/build/lib/x86_64-linux-gnu/pkgconfig"
+    export PKG_CONFIG_PATH="${VMAFPKG}:${FFPKG}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+    meson setup ./build . --buildtype=release -Db_lto=true -Denable_libplacebo=enabled -Dlibplacebo_static=true -Denable_vmaf=enabled -Dlibvmaf_static=true -Dcpp_args="['\''-I/opt/nvenc_headers/AviSynthPlus-3.7.5/avs_core/include'\'','\''-I/opt/nvenc_headers/vapoursynth-R72/include'\'','\''-I/opt/nvenc_headers/vship/src'\'']"
+    grep -F "#define LIBVMAF_STATIC_CUDA_LINK 1" ./build/rgy_config.h
+    grep -F "#define ENABLE_LIBVSHIP 1" ./build/rgy_config.h
+  '
+  docker exec build_pkg bash -lc "meson compile -C ./build -j4"
+  docker exec build_pkg bash -lc '
+    set -e
+    ldd ./build/nvencc | tee /tmp/nvencc.ldd
+    if grep -F "=> not found" /tmp/nvencc.ldd | grep -Fv "libcuda.so.1 => not found" >/dev/null; then
+      echo "Unexpected missing shared libraries detected." >&2
+      exit 1
+    fi
+    if readelf -d ./build/nvencc | grep -F "(NEEDED)" | grep -E "libplacebo|libvmaf" >/dev/null; then
+      echo "libplacebo/libvmaf must be statically linked, but shared dependency was found." >&2
+      exit 1
+    fi
+    if [[ "ubuntu2404_cuda13" == "ubuntu2404_cuda13" ]]; then
+      sm_120_count="$(cuobjdump --list-elf ./build/nvencc | grep -c "sm_120" || true)"
+      if [[ "${sm_120_count}" -eq 0 ]]; then
+        echo "NVEncC does not contain an sm_120 native cubin." >&2
+        exit 1
+      fi
+      echo "sm_120 cubins: ${sm_120_count}"
+    fi
+  '
+  docker exec build_pkg bash -lc '
+    set -e
+    if [[ "ubuntu2404_cuda13" == ubuntu* ]]; then
+      mkdir -p /tmp/nvenc-cuda-stubs
+      ln -sf /usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so /tmp/nvenc-cuda-stubs/libcuda.so.1
+      export LD_LIBRARY_PATH="/tmp/nvenc-cuda-stubs:/usr/local/cuda/targets/x86_64-linux/lib/stubs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    fi
+    ./build/nvencc --version
+    ./check_options.py -exe ./build/nvencc
+    ./build/nvencc --check-cmd-parse
+  '
+  docker exec build_pkg cp ./build/nvencc ./nvencc
+  docker exec \
+    --env PACKAGE_FILE_SUFFIX="" \
+    build_pkg ./build_deb.sh
+  docker exec build_pkg bash -lc "cp -v ./*.deb /output/"
+  PKGFILE=`ls /home/runner/work/NVEnc/NVEnc/output/*.deb`
+  echo ${PKGFILE}
+  echo "pkgfile=${PKGFILE}" >> $GITHUB_OUTPUT
+  shell: /usr/bin/bash -e {0}
+  env:
+    DOCKER_IMAGE: ubuntu2404_cuda13
+    PKG_TYPE: deb
+    FFMPEG_PREFIX: /opt/build_scripts/ffmpeg_dll/build_dll/x64/build
+    VMAF_PREFIX: /opt/build_scripts/ffmpeg_dll/x64/build
+    NVENC_HEADER_DIR: /opt/nvenc_headers
+    AVISYNTH_HEADER_INC: /opt/nvenc_headers/AviSynthPlus-3.7.5/avs_core/include
+    VAPOURSYNTH_HEADER_INC: /opt/nvenc_headers/vapoursynth-R72/include
+    VSHIP_HEADER_INC: /opt/nvenc_headers/vship/src
+1a98e1ab183d4129160feccdf946f82f8caae2b606c41b2adf50e9d2064c1e11
+The Meson build system
+Version: 1.11.2
+Source dir: /work
+Build dir: /work/build
+Build type: native build
+WARNING: Project targets '>=0.61.0' but uses feature introduced in '1.1': meson.options file. Use meson_options.txt instead
+Project name: nvencc
+Project version: 9.30.2
+C++ compiler for the host machine: c++ (gcc 13.3.0 "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0")
+C++ linker for the host machine: c++ ld.bfd 2.42
+Cuda compiler for the host machine: nvcc (nvcc 13.3.33)
+Cuda linker for the host machine: nvcc nvlink 13.3.33
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Message: Using CUDA path: /usr/local/cuda
+Message: Detected CUDA version: 13.3
+Message: GPU code generation targets: --generate-code arch=compute_75,code=[compute_75,sm_75] --generate-code arch=compute_86,code=[compute_86,sm_86] --generate-code arch=compute_120,code=[compute_120,sm_120]
+Run-time dependency threads found: YES
+Library dl found: YES
+Run-time dependency CUDA (modules: cudart_static) for cpp found: YES 13.3 (/usr/local/cuda)
+Message: CUDA driver search dirs: /usr/local/cuda/targets/x86_64-linux/lib/stubs /usr/local/cuda/targets/x86_64-linux/lib /usr/local/cuda/lib64 /usr/lib/wsl/lib
+Library cuda found: YES
+Library nppif_static found: YES
+Library nppig_static found: YES
+Library nppc_static found: YES
+Library culibos found: YES
+Library rt found: YES
+Found pkg-config: YES (/usr/bin/pkg-config) 1.8.1
+Run-time dependency libavutil found: YES 60.26.102
+Run-time dependency libavcodec found: YES 62.28.102
+Run-time dependency libavformat found: YES 62.12.102
+Run-time dependency libavfilter found: YES 11.14.102
+Run-time dependency libavdevice found: YES 62.3.102
+Run-time dependency libswresample found: YES 6.3.102
+Found CMake: /usr/bin/cmake (3.28.3)
+Run-time dependency vapoursynth found: NO  (tried pkg-config and cmake)
+Run-time dependency avisynth found: NO  (tried pkg-config and cmake)
+Run-time dependency libass found: YES 0.17.4
+Run-time dependency libvmaf found: YES 3.2.0
+Message: Using VMAF headers from libvmaf dependency
+Library vmaf found: YES
+Run-time dependency vulkan found: YES 1.3.295
+WARNING: Static library 'gcc_s' not found for dependency 'libplacebo', may not be statically linked
+Run-time dependency libplacebo found: YES 7.360.1
+Library placebo found: YES
+Message: Using Vship headers from cpp_args
+Checking if "ONNX Runtime headers in /usr/local/include" compiles: NO 
+Checking if "ONNX Runtime headers in /usr/include" compiles: NO 
+Checking if "ONNX Runtime headers in /work/build/external_headers/onnxruntime-1.23.2/include/onnxruntime/core/session" compiles: YES 
+Message: ONNX Runtime headers fetched into /work/build/external_headers/onnxruntime-1.23.2/include/onnxruntime/core/session
+Program cargo found: YES (/usr/local/cargo/bin/cargo)
+Run-time dependency dovi found: YES 3.3.2
+Run-time dependency hdr10plus-rs found: NO  (tried pkg-config and cmake)
+Library hdr10plus-rs found: YES
+Configuring rgy_config.h using configuration
+Configuring rgy_rev.h using configuration
+Program objcopy found: YES (/usr/bin/objcopy)
+Program cp found: YES (/usr/bin/cp)
+Build targets in project: 10
+WARNING: Project specifies a minimum meson_version '>=0.61.0' but uses features which were added in newer versions:
+ * 1.1: {'meson.options file'}
+
+nvencc 9.30.2
+
+  CUDA
+    CUDA version     : 13.3
+    CUDA path        : /usr/local/cuda
+    GPU targets      : --generate-code arch=compute_75,code=[compute_75,sm_75] --generate-code arch=compute_86,code=[compute_86,sm_86] --generate-code arch=compute_120,code=[compute_120,sm_120]
+
+  Optional Features
+    VapourSynth      : true
+    AviSynth         : true
+    libass           : true
+    libplacebo       : true
+    libplacebo static: true
+    VMAF             : true
+    VMAF static      : true
+    VMAF CUDA        : true
+    libvship         : true
+    ONNX Runtime     : true
+    Vulkan           : true
+    libdovi          : true
+    libhdr10plus     : true
+
+  User defined options
+    b_lto            : true
+    buildtype        : release
+    cpp_args         : ['-I/opt/nvenc_headers/AviSynthPlus-3.7.5/avs_core/include','-I/opt/nvenc_headers/vapoursynth-R72/include','-I/opt/nvenc_headers/vship/src']
+    enable_libplacebo: enabled
+    enable_vmaf      : enabled
+    libplacebo_static: true
+    libvmaf_static   : true
+
+Found ninja-1.11.1 at /usr/bin/ninja
+#define LIBVMAF_STATIC_CUDA_LINK 1
+#define ENABLE_LIBVSHIP 1
+ninja: Entering directory `/work/build'
+[1/221] Compiling C++ object libsimd_sse41.a.p/NVEncCore_convert_csp_sse41.cpp.o
+[2/221] Linking static target libsimd_sse41.a
+[3/221] Compiling C++ object libsimd_ssse3.a.p/NVEncCore_convert_csp_ssse3.cpp.o
+[4/221] Linking static target libsimd_ssse3.a
+[5/221] Compiling C++ object libsimd_avx.a.p/NVEncCore_convert_csp_avx.cpp.o
+[6/221] Linking static target libsimd_avx.a
+[7/221] Compiling C++ object libsimd_sse2.a.p/NVEncCore_convert_csp_sse2.cpp.o
+[8/221] Linking static target libsimd_sse2.a
+[9/221] Compiling C++ object libsimd_avx2.a.p/NVEncCore_rgy_faw_avx2.cpp.o
+[10/221] Compiling C++ object libsimd_avx2.a.p/NVEncCore_rgy_memmem_avx2.cpp.o
+[11/221] Compiling C++ object libsimd_avx2.a.p/NVEncCore_rgy_bitstream_avx2.cpp.o
+[12/221] Compiling C++ object libsimd_avx2.a.p/NVEncCore_convert_csp_avx2.cpp.o
+[13/221] Linking static target libsimd_avx2.a
+[14/221] Generating meson_embed/embed_nnedi3_weights with a custom command
+[15/221] Generating meson_embed/embed_colorspace_func with a custom command
+[16/221] Generating meson_embed/embed_perf_monitor with a custom command
+[17/221] Compiling C++ object nvencc.p/NVEncSDK_Common_src_dynlink_nvcuvid.cpp.o
+[18/221] Compiling C++ object libsimd_avx512.a.p/NVEncCore_rgy_faw_avx512bw.cpp.o
+[19/221] Compiling C++ object nvencc.p/NVEncCore_FrameQueue.cpp.o
+[20/221] Compiling C++ object libsimd_avx512.a.p/NVEncCore_rgy_memmem_avx512bw.cpp.o
+[21/221] Compiling C++ object libsimd_avx512.a.p/NVEncCore_rgy_bitstream_avx512bw.cpp.o
+[22/221] Linking static target libsimd_avx512.a
+[23/221] Compiling C++ object nvencc.p/NVEncCore_CuvidDecode.cpp.o
+[24/221] Compiling C++ object nvencc.p/NVEncCore_NVEncCmd.cpp.o
+[25/221] Compiling C++ object nvencc.p/NVEncCore_NVEncDevice.cpp.o
+[26/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilter.cpp.o
+[27/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterAfs.cpp.o
+[28/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterBwdif.cpp.o
+[29/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterIvtc.cpp.o
+[30/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterCurves.cpp.o
+[31/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterColorspace.cpp.o
+[32/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterCustom.cpp.o
+[33/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterDelogo.cpp.o
+[34/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterDegrainCommon.cpp.o
+[35/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterDegrain.cpp.o
+[36/221] Compiling C++ object nvencc.p/NVEncCore_NVEncCore.cpp.o
+[37/221] Compiling C++ object nvencc.p/NVEncCore_rgy_filter_nnedi_field.cpp.o
+[38/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterDegrainMV.cpp.o
+[39/221] Compiling C++ object nvencc.p/NVEncCore_rgy_filter_nnedi_weights.cpp.o
+[40/221] Compiling C++ object nvencc.p/NVEncCore_rgy_filter_kfm_analyze.cpp.o
+[41/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterDenoiseFFT3D.cpp.o
+[42/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterDenoiseGauss.cpp.o
+[43/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterNGX.cpp.o
+[44/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterNVOFFRUC.cpp.o
+[45/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterKfm.cpp.o
+[46/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterLibplacebo.cpp.o
+[47/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterNvvfx.cpp.o
+[48/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterOnnx.cpp.o
+[49/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterStDeint.cpp.o
+[50/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterRifeOV.cpp.o
+[51/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterRtgmcShimmerRepair.cpp.o
+[52/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterParam.cpp.o
+[53/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterOverlay.cpp.o
+[54/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterPad.cpp.o
+[55/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterRff.cpp.o
+[56/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterSelectEvery.cpp.o
+[57/221] Compiling C++ object nvencc.p/NVEncCore_NVEncParam.cpp.o
+[58/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterSsim.cpp.o
+[59/221] Compiling C++ object nvencc.p/NVEncCore_NVEncUtil.cpp.o
+[60/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterVulkan.cpp.o
+[61/221] Compiling C++ object nvencc.p/NVEncCore_cl_func.cpp.o
+[62/221] Compiling C++ object nvencc.p/NVEncCore_NVEncFilterSubburn.cpp.o
+[63/221] Compiling C++ object nvencc.p/NVEncCore_gpuz_info.cpp.o
+[64/221] Compiling C++ object nvencc.p/NVEncCore_logo.cpp.o
+[65/221] Compiling C++ object nvencc.p/NVEncCore_gpu_info.cpp.o
+[66/221] Compiling C++ object nvencc.p/NVEncCore_rgy_aspect_ratio.cpp.o
+[67/221] Compiling C++ object nvencc.p/NVEncCore_convert_csp.cpp.o
+[68/221] Compiling C++ object nvencc.p/NVEncCore_cpu_info.cpp.o
+[69/221] Compiling C++ object nvencc.p/NVEncCore_rgy_bitstream_aac.cpp.o
+[70/221] Compiling C++ object nvencc.p/NVEncCore_rgy_avlog.cpp.o
+[71/221] Compiling C++ object nvencc.p/NVEncCore_rgy_avutil.cpp.o
+[72/221] Compiling C++ object nvencc.p/NVEncCore_rgy_codepage.cpp.o
+[73/221] Compiling C++ object nvencc.p/NVEncCore_rgy_chapter.cpp.o
+[74/221] Compiling C++ object nvencc.p/NVEncCore_rgy_def.cpp.o
+[75/221] Compiling C++ object nvencc.p/NVEncCore_rgy_device.cpp.o
+[76/221] Compiling C++ object nvencc.p/NVEncCore_rgy_bitstream.cpp.o
+[77/221] Compiling C++ object nvencc.p/NVEncCore_rgy_device_info_wmi.cpp.o
+[78/221] Compiling C++ object nvencc.p/NVEncCore_rgy_device_info_cache.cpp.o
+[79/221] Compiling C++ object nvencc.p/NVEncCore_rgy_device_usage.cpp.o
+[80/221] Compiling C++ object nvencc.p/NVEncCore_rgy_device_vulkan.cpp.o
+[81/221] Compiling C++ object nvencc.p/NVEncCore_rgy_env.cpp.o
+[82/221] Compiling C++ object nvencc.p/NVEncCore_rgy_device_info_cache_nvenc.cpp.o
+[83/221] Compiling C++ object nvencc.p/NVEncCore_rgy_err.cpp.o
+[84/221] Compiling C++ object nvencc.p/NVEncCore_rgy_faw.cpp.o
+[85/221] Compiling C++ object nvencc.p/NVEncCore_rgy_event.cpp.o
+[86/221] Compiling C++ object nvencc.p/NVEncCore_rgy_filter.cpp.o
+[87/221] Compiling C++ object nvencc.p/NVEncCore_rgy_frame.cpp.o
+[88/221] Compiling C++ object nvencc.p/NVEncCore_rgy_filesystem.cpp.o
+[89/221] Compiling C++ object nvencc.p/NVEncCore_rgy_frame_info.cpp.o
+[90/221] Compiling C++ object nvencc.p/NVEncCore_rgy_ini.cpp.o
+[91/221] Compiling C++ object nvencc.p/NVEncCore_rgy_hdr10plus.cpp.o
+[92/221] Compiling C++ object nvencc.p/NVEncCore_rgy_input_avi.cpp.o
+[93/221] Compiling C++ object nvencc.p/NVEncCore_rgy_input.cpp.o
+[94/221] Compiling C++ object nvencc.p/NVEncCore_rgy_input_avs.cpp.o
+[95/221] Compiling C++ object nvencc.p/NVEncCore_rgy_input_raw.cpp.o
+[96/221] Compiling C++ object nvencc.p/NVEncCore_rgy_input_sm.cpp.o
+[97/221] Compiling C++ object nvencc.p/NVEncCore_rgy_language.cpp.o
+[98/221] Compiling C++ object nvencc.p/NVEncCore_rgy_input_avcodec.cpp.o
+../NVEncCore/rgy_input_avcodec.cpp: In member function ‘virtual RGY_ERR RGYInputAvcodec::Init(const TCHAR*, VideoInfo*, const RGYInputPrm*)’:
+../NVEncCore/rgy_input_avcodec.cpp:1988:60: warning: ignoring attributes on template argument ‘int (*)(FILE*)’ [-Wignored-attributes]
+ 1988 |                     std::unique_ptr<FILE, decltype(&fclose)> fpTmp(
+      |                                                            ^
+[99/221] Compiling C++ object nvencc.p/NVEncCore_rgy_level_av1.cpp.o
+[100/221] Compiling C++ object nvencc.p/NVEncCore_rgy_input_vpy.cpp.o
+[101/221] Compiling C++ object nvencc.p/NVEncCore_rgy_level_h264.cpp.o
+[102/221] Compiling C++ object nvencc.p/NVEncCore_rgy_level.cpp.o
+[103/221] Compiling C++ object nvencc.p/NVEncCore_rgy_level_hevc.cpp.o
+[104/221] Compiling C++ object nvencc.p/NVEncCore_rgy_cmd.cpp.o
+[105/221] Compiling C++ object nvencc.p/NVEncCore_rgy_libvmaf.cpp.o
+[106/221] Compiling C++ object nvencc.p/NVEncCore_rgy_libvship.cpp.o
+[107/221] Compiling C++ object nvencc.p/NVEncCore_rgy_memmem.cpp.o
+[108/221] Compiling C++ object nvencc.p/NVEncCore_rgy_libplacebo.cpp.o
+[109/221] Compiling C++ object nvencc.p/NVEncCore_rgy_nvrtc.cpp.o
+[110/221] Compiling C++ object nvencc.p/NVEncCore_rgy_log.cpp.o
+[111/221] Compiling C++ object nvencc.p/NVEncCore_rgy_onnxruntime.cpp.o
+[112/221] Compiling C++ object nvencc.p/NVEncCore_rgy_onnxrt_cuda.cpp.o
+[113/221] Compiling C++ object nvencc.p/NVEncCore_rgy_model_registry.cpp.o
+[114/221] Compiling C++ object nvencc.p/NVEncCore_rgy_perf_counter.cpp.o
+[115/221] Compiling C++ object nvencc.p/NVEncCore_rgy_output.cpp.o
+[116/221] Compiling C++ object nvencc.p/NVEncCore_rgy_perf_monitor.cpp.o
+[117/221] Compiling C++ object nvencc.p/NVEncCore_rgy_pipe.cpp.o
+[118/221] Compiling C++ object nvencc.p/NVEncCore_rgy_pipe_linux.cpp.o
+[119/221] Compiling C++ object nvencc.p/NVEncCore_rgy_resource.cpp.o
+[120/221] Compiling C++ object nvencc.p/NVEncCore_rgy_output_avcodec.cpp.o
+../NVEncCore/rgy_output_avcodec.cpp: In member function ‘RGY_ERR RGYOutputAvcodec::InitAudio(AVMuxAudio*, AVOutputStreamPrm*, uint32_t, bool, bool, const tstring&)’:
+../NVEncCore/rgy_output_avcodec.cpp:1827:106: warning: ‘AVCodec::sample_fmts’ is deprecated [-Wdeprecated-declarations]
+ 1827 |         muxAudio->outCodecEncodeCtx->sample_fmt          = AutoSelectSampleFmt(muxAudio->outCodecEncode->sample_fmts, muxAudio->outCodecDecodeCtx);
+      |                                                                                                          ^~~~~~~~~~~
+In file included from /opt/build_scripts/ffmpeg_dll/build_dll/x64/build/include/libavformat/avformat.h:328,
+                 from ../NVEncCore/rgy_avutil.h:56,
+                 from ../NVEncCore/rgy_output_avcodec.h:41,
+                 from ../NVEncCore/rgy_output_avcodec.cpp:38:
+/opt/build_scripts/ffmpeg_dll/build_dll/x64/build/include/libavcodec/codec.h:204:32: note: declared here
+  204 |     const enum AVSampleFormat *sample_fmts; ///< @deprecated use avcodec_get_supported_config()
+      |                                ^~~~~~~~~~~
+../NVEncCore/rgy_output_avcodec.cpp:1827:106: warning: ‘AVCodec::sample_fmts’ is deprecated [-Wdeprecated-declarations]
+ 1827 |         muxAudio->outCodecEncodeCtx->sample_fmt          = AutoSelectSampleFmt(muxAudio->outCodecEncode->sample_fmts, muxAudio->outCodecDecodeCtx);
+      |                                                                                                          ^~~~~~~~~~~
+/opt/build_scripts/ffmpeg_dll/build_dll/x64/build/include/libavcodec/codec.h:204:32: note: declared here
+  204 |     const enum AVSampleFormat *sample_fmts; ///< @deprecated use avcodec_get_supported_config()
+      |                                ^~~~~~~~~~~
+../NVEncCore/rgy_output_avcodec.cpp:1827:106: warning: ‘AVCodec::sample_fmts’ is deprecated [-Wdeprecated-declarations]
+ 1827 |         muxAudio->outCodecEncodeCtx->sample_fmt          = AutoSelectSampleFmt(muxAudio->outCodecEncode->sample_fmts, muxAudio->outCodecDecodeCtx);
+      |                                                                                                          ^~~~~~~~~~~
+/opt/build_scripts/ffmpeg_dll/build_dll/x64/build/include/libavcodec/codec.h:204:32: note: declared here
+  204 |     const enum AVSampleFormat *sample_fmts; ///< @deprecated use avcodec_get_supported_config()
+      |                                ^~~~~~~~~~~
+../NVEncCore/rgy_output_avcodec.cpp:1828:109: warning: ‘AVCodec::supported_samplerates’ is deprecated [-Wdeprecated-declarations]
+ 1828 |         muxAudio->outCodecEncodeCtx->sample_rate         = AutoSelectSamplingRate(muxAudio->outCodecEncode->supported_samplerates, enc_sample_rate);
+      |                                                                                                             ^~~~~~~~~~~~~~~~~~~~~
+/opt/build_scripts/ffmpeg_dll/build_dll/x64/build/include/libavcodec/codec.h:202:16: note: declared here
+  202 |     const int *supported_samplerates;       ///< @deprecated use avcodec_get_supported_config()
+      |                ^~~~~~~~~~~~~~~~~~~~~
+../NVEncCore/rgy_output_avcodec.cpp:1828:109: warning: ‘AVCodec::supported_samplerates’ is deprecated [-Wdeprecated-declarations]
+ 1828 |         muxAudio->outCodecEncodeCtx->sample_rate         = AutoSelectSamplingRate(muxAudio->outCodecEncode->supported_samplerates, enc_sample_rate);
+      |                                                                                                             ^~~~~~~~~~~~~~~~~~~~~
+/opt/build_scripts/ffmpeg_dll/build_dll/x64/build/include/libavcodec/codec.h:202:16: note: declared here
+  202 |     const int *supported_samplerates;       ///< @deprecated use avcodec_get_supported_config()
+      |                ^~~~~~~~~~~~~~~~~~~~~
+../NVEncCore/rgy_output_avcodec.cpp:1828:109: warning: ‘AVCodec::supported_samplerates’ is deprecated [-Wdeprecated-declarations]
+ 1828 |         muxAudio->outCodecEncodeCtx->sample_rate         = AutoSelectSamplingRate(muxAudio->outCodecEncode->supported_samplerates, enc_sample_rate);
+      |                                                                                                             ^~~~~~~~~~~~~~~~~~~~~
+/opt/build_scripts/ffmpeg_dll/build_dll/x64/build/include/libavcodec/codec.h:202:16: note: declared here
+  202 |     const int *supported_samplerates;       ///< @deprecated use avcodec_get_supported_config()
+      |                ^~~~~~~~~~~~~~~~~~~~~
+../NVEncCore/rgy_output_avcodec.cpp:2010:54: warning: ‘int avformat_transfer_internal_stream_timing_info(const AVOutputFormat*, AVStream*, const AVStream*, AVTimebaseSource)’ is deprecated [-Wdeprecated-declarations]
+ 2010 |         avformat_transfer_internal_stream_timing_info(m_Mux.format.formatCtx->oformat, muxAudio->streamOut, inputAudio->src.stream, AVFMT_TBCF_AUTO);
+      |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/opt/build_scripts/ffmpeg_dll/build_dll/x64/build/include/libavformat/avformat.h:3102:5: note: declared here
+ 3102 | int avformat_transfer_internal_stream_timing_info(const AVOutputFormat *ofmt,
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[121/221] Compiling C++ object nvencc.p/NVEncCore_rgy_simd.cpp.o
+[122/221] Compiling C++ object nvencc.p/NVEncCore_rgy_thread_affinity.cpp.o
+[123/221] Compiling C++ object nvencc.p/NVEncCore_rgy_prm.cpp.o
+[124/221] Compiling C++ object nvencc.p/NVEncCore_rgy_status.cpp.o
+[125/221] Compiling C++ object nvencc.p/NVEncCore_rgy_timecode.cpp.o
+[126/221] Compiling C++ object nvencc.p/NVEncCore_rgy_parallel_enc.cpp.o
+[127/221] Compiling C++ object nvencc.p/NVEncCore_rgy_vapoursynth_wrapper.cpp.o
+[128/221] Compiling C++ object nvencc.p/NVEncCore_rgy_vapoursynth_wrapper_v3.cpp.o
+[129/221] Compiling C++ object nvencc.p/NVEncCore_rgy_version.cpp.o
+[130/221] Compiling C++ object nvencc.p/NVEncCore_rgy_vulkan.cpp.o
+[131/221] Compiling C++ object nvencc.p/NVEncCore_rgy_vapoursynth_wrapper_v4.cpp.o
+[132/221] Compiling C++ object nvencc.p/NVEncCore_rgy_util.cpp.o
+[133/221] Compiling C++ object nvencc.p/NVEncCore_rgy_wav_parser.cpp.o
+[134/221] Compiling C++ object nvencc.p/tinyxml2_tinyxml2.cpp.o
+[135/221] Compiling C++ object nvencc.p/NVEncC_NVEncC.cpp.o
+[136/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterAfsFilter.cu.o
+[137/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterAfsMerge.cu.o
+[138/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterAfsAnalyze.cu.o
+[139/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterBwdif.cu.o
+[140/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterStDeint.cu.o
+[141/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterOnnx.cu.o
+[142/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterAfsSynthesize.cu.o
+[143/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterIvtc.cu.o
+[144/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterAnime4k.cu.o
+[145/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterConvolution3d.cu.o
+[146/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterKfm.cu.o
+[147/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterCurves.cu.o
+[148/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDecomb.cu.o
+[149/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDeband.cu.o
+[150/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDecimate.cu.o
+[151/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDegrain.cu.o
+[152/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterCrop.cu.o
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=8, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint8_t, in_bit_depth=8, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint8_t, inBitDepth=8]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint8_t, inBitDepth=8]" at line 2570 of ../NVEncCore/NVEncFilterCrop.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint8_t, in_bit_depth=8, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint8_t, inBitDepth=8]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint8_t, inBitDepth=8]" at line 2570
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=16, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=16, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=16]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=16]" at line 2571 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=16, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=16]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=16]" at line 2571
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=9, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=9, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=9]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=9]" at line 2695 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=9, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=9]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=9]" at line 2695
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=10, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=10, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=10]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=10]" at line 2696 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=10, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=10]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=10]" at line 2696
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=12, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=12, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=12]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=12]" at line 2697 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=12, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=12]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=12]" at line 2697
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=14, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=14, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=14]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=14]" at line 2698 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=14, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=14]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=14]" at line 2698
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint8_t, out_bit_depth=8, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint8_t, outBitDepth=8]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint8_t, outBitDepth=8]" at line 2933
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=16, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=16]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=16]" at line 2934
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=9, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=9]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=9]" at line 2936
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=10, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=10]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=10]" at line 2937
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=12, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=12]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=12]" at line 2938
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=14, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=14]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=14]" at line 2939
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=__half, out_bit_depth=16, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2506
+            instantiation of "void kernel_crop_rgb_rgb_packed<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(uint8_t *, int, int, int, const uint8_t *, const uint8_t *, const uint8_t *, int, int, int) [with TypeOut=__half, out_bit_depth=16, TypeIn=float, in_bit_depth=32]" at line 2526
+            instantiation of "void crop_rgb_rgb_packed<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=__half, out_bit_depth=16, TypeIn=float, in_bit_depth=32]" at line 3338
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=32, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2453 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2475 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2489 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32]" at line 3366 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2453
+            instantiation of "void kernel_crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2475
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2489
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32]" at line 3366
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2453
+            instantiation of "void kernel_crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2475
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2489
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32]" at line 3366
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=__half, in_bit_depth=16, shift_offset=0]" at line 2543
+            instantiation of "void kernel_crop_rgb_packed_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(uint8_t *, uint8_t *, uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=__half, in_bit_depth=16]" at line 2559
+            instantiation of "void crop_rgb_packed_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=__half, in_bit_depth=16]" at line 3381
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=8, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint8_t, in_bit_depth=8, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint8_t, inBitDepth=8]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint8_t, inBitDepth=8]" at line 2570 of ../NVEncCore/NVEncFilterCrop.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint8_t, in_bit_depth=8, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint8_t, inBitDepth=8]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint8_t, inBitDepth=8]" at line 2570
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=16, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=16, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=16]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=16]" at line 2571 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=16, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=16]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=16]" at line 2571
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=9, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=9, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=9]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=9]" at line 2695 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=9, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=9]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=9]" at line 2695
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=10, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=10, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=10]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=10]" at line 2696 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=10, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=10]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=10]" at line 2696
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=12, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=12, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=12]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=12]" at line 2697 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=12, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=12]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=12]" at line 2697
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=14, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=14, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=14]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=14]" at line 2698 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=14, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=14]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=14]" at line 2698
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint8_t, out_bit_depth=8, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint8_t, outBitDepth=8]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint8_t, outBitDepth=8]" at line 2933
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=16, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=16]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=16]" at line 2934
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=9, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=9]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=9]" at line 2936
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=10, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=10]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=10]" at line 2937
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=12, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=12]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=12]" at line 2938
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=14, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=14]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=14]" at line 2939
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=__half, out_bit_depth=16, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2506
+            instantiation of "void kernel_crop_rgb_rgb_packed<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(uint8_t *, int, int, int, const uint8_t *, const uint8_t *, const uint8_t *, int, int, int) [with TypeOut=__half, out_bit_depth=16, TypeIn=float, in_bit_depth=32]" at line 2526
+            instantiation of "void crop_rgb_rgb_packed<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=__half, out_bit_depth=16, TypeIn=float, in_bit_depth=32]" at line 3338
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=32, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2453 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2475 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2489 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32]" at line 3366 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2453
+            instantiation of "void kernel_crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2475
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2489
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32]" at line 3366
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2453
+            instantiation of "void kernel_crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2475
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2489
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32]" at line 3366
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=__half, in_bit_depth=16, shift_offset=0]" at line 2543
+            instantiation of "void kernel_crop_rgb_packed_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(uint8_t *, uint8_t *, uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=__half, in_bit_depth=16]" at line 2559
+            instantiation of "void crop_rgb_packed_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=__half, in_bit_depth=16]" at line 3381
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=8, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint8_t, in_bit_depth=8, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint8_t, inBitDepth=8]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint8_t, inBitDepth=8]" at line 2570 of ../NVEncCore/NVEncFilterCrop.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint8_t, in_bit_depth=8, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint8_t, inBitDepth=8]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint8_t, inBitDepth=8]" at line 2570
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=16, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=16, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=16]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=16]" at line 2571 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=16, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=16]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=16]" at line 2571
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=9, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=9, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=9]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=9]" at line 2695 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=9, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=9]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=9]" at line 2695
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=10, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=10, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=10]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=10]" at line 2696 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=10, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=10]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=10]" at line 2696
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=12, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=12, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=12]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=12]" at line 2697 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=12, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=12]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=12]" at line 2697
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=14, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=14, shift_offset=0]" at line 114 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=14]" at line 195 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=14]" at line 2698 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=uint16_t, in_bit_depth=14, shift_offset=0]" at line 114
+            instantiation of "void kernel_crop_plane_to_yuv444_f32<TypeIn,inBitDepth>(float *, int, const TypeIn *, int, int, int, int, int) [with TypeIn=uint16_t, inBitDepth=14]" at line 195
+            instantiation of "RGY_ERR crop_yuv420_to_yuv444_f32<TypeIn,inBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeIn=uint16_t, inBitDepth=14]" at line 2698
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint8_t, out_bit_depth=8, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint8_t, outBitDepth=8]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint8_t, outBitDepth=8]" at line 2933
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=16, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=16]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=16]" at line 2934
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=9, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=9]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=9]" at line 2936
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=10, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=10]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=10]" at line 2937
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=12, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=12]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=12]" at line 2938
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=uint16_t, out_bit_depth=14, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 127
+            instantiation of "void kernel_crop_plane_from_yuv444_f32<TypeOut,outBitDepth>(TypeOut *, int, const float *, int, int, int, int, int) [with TypeOut=uint16_t, outBitDepth=14]" at line 229
+            instantiation of "RGY_ERR crop_yuv444_f32_to_yuv420<TypeOut,outBitDepth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, __nv_bool, cudaStream_t) [with TypeOut=uint16_t, outBitDepth=14]" at line 2939
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=__half, out_bit_depth=16, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2506
+            instantiation of "void kernel_crop_rgb_rgb_packed<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(uint8_t *, int, int, int, const uint8_t *, const uint8_t *, const uint8_t *, int, int, int) [with TypeOut=__half, out_bit_depth=16, TypeIn=float, in_bit_depth=32]" at line 2526
+            instantiation of "void crop_rgb_rgb_packed<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=__half, out_bit_depth=16, TypeIn=float, in_bit_depth=32]" at line 3338
+
+../NVEncCore/convert_csp.h(992): warning #63-D: shift count is too large
+          const int high = (1 << out_bit_depth) - 1;
+                                 ^
+          detected during:
+            instantiation of "int conv_bit_depth_<out_bit_depth,in_bit_depth,shift_offset>(int) [with out_bit_depth=32, in_bit_depth=32, shift_offset=0]" at line 78 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2453 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void kernel_crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2475 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2489 of ../NVEncCore/NVEncFilterCrop.cu
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32]" at line 3366 of ../NVEncCore/NVEncFilterCrop.cu
+
+../NVEncCore/NVEncFilterCrop.cu(82): warning #63-D: shift count is too large
+              const int high = (1 << in_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2453
+            instantiation of "void kernel_crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2475
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2489
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32]" at line 3366
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, shift_offset=0]" at line 2453
+            instantiation of "void kernel_crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2475
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth,aligned>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32, aligned=true]" at line 2489
+            instantiation of "void crop_rgb_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=float, in_bit_depth=32]" at line 3366
+
+../NVEncCore/NVEncFilterCrop.cu(92): warning #63-D: shift count is too large
+              const int high = (1 << out_bit_depth) - 1;
+                                     ^
+          detected during:
+            instantiation of "TypeOut conv_data_type<TypeOut,out_bit_depth,TypeIn,in_bit_depth,shift_offset>(TypeIn) [with TypeOut=float, out_bit_depth=32, TypeIn=__half, in_bit_depth=16, shift_offset=0]" at line 2543
+            instantiation of "void kernel_crop_rgb_packed_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(uint8_t *, uint8_t *, uint8_t *, int, int, int, const uint8_t *, int, int, int) [with TypeOut=float, out_bit_depth=32, TypeIn=__half, in_bit_depth=16]" at line 2559
+            instantiation of "void crop_rgb_packed_rgb<TypeOut,out_bit_depth,TypeIn,in_bit_depth>(RGYFrameInfo *, const RGYFrameInfo *, const sInputCrop *, CspMatrix, cudaStream_t) [with TypeOut=float, out_bit_depth=32, TypeIn=__half, in_bit_depth=16]" at line 3381
+
+[153/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDegrainU8Blk8.cu.o
+[154/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDegrainU8Blk16.cu.o
+[155/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDegrainU8Blk32.cu.o
+[156/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDegrainU16Blk8.cu.o
+[157/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDelogo.cu.o
+[158/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDenoiseDct.cu.o
+[159/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDegrainU16Blk16.cu.o
+[160/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDegrainU16Blk32.cu.o
+[161/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDenoiseFFT3D8FP16.cu.o
+[162/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDenoiseFFT3D8FP32.cu.o
+[163/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDenoiseHqdn3d.cu.o
+[164/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDenoiseFFT3D16FP16.cu.o
+[165/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDenoiseFFT3D16FP32.cu.o
+[166/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDescale.cu.o
+[167/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDenoisePmd.cu.o
+[168/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDetailSharpen.cu.o
+[169/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterChromaShift.cu.o
+[170/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDeblock.cu.o
+[171/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDenoiseKnn.cu.o
+[172/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDeflicker.cu.o
+[173/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterStab.cu.o
+[174/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterColorFix.cu.o
+[175/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterEdgelevel.cu.o
+[176/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDehalo.cu.o
+[177/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterFineDehalo.cu.o
+[178/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterHQDering.cu.o
+[179/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterMsharpen.cu.o
+[180/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterCas.cu.o
+[181/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterMaa.cu.o
+[182/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterMpdecimate.cu.o
+[183/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterNnedi.cu.o
+[184/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterDenoiseNLMeans.cu.o
+[185/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterNnediU8Fast.cu.o
+[186/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterNnediU8Slow.cu.o
+[187/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterNnediU16Fast.cu.o
+[188/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterNnediU16Slow.cu.o
+[189/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterOverlay.cu.o
+[190/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcBob.cu.o
+[191/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmc.cu.o
+../NVEncCore/NVEncFilterRtgmc.cu: In member function ‘RGY_ERR NVEncFilterRtgmc::initFilters(const std::shared_ptr<NVEncFilterParamRtgmc>&)’:
+../NVEncCore/NVEncFilterRtgmc.cu:1451:36: warning: comparison of integer expressions of different signedness: ‘int’ and ‘_GLOBAL__N__b920b84e_19_NVEncFilterRtgmc_cu_526a7595::RtgmcFilterIndex’ [-Wsign-compare]
+ 1451 |         for (int i = RTGMC_FILTER_BOB; i <= RTGMC_FILTER_INPUTTYPE_BLEND; i++) {
+      |                                  ~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[192/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcEdi.cu.o
+../NVEncCore/NVEncFilterRtgmcEdi.cu(193): warning #177-D: variable "tm2" was declared but never referenced
+      const int tm2 = (t01m2 + t12m2) >> 1;
+                ^
+          detected during:
+            instantiation of "int <unnamed>::rtgmcEdiLuma<Type>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, int, int, int, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 337
+            instantiation of "void <unnamed>::kernel_rtgmc_edi<Type>(uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 364
+            instantiation of "RGY_ERR <unnamed>::launchRtgmcEdiPlane<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 390
+            instantiation of "RGY_ERR <unnamed>::processRtgmcEdiFrame<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 970
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+../NVEncCore/NVEncFilterRtgmcEdi.cu(195): warning #177-D: variable "tp2" was declared but never referenced
+      const int tp2 = (t01p2 + t12p2) >> 1;
+                ^
+          detected during:
+            instantiation of "int <unnamed>::rtgmcEdiLuma<Type>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, int, int, int, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 337
+            instantiation of "void <unnamed>::kernel_rtgmc_edi<Type>(uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 364
+            instantiation of "RGY_ERR <unnamed>::launchRtgmcEdiPlane<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 390
+            instantiation of "RGY_ERR <unnamed>::processRtgmcEdiFrame<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 970
+
+../NVEncCore/NVEncFilterRtgmcEdi.cu(193): warning #177-D: variable "tm2" was declared but never referenced
+      const int tm2 = (t01m2 + t12m2) >> 1;
+                ^
+          detected during:
+            instantiation of "int <unnamed>::rtgmcEdiLuma<Type>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, int, int, int, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 337
+            instantiation of "void <unnamed>::kernel_rtgmc_edi<Type>(uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 364
+            instantiation of "RGY_ERR <unnamed>::launchRtgmcEdiPlane<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 390
+            instantiation of "RGY_ERR <unnamed>::processRtgmcEdiFrame<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 970
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+../NVEncCore/NVEncFilterRtgmcEdi.cu(195): warning #177-D: variable "tp2" was declared but never referenced
+      const int tp2 = (t01p2 + t12p2) >> 1;
+                ^
+          detected during:
+            instantiation of "int <unnamed>::rtgmcEdiLuma<Type>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, int, int, int, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 337
+            instantiation of "void <unnamed>::kernel_rtgmc_edi<Type>(uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 364
+            instantiation of "RGY_ERR <unnamed>::launchRtgmcEdiPlane<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 390
+            instantiation of "RGY_ERR <unnamed>::processRtgmcEdiFrame<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 970
+
+../NVEncCore/NVEncFilterRtgmcEdi.cu(193): warning #177-D: variable "tm2" was declared but never referenced
+      const int tm2 = (t01m2 + t12m2) >> 1;
+                ^
+          detected during:
+            instantiation of "int <unnamed>::rtgmcEdiLuma<Type>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, int, int, int, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 337
+            instantiation of "void <unnamed>::kernel_rtgmc_edi<Type>(uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 364
+            instantiation of "RGY_ERR <unnamed>::launchRtgmcEdiPlane<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 390
+            instantiation of "RGY_ERR <unnamed>::processRtgmcEdiFrame<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 970
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+../NVEncCore/NVEncFilterRtgmcEdi.cu(195): warning #177-D: variable "tp2" was declared but never referenced
+      const int tp2 = (t01p2 + t12p2) >> 1;
+                ^
+          detected during:
+            instantiation of "int <unnamed>::rtgmcEdiLuma<Type>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, int, int, int, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 337
+            instantiation of "void <unnamed>::kernel_rtgmc_edi<Type>(uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, const uint8_t *, int, int, int, int, int, int, int, int) [with Type=uint8_t]" at line 364
+            instantiation of "RGY_ERR <unnamed>::launchRtgmcEdiPlane<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 390
+            instantiation of "RGY_ERR <unnamed>::processRtgmcEdiFrame<Type>(RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, const RGYFrameInfo *, int, int, int, cudaStream_t) [with Type=uint8_t]" at line 970
+
+[193/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterResize.cu.o
+[194/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcMMask.cu.o
+[195/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcPrimitive.cu.o
+[196/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcSearchPrefilter.cu.o
+[197/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcSearchPrefilterCommon.cu.o
+[198/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcLossless.cu.o
+[199/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcSearchPrefilterU8TR0.cu.o
+[200/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcSearchPrefilterU16TR0.cu.o
+[201/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcRetouch.cu.o
+[202/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcSearchPrefilterU8TRP.cu.o
+[203/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcSearchPrefilterU16TRP.cu.o
+[204/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcShimmerRepairApplyU8.cu.o
+[205/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterSmooth.cu.o
+[206/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcShimmerRepairApplyU16.cu.o
+[207/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterMsmooth.cu.o
+[208/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterSsim.cu.o
+../NVEncCore/NVEncFilterSsim.cu(102): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+      __attribute__((shared)) longlong4 stmp[SSIM_BLOCK_Y * SSIM_LOOP_Y + 1][SSIM_BLOCK_X + 1];
+                                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+../NVEncCore/NVEncFilterSsim.cu(156): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx0y0 = ((stmp)[(ly + 0)][lx + 0]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(157): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx1y0 = ((stmp)[(ly + 0)][lx + 1]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(158): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx0y1 = ((stmp)[(ly + 1)][lx + 0]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(159): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx1y1 = ((stmp)[(ly + 1)][lx + 1]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(76): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+      longlong4 ss = make_longlong4(0,0,0,0);
+                ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "void kernel_ssim<Type4,bit_depth>(const uint8_t *, int, const uint8_t *, int, int, int, float *) [with Type4=uchar4, bit_depth=8]" at line 231
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(102): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+      __attribute__((shared)) longlong4 stmp[SSIM_BLOCK_Y * SSIM_LOOP_Y + 1][SSIM_BLOCK_X + 1];
+                                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+../NVEncCore/NVEncFilterSsim.cu(156): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx0y0 = ((stmp)[(ly + 0)][lx + 0]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(157): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx1y0 = ((stmp)[(ly + 0)][lx + 1]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(158): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx0y1 = ((stmp)[(ly + 1)][lx + 0]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(159): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx1y1 = ((stmp)[(ly + 1)][lx + 1]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(76): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+      longlong4 ss = make_longlong4(0,0,0,0);
+                ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "void kernel_ssim<Type4,bit_depth>(const uint8_t *, int, const uint8_t *, int, int, int, float *) [with Type4=uchar4, bit_depth=8]" at line 231
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(102): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+      __attribute__((shared)) longlong4 stmp[SSIM_BLOCK_Y * SSIM_LOOP_Y + 1][SSIM_BLOCK_X + 1];
+                                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+../NVEncCore/NVEncFilterSsim.cu(156): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx0y0 = ((stmp)[(ly + 0)][lx + 0]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(157): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx1y0 = ((stmp)[(ly + 0)][lx + 1]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(158): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx0y1 = ((stmp)[(ly + 1)][lx + 0]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(159): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+              longlong4 sx1y1 = ((stmp)[(ly + 1)][lx + 1]);
+                        ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu(76): warning #1444-D: type "longlong4" was declared deprecated ("use longlong4_16a or longlong4_32a")
+      longlong4 ss = make_longlong4(0,0,0,0);
+                ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h(553): note #3287-D: because of a "deprecated" attribute
+  typedef __attribute__((device_builtin)) struct longlong4 __attribute__((deprecated("use longlong4_16a or longlong4_32a"))) longlong4;
+                                                                          ^
+          detected during:
+            instantiation of "void kernel_ssim<Type4,bit_depth>(const uint8_t *, int, const uint8_t *, int, int, int, float *) [with Type4=uchar4, bit_depth=8]" at line 231
+            instantiation of "RGY_ERR calc_ssim_plane<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, CUMemBufPair &, cudaStream_t) [with Type4=uchar4, bit_depth=8]" at line 248
+            instantiation of "RGY_ERR calc_ssim_frame<Type4,bit_depth>(const RGYFrameInfo *, const RGYFrameInfo *, std::array<CUMemBufPair, 3UL> &, std::array<std::unique_ptr<cudaStream_t, cudastream_deleter>, 3UL> &) [with Type4=uchar4, bit_depth=8]" at line 362
+
+../NVEncCore/NVEncFilterSsim.cu:63:78: warning: ‘longlong4’ is deprecated: use longlong4_16a or longlong4_32a [-Wdeprecated-declarations]
+   63 | void func_ssim_pix(longlong4 &ss, int a, int b) {
+      |                                                                              ^
+In file included from /usr/local/cuda/targets/x86_64-linux/include/driver_types.h:61,
+                 from /usr/local/cuda/targets/x86_64-linux/include/builtin_types.h:59,
+                 from /usr/local/cuda/targets/x86_64-linux/include/crt/host_runtime.h:58,
+                 from /usr/lib/gcc/x86_64-linux-gnu/13/include/stddef.h:218:
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h:429:42: note: declared here
+  429 | __device_builtin__ __builtin_align__(16) longlong4
+      |                                          ^~~~~~~~~
+../NVEncCore/NVEncFilterSsim.cu:75:23: warning: ‘longlong4’ is deprecated: use longlong4_16a or longlong4_32a [-Wdeprecated-declarations]
+   75 |     const uint8_t *p1, const int p1_pitch) {
+      |                       ^
+/usr/local/cuda/targets/x86_64-linux/include/vector_types.h:553:110: note: declared here
+  553 | typedef __device_builtin__ struct longlong4 __VECTOR_TYPE_DEPRECATED__("use longlong4_16a or longlong4_32a") longlong4;
+      |                                                                                                              ^~~~~~~~~
+[209/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterSubburn.cu.o
+[210/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterTransform.cu.o
+[211/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterLensCorrection.cu.o
+[212/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterV360.cu.o
+[213/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterSoftLight.cu.o
+[214/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterTweak.cu.o
+[215/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterUnsharp.cu.o
+[216/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterVinverse.cu.o
+[217/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterWarpsharp.cu.o
+[218/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterYadif.cu.o
+[219/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcShimmerRepairFusedU8.cu.o
+[220/221] Compiling Cuda object nvencc.p/NVEncCore_NVEncFilterRtgmcShimmerRepairFusedU16.cu.o
+[221/221] Linking target nvencc
+../NVEncSDK/Common/src/../inc/dynlink_cuda_cuda.h:469: warning: type ‘cudaError_enum’ violates the C++ One Definition Rule [-Wodr]
+  469 | typedef enum cudaError_enum
+      | 
+/usr/local/cuda/targets/x86_64-linux/include/cuda.h:2680: note: an enum with different value name is defined in another translation unit
+ 2680 | typedef enum cudaError_enum {
+      | 
+../NVEncSDK/Common/src/../inc/dynlink_cuda_cuda.h:525: note: name ‘CUDA_ERROR_NO_DEVICE’ differs from name ‘CUDA_ERROR_STUB_LIBRARY’ defined in another translation unit
+  525 |     CUDA_ERROR_NO_DEVICE                      = 100,
+      | 
+/usr/local/cuda/targets/x86_64-linux/include/cuda.h:2745: note: mismatching definition
+ 2745 |     CUDA_ERROR_STUB_LIBRARY                   = 34,
+      | 
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /usr/bin/ninja -C /work/build -j 4
+	linux-vdso.so.1 (0x00007f661269a000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f6612660000)
+	libcuda.so.1 => not found
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f65f8717000)
+	libmvec.so.1 => /lib/x86_64-linux-gnu/libmvec.so.1 (0x00007f65f861e000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f65f840c000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f661269c000)
+sm_120 cubins: 87
+NVEnc (x64) 9.30.2 (r4023) by rigaya, Aug  5 2026 01:37:04 (gcc 13.3.0/Linux)
+  [NVENC API v13.0, CUDA 13.3]
+ reader: raw, y4m, avs, vpy, avsw, avhw [H.264/AVC, H.265/HEVC, MPEG2, VP8, VP9, VC-1, MPEG1, MPEG4, AV1]
+ others
+  nvml       : yes
+  nvrtc      : yes
+  nvvfx      : no
+  ngx        : no
+  nvof fruc  : no
+  libass     : yes
+  libdovi    : yes
+  vulkan     : yes
+  libplacebo : yes
+  vmaf       : yes
+Not listed in NVEncC_Options.en.md:9
+--avoid-idle-clock
+--disable-dx11
+--disable-vulkan
+--hierarchical-b
+--hierarchical-p
+--max-temporal-layers
+--no-vship-ssimulacra2
+--timestamp-passthrough
+--vpy-mt
+
+Not listed in NVEncC_Options.ja.md:9
+--adapt-transform
+--avoid-idle-clock
+--disable-vulkan
+--hierarchical-b
+--hierarchical-p
+--max-temporal-layers
+--no-vship-ssimulacra2
+--timestamp-passthrough
+--vpy-mt
+
+Not listed in NVEncC_Options.zh-cn.md:73
+--alpha-bitrate-ratio
+--alpha-channel-mode
+--audio-encode-other-codec-only
+--audio-quality
+--avcodec-prms
+--avoid-idle-clock
+--bitstream-padding
+--check-preset-params
+--cuda-mt
+--cuda-stream
+--disable-dx11
+--disable-vulkan
+--dolby-vision-rpu-prm
+--fallback-bitdepth
+--hierarchical-b
+--hierarchical-p
+--input-pixel-format
+--lookahead-level
+--muxer-add-cmd
+--no-vship-ssimulacra2
+--offset-video-dts-advance
+--parallel
+--parallel-force-large-memory-filters
+--task-perf-monitor
+--tf-level
+--timestamp-passthrough
+--tune
+--unidirectb
+--vpp-anime4k-shader
+--vpp-bwdif
+--vpp-cas
+--vpp-chromashift
+--vpp-colorfix
+--vpp-deblock
+--vpp-decomb
+--vpp-deflicker
+--vpp-dehalo
+--vpp-descale
+--vpp-detailsharpen
+--vpp-fft3d
+--vpp-finedehalo
+--vpp-fruc
+--vpp-hqdering
+--vpp-hqdn3d
+--vpp-ivtc
+--vpp-lenscorrection
+--vpp-libplacebo-deband
+--vpp-libplacebo-shader
+--vpp-libplacebo-tonemapping
+--vpp-libplacebo-tonemapping-lut
+--vpp-maa
+--vpp-msharpen
+--vpp-msmooth
+--vpp-ngx-truehdr
+--vpp-nlmeans
+--vpp-onnx
+--vpp-onnx-cache-dir
+--vpp-onnx-model-dir
+--vpp-rife-ov
+--vpp-rtgmc
+--vpp-rtgmc-bob
+--vpp-rtgmc-edi
+--vpp-rtgmc-primitive
+--vpp-rtgmc-retouch
+--vpp-rtgmc-search-prefilter
+--vpp-rtgmc-shimmer-repair
+--vpp-softlight
+--vpp-stab
+--vpp-v360
+--vpp-vinverse
+--vpy-assume-script-dir
+--vpy-mt
+--vsdir
+
+Not listed in --help:16
+--audio-encode-other-codec-only
+--avi
+--disable-dx11
+--hierarchial-b
+--hierarchial-p
+--interlace
+--max-temporal-layers
+--parallel-force-large-memory-filters
+--process-codepage
+--thread-priority
+--thread-throttling
+--vpp-ngx-truehdr
+--vpp-nvvfx-artifact-reduction
+--vpp-nvvfx-denoise
+--vpp-nvvfx-model-dir
+--vsdir
+[EXCEPT ] --cabac
+    一致しないのが正しい既知の例外: 既定値と同じ指定であり差分が出ないため(対となる--cavlcで診断済み)
+[EXCEPT ] --sub-copy asdata
+    一致しないのが正しい既知の例外: サブパラメータではなくトラック指定に付ける修飾子であるため
+[EXCEPT ] --vpp-afs ini
+    一致しないのが正しい既知の例外: 実在するiniファイルのパスが必要で、診断側から値を用意できないため
+
+----------------------------------------------------------------
+total 915, ok 912, roundtrip NG 0, no-gen NG 0, unknown-param NG 0, no-value 0, except 3, skipped(option) 17
+dpkg-deb: building package 'nvencc' in 'nvencc_9.30.2_amd64.deb'.
+'./nvencc_9.30.2_amd64.deb' -> '/output/nvencc_9.30.2_amd64.deb'
+/home/runner/work/NVEnc/NVEnc/output/nvencc_9.30.2_amd64.deb
