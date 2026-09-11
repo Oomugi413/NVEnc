@@ -1213,7 +1213,7 @@ RGY_ERR NVGPUInfo::initDevice(int cudaDeviceID, CUctx_flags ctxFlags, bool error
 #if ENABLE_NVML
     if (m_pciBusId.length() > 0) {
         int version = 0, pcie_gen = 0, pcie_link = 0;
-        NVMLMonitor nvml_monitor;
+        NVMLMonitor nvml_monitor(m_log, RGY_LOGT_DEV);
         if (NVML_SUCCESS == nvml_monitor.Init(m_pciBusId)
             && NVML_SUCCESS == nvml_monitor.getDriverVersionx1000(version)
             && NVML_SUCCESS == nvml_monitor.getMaxPCIeLink(pcie_gen, pcie_link)) {
