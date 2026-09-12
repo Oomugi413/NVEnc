@@ -26,7 +26,6 @@
 //
 // -----------------------------------------------------------------------------------------
 
-#include <array>
 #include "convert_csp.h"
 #include "NVEncFilterSoftLight.h"
 #include "NVEncParam.h"
@@ -143,18 +142,6 @@ __global__ void kernel_reduce_rgb_u16(
     }
 }
 
-__global__ void kernel_softlight_scalar_u16(
-    uint8_t *__restrict__ pPlane, const int pitch, const int width, const int height,
-    const float b, const VppSoftLightFormula formula) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x < width && y < height) {
-        auto ptr = (uint16_t *)(pPlane + y * pitch);
-        const float a = ptr[x] * (1.0f / 65535.0f);
-        ptr[x] = softlight_to_u16(softlight_func(a, b, formula));
-    }
-}
-
 __global__ void kernel_softlight_self_u16(
     uint8_t *__restrict__ pPlane, const int pitch, const int width, const int height,
     const VppSoftLightFormula formula) {
@@ -167,84 +154,87 @@ __global__ void kernel_softlight_self_u16(
     }
 }
 
-__global__ void kernel_softlight_self_f32(float *__restrict__ pPlane, const int width, const int height, const VppSoftLightFormula formula) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x < width && y < height) {
-        auto& a = pPlane[(int64_t)y * width + x];
-        a = fminf(fmaxf(softlight_func(a, a, formula), 0.0f), 1.0f);
-    }
-}
-
-__global__ void kernel_rgb_to_v_u16(
-    const uint8_t *__restrict__ pR, const int pitchR,
-    const uint8_t *__restrict__ pG, const int pitchG,
-    const uint8_t *__restrict__ pB, const int pitchB,
-    const int width, const int height, float *__restrict__ pV) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x < width && y < height) {
-        const float r = ((const uint16_t *)(pR + y * pitchR))[x] * (1.0f / 65535.0f);
-        const float g = ((const uint16_t *)(pG + y * pitchG))[x] * (1.0f / 65535.0f);
-        const float b = ((const uint16_t *)(pB + y * pitchB))[x] * (1.0f / 65535.0f);
-        pV[(int64_t)y * width + x] = fmaxf(r, fmaxf(g, b));
-    }
-}
-
-__global__ void kernel_rgb_to_hs_u16(
-    const uint8_t *__restrict__ pR, const int pitchR,
-    const uint8_t *__restrict__ pG, const int pitchG,
-    const uint8_t *__restrict__ pB, const int pitchB,
-    const int width, const int height, float *__restrict__ pH, float *__restrict__ pS) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x < width && y < height) {
-        float h, s, v;
-        const float r = ((const uint16_t *)(pR + y * pitchR))[x] * (1.0f / 65535.0f);
-        const float g = ((const uint16_t *)(pG + y * pitchG))[x] * (1.0f / 65535.0f);
-        const float b = ((const uint16_t *)(pB + y * pitchB))[x] * (1.0f / 65535.0f);
-        rgb_to_hsv_value(r, g, b, h, s, v);
-        const int64_t idx = (int64_t)y * width + x;
-        pH[idx] = h;
-        pS[idx] = s;
-    }
-}
-
-__global__ void kernel_rgb_to_hsv_u16(
-    const uint8_t *__restrict__ pR, const int pitchR,
-    const uint8_t *__restrict__ pG, const int pitchG,
-    const uint8_t *__restrict__ pB, const int pitchB,
-    const int width, const int height, float *__restrict__ pH, float *__restrict__ pS, float *__restrict__ pV) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x < width && y < height) {
-        float h, s, v;
-        const float r = ((const uint16_t *)(pR + y * pitchR))[x] * (1.0f / 65535.0f);
-        const float g = ((const uint16_t *)(pG + y * pitchG))[x] * (1.0f / 65535.0f);
-        const float b = ((const uint16_t *)(pB + y * pitchB))[x] * (1.0f / 65535.0f);
-        rgb_to_hsv_value(r, g, b, h, s, v);
-        const int64_t idx = (int64_t)y * width + x;
-        pH[idx] = h;
-        pS[idx] = s;
-        pV[idx] = v;
-    }
-}
-
-__global__ void kernel_hsv_to_rgb_u16(
+// boost以外のモードを中間バッファを介さず、レジスタ内でまとめて処理する。
+// 旧処理が16bitプレーンへ書き戻していた位置では再量子化し、丸め位置を維持する。
+__global__ void kernel_softlight_fused_u16(
     uint8_t *__restrict__ pR, const int pitchR,
     uint8_t *__restrict__ pG, const int pitchG,
     uint8_t *__restrict__ pB, const int pitchB,
     const int width, const int height,
-    const float *__restrict__ pH, const float *__restrict__ pS, const float *__restrict__ pV) {
+    const VppSoftLightMode mode,
+    const float *__restrict__ bVals,
+    const VppSoftLightFormula formula) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x < width && y < height) {
-        const int64_t idx = (int64_t)y * width + x;
-        float r, g, b;
-        hsv_to_rgb_value(pH[idx], pS[idx], pV[idx], r, g, b);
-        ((uint16_t *)(pR + y * pitchR))[x] = softlight_to_u16(r);
-        ((uint16_t *)(pG + y * pitchG))[x] = softlight_to_u16(g);
-        ((uint16_t *)(pB + y * pitchB))[x] = softlight_to_u16(b);
+        const float bR = bVals[0];
+        const float bG = bVals[1];
+        const float bB = bVals[2];
+        auto ptrR = (uint16_t *)(pR + y * pitchR);
+        auto ptrG = (uint16_t *)(pG + y * pitchG);
+        auto ptrB = (uint16_t *)(pB + y * pitchB);
+        const float r = ptrR[x] * (1.0f / 65535.0f);
+        const float g = ptrG[x] * (1.0f / 65535.0f);
+        const float b = ptrB[x] * (1.0f / 65535.0f);
+        float ro = r, go = g, bo = b;
+        if (mode == VppSoftLightMode::NEUTRALIZE) {
+            const float vOrig = fmaxf(r, fmaxf(g, b));
+            const float rm = softlight_to_u16(softlight_func(r, bR, formula)) * (1.0f / 65535.0f);
+            const float gm = softlight_to_u16(softlight_func(g, bG, formula)) * (1.0f / 65535.0f);
+            const float bm = softlight_to_u16(softlight_func(b, bB, formula)) * (1.0f / 65535.0f);
+            float h, sVal, vMod;
+            rgb_to_hsv_value(rm, gm, bm, h, sVal, vMod);
+            hsv_to_rgb_value(h, sVal, vOrig, ro, go, bo);
+        } else if (mode == VppSoftLightMode::LIGHTNESS) {
+            float h, sVal, vOrig;
+            rgb_to_hsv_value(r, g, b, h, sVal, vOrig);
+            const float rm = softlight_to_u16(softlight_func(r, bR, formula)) * (1.0f / 65535.0f);
+            const float gm = softlight_to_u16(softlight_func(g, bG, formula)) * (1.0f / 65535.0f);
+            const float bm = softlight_to_u16(softlight_func(b, bB, formula)) * (1.0f / 65535.0f);
+            const float vMod = fmaxf(rm, fmaxf(gm, bm));
+            hsv_to_rgb_value(h, sVal, vMod, ro, go, bo);
+        } else if (mode == VppSoftLightMode::NEUTRALIZE_BOOST_SAT) {
+            const float vOrig = fmaxf(r, fmaxf(g, b));
+            const float rm = softlight_to_u16(softlight_func(r, bR, formula)) * (1.0f / 65535.0f);
+            const float gm = softlight_to_u16(softlight_func(g, bG, formula)) * (1.0f / 65535.0f);
+            const float bm = softlight_to_u16(softlight_func(b, bB, formula)) * (1.0f / 65535.0f);
+            float h, sVal, vMod;
+            rgb_to_hsv_value(rm, gm, bm, h, sVal, vMod);
+            const float sB = fminf(fmaxf(softlight_func(sVal, sVal, formula), 0.0f), 1.0f);
+            hsv_to_rgb_value(h, sB, vOrig, ro, go, bo);
+        } else if (mode == VppSoftLightMode::NEUTRALIZE_FULL) {
+            ro = softlight_func(r, bR, formula);
+            go = softlight_func(g, bG, formula);
+            bo = softlight_func(b, bB, formula);
+        } else if (mode == VppSoftLightMode::NEUTRALIZE_BOOST) {
+            const float rm = softlight_to_u16(softlight_func(r, bR, formula)) * (1.0f / 65535.0f);
+            const float gm = softlight_to_u16(softlight_func(g, bG, formula)) * (1.0f / 65535.0f);
+            const float bm = softlight_to_u16(softlight_func(b, bB, formula)) * (1.0f / 65535.0f);
+            ro = softlight_func(rm, rm, formula);
+            go = softlight_func(gm, gm, formula);
+            bo = softlight_func(bm, bm, formula);
+        } else {
+            float h, sVal, vOrig;
+            rgb_to_hsv_value(r, g, b, h, sVal, vOrig);
+            const float sB = fminf(fmaxf(softlight_func(sVal, sVal, formula), 0.0f), 1.0f);
+            hsv_to_rgb_value(h, sB, vOrig, ro, go, bo);
+        }
+        ptrR[x] = softlight_to_u16(ro);
+        ptrG[x] = softlight_to_u16(go);
+        ptrB[x] = softlight_to_u16(bo);
+    }
+}
+
+// 集計結果から強度をデバイス上で算出し、フレームごとのreadbackと同期を除去する。
+__global__ void kernel_softlight_finalize_b(
+    const unsigned long long *__restrict__ sums,
+    const int64_t totalPx, const int skipblack,
+    float *__restrict__ bVals) {
+    const int i = threadIdx.x;
+    if (i < 3) {
+        const int64_t denom = totalPx - (skipblack ? (int64_t)sums[3 + i] : 0);
+        const float mean = (denom > 0) ? ((float)sums[i] / (float)denom) * (1.0f / 65535.0f) : 0.0f;
+        bVals[i] = 1.0f - mean;
     }
 }
 
@@ -252,10 +242,8 @@ NVEncFilterSoftLight::NVEncFilterSoftLight() :
     NVEncFilter(),
     m_convIn(),
     m_convOut(),
-    m_hsvH(),
-    m_hsvS(),
-    m_hsvV(),
-    m_reduce() {
+    m_reduce(),
+    m_bVals() {
     m_name = _T("softlight");
 }
 
@@ -280,7 +268,6 @@ RGY_ERR NVEncFilterSoftLight::checkParam(const std::shared_ptr<NVEncFilterParamS
 }
 
 RGY_ERR NVEncFilterSoftLight::allocWork(const RGYFrameInfo& rgbFrame) {
-    const auto frameSize = (size_t)rgbFrame.width * rgbFrame.height * sizeof(float);
     auto allocBuf = [&](std::unique_ptr<CUMemBuf>& buf, const size_t size, const TCHAR *name) {
         if (!buf || buf->nSize < size) {
             buf = std::make_unique<CUMemBuf>(size);
@@ -292,13 +279,15 @@ RGY_ERR NVEncFilterSoftLight::allocWork(const RGYFrameInfo& rgbFrame) {
         }
         return RGY_ERR_NONE;
     };
-    auto sts = allocBuf(m_hsvH, frameSize, _T("HSV H"));
+    auto sts = allocBuf(m_reduce, sizeof(unsigned long long) * 6, _T("reduce"));
     if (sts != RGY_ERR_NONE) return sts;
-    sts = allocBuf(m_hsvS, frameSize, _T("HSV S"));
-    if (sts != RGY_ERR_NONE) return sts;
-    sts = allocBuf(m_hsvV, frameSize, _T("HSV V"));
-    if (sts != RGY_ERR_NONE) return sts;
-    return allocBuf(m_reduce, sizeof(unsigned long long) * 6, _T("reduce"));
+    if (!m_bVals) {
+        sts = allocBuf(m_bVals, sizeof(float) * 3, _T("strength"));
+        if (sts != RGY_ERR_NONE) return sts;
+        const auto cudaerr = cudaMemset(m_bVals->ptr, 0, sizeof(float) * 3);
+        if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
+    }
+    return RGY_ERR_NONE;
 }
 
 RGY_ERR NVEncFilterSoftLight::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RGYLog> pPrintMes) {
@@ -415,86 +404,37 @@ RGY_ERR NVEncFilterSoftLight::procFrame(RGYFrameInfo *pFrame, cudaStream_t strea
         || mode == VppSoftLightMode::NEUTRALIZE_BOOST_SAT
         || mode == VppSoftLightMode::NEUTRALIZE_FULL
         || mode == VppSoftLightMode::NEUTRALIZE_BOOST;
-    const bool rgbBoost =
-        mode == VppSoftLightMode::NEUTRALIZE_BOOST
-        || mode == VppSoftLightMode::BOOST;
 
     dim3 block2d(32, 8);
     dim3 grid2d(divCeil(width, block2d.x), divCeil(height, block2d.y));
-    auto ptrH = (float *)m_hsvH->ptr;
-    auto ptrS = (float *)m_hsvS->ptr;
-    auto ptrV = (float *)m_hsvV->ptr;
 
-    if (mode == VppSoftLightMode::NEUTRALIZE || mode == VppSoftLightMode::NEUTRALIZE_BOOST_SAT) {
-        kernel_rgb_to_v_u16<<<grid2d, block2d, 0, stream>>>(
-            planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
-            width, height, ptrV);
-    } else if (mode == VppSoftLightMode::LIGHTNESS) {
-        kernel_rgb_to_hs_u16<<<grid2d, block2d, 0, stream>>>(
-            planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
-            width, height, ptrH, ptrS);
-    }
-    if (auto sts = err_to_rgy(cudaGetLastError()); sts != RGY_ERR_NONE) return sts;
-
-    if (neutralize) {
-        auto cudaerr = cudaMemsetAsync(m_reduce->ptr, 0, sizeof(unsigned long long) * 6, stream);
-        if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
-        const auto total = (int64_t)width * height;
-        const int grid = (int)std::min<int64_t>(divCeil(total, (int64_t)SOFTLIGHT_BLOCK_SIZE * 8), 65535);
-        kernel_reduce_rgb_u16<<<grid, SOFTLIGHT_BLOCK_SIZE, 0, stream>>>(
-            planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
-            width, height, (unsigned long long *)m_reduce->ptr);
-        if (auto sts = err_to_rgy(cudaGetLastError()); sts != RGY_ERR_NONE) return sts;
-        std::array<unsigned long long, 6> host = {};
-        cudaerr = cudaMemcpyAsync(host.data(), m_reduce->ptr, sizeof(host[0]) * host.size(), cudaMemcpyDeviceToHost, stream);
-        if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
-        cudaerr = cudaStreamSynchronize(stream);
-        if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
-        const double totalPx = (double)total;
-        std::array<float, 3> b = {};
-        for (int i = 0; i < 3; i++) {
-            const double denom = totalPx - (prm->softlight.skipblack ? (double)host[3 + i] : 0.0);
-            const double mean = (denom > 0.0) ? ((double)host[i] / denom) / 65535.0 : 0.0;
-            b[i] = (float)(1.0 - mean);
+    // boost以外は単一の融合カーネルで処理する。
+    if (mode != VppSoftLightMode::BOOST) {
+        if (neutralize) {
+            auto cudaerr = cudaMemsetAsync(m_reduce->ptr, 0, sizeof(unsigned long long) * 6, stream);
+            if (cudaerr != cudaSuccess) return err_to_rgy(cudaerr);
+            const auto total = (int64_t)width * height;
+            const int grid = (int)std::min<int64_t>(divCeil(total, (int64_t)SOFTLIGHT_BLOCK_SIZE * 8), 65535);
+            kernel_reduce_rgb_u16<<<grid, SOFTLIGHT_BLOCK_SIZE, 0, stream>>>(
+                planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
+                width, height, (unsigned long long *)m_reduce->ptr);
+            if (auto sts = err_to_rgy(cudaGetLastError()); sts != RGY_ERR_NONE) return sts;
+            kernel_softlight_finalize_b<<<1, 3, 0, stream>>>(
+                (const unsigned long long *)m_reduce->ptr, total,
+                prm->softlight.skipblack ? 1 : 0, (float *)m_bVals->ptr);
+            if (auto sts = err_to_rgy(cudaGetLastError()); sts != RGY_ERR_NONE) return sts;
         }
-        kernel_softlight_scalar_u16<<<grid2d, block2d, 0, stream>>>(planeR.ptr[0], planeR.pitch[0], width, height, b[0], formula);
-        kernel_softlight_scalar_u16<<<grid2d, block2d, 0, stream>>>(planeG.ptr[0], planeG.pitch[0], width, height, b[1], formula);
-        kernel_softlight_scalar_u16<<<grid2d, block2d, 0, stream>>>(planeB.ptr[0], planeB.pitch[0], width, height, b[2], formula);
-        if (auto sts = err_to_rgy(cudaGetLastError()); sts != RGY_ERR_NONE) return sts;
+        kernel_softlight_fused_u16<<<grid2d, block2d, 0, stream>>>(
+            planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
+            width, height, mode, (const float *)m_bVals->ptr, formula);
+        return err_to_rgy(cudaGetLastError());
     }
 
-    if (rgbBoost) {
+    // boostは従来どおり各プレーンを個別に処理する。
+    {
         kernel_softlight_self_u16<<<grid2d, block2d, 0, stream>>>(planeR.ptr[0], planeR.pitch[0], width, height, formula);
         kernel_softlight_self_u16<<<grid2d, block2d, 0, stream>>>(planeG.ptr[0], planeG.pitch[0], width, height, formula);
         kernel_softlight_self_u16<<<grid2d, block2d, 0, stream>>>(planeB.ptr[0], planeB.pitch[0], width, height, formula);
-        if (auto sts = err_to_rgy(cudaGetLastError()); sts != RGY_ERR_NONE) return sts;
-    }
-
-    if (mode == VppSoftLightMode::NEUTRALIZE || mode == VppSoftLightMode::NEUTRALIZE_BOOST_SAT) {
-        kernel_rgb_to_hs_u16<<<grid2d, block2d, 0, stream>>>(
-            planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
-            width, height, ptrH, ptrS);
-        if (mode == VppSoftLightMode::NEUTRALIZE_BOOST_SAT) {
-            kernel_softlight_self_f32<<<grid2d, block2d, 0, stream>>>(ptrS, width, height, formula);
-        }
-        kernel_hsv_to_rgb_u16<<<grid2d, block2d, 0, stream>>>(
-            planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
-            width, height, ptrH, ptrS, ptrV);
-    } else if (mode == VppSoftLightMode::LIGHTNESS) {
-        kernel_rgb_to_v_u16<<<grid2d, block2d, 0, stream>>>(
-            planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
-            width, height, ptrV);
-        kernel_hsv_to_rgb_u16<<<grid2d, block2d, 0, stream>>>(
-            planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
-            width, height, ptrH, ptrS, ptrV);
-    } else if (mode == VppSoftLightMode::SATURATION) {
-        kernel_rgb_to_hsv_u16<<<grid2d, block2d, 0, stream>>>(
-            planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
-            width, height, ptrH, ptrS, ptrV);
-        kernel_softlight_self_f32<<<grid2d, block2d, 0, stream>>>(ptrS, width, height, formula);
-        kernel_hsv_to_rgb_u16<<<grid2d, block2d, 0, stream>>>(
-            planeR.ptr[0], planeR.pitch[0], planeG.ptr[0], planeG.pitch[0], planeB.ptr[0], planeB.pitch[0],
-            width, height, ptrH, ptrS, ptrV);
     }
     return err_to_rgy(cudaGetLastError());
 }
@@ -566,9 +506,7 @@ RGY_ERR NVEncFilterSoftLight::run_filter(const RGYFrameInfo *pInputFrame, RGYFra
 void NVEncFilterSoftLight::close() {
     m_convIn.reset();
     m_convOut.reset();
-    m_hsvH.reset();
-    m_hsvS.reset();
-    m_hsvV.reset();
     m_reduce.reset();
+    m_bVals.reset();
     m_frameBuf.clear();
 }

@@ -56,8 +56,6 @@ private:
 
     std::unique_ptr<NVEncFilterCspCrop> m_convIn;
     std::unique_ptr<NVEncFilterCspCrop> m_convOut;
-    std::unique_ptr<CUMemBuf> m_hsvH;
-    std::unique_ptr<CUMemBuf> m_hsvS;
-    std::unique_ptr<CUMemBuf> m_hsvV;
     std::unique_ptr<CUMemBuf> m_reduce;
+    std::unique_ptr<CUMemBuf> m_bVals;
 };

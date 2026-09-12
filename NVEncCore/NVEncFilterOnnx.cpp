@@ -631,6 +631,15 @@ RGY_ERR NVEncFilterOnnx::init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RG
                 2, 2, RGYResizeResMode::Normal, false, nocrop);
         }
         if (tgtW > 0 && tgtH > 0 && (tgtW != outW || tgtH != outH)) {
+            // 後段リサイズはCUDAサブフィルタのため、CUDA標準リサイズだけを許可する。
+            // 外部ライブラリ系はこの経路で必要なパラメータが設定されないため明示的に拒否する。
+            if (prm->onnx.postResizeAlgo != RGY_VPP_RESIZE_AUTO
+             && getVppResizeType(prm->onnx.postResizeAlgo) != RGY_VPP_RESIZE_TYPE_OPENCL) {
+                AddMessage(RGY_LOG_ERROR,
+                    _T("resize=%s cannot be used with out_res=: only the CUDA resize algorithms are available here.\n"),
+                    get_cx_desc(list_vpp_resize, prm->onnx.postResizeAlgo));
+                return RGY_ERR_UNSUPPORTED;
+            }
             auto resizeParam = std::make_shared<NVEncFilterParamResize>();
             resizeParam->interp = (prm->onnx.postResizeAlgo == RGY_VPP_RESIZE_AUTO)
                                   ? RGY_VPP_RESIZE_LANCZOS4 : prm->onnx.postResizeAlgo;

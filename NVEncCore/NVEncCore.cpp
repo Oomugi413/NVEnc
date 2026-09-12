@@ -606,9 +606,10 @@ RGY_ERR NVEncCore::InitInput(InEncodeVideoParam *inputParam, DeviceCodecCsp& HWD
 
     //入力モジュールの初期化
     const bool vpp_ivtc_expand_active = inputParam->vpp.ivtc.enable && inputParam->vpp.ivtc.expand > 0;
+    const bool vpp_kfm_rff_aware = inputParam->vpp.kfm.enable && inputParam->vpp.kfm.rff;
     if (auto sts =initReaders(m_pFileReader, m_AudioReaders, &inputParam->input, &inputParam->inprm, inputCspOfRawReader,
         m_pStatus, &inputParam->common, &inputParam->ctrl, HWDecCodecCsp, subburnTrackId,
-        inputParam->vpp.rff.enable, inputParam->vpp.afs.enable, inputParam->vpp.libplacebo_tonemapping.enable,
+        inputParam->vpp.rff.enable || vpp_kfm_rff_aware, inputParam->vpp.afs.enable, inputParam->vpp.libplacebo_tonemapping.enable,
         vpp_ivtc_expand_active,
         m_poolPkt.get(), m_poolFrame.get(), m_qpTable.get(), m_pPerfMonitor.get(), m_pLog); sts != RGY_ERR_NONE) {
         PrintMes(RGY_LOG_ERROR, _T("failed to initialize file reader(s).\n"));

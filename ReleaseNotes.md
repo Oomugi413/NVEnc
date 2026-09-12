@@ -1,5 +1,16 @@
 # NVEnc Release Notes
 
+## 9.35
+
+- Add RFF support to [--vpp-kfm](./NVEncC_Options.en.md#--vpp-kfm-param1value1param2value2) `mode=24/60`.
+- Prefer versioned NVML APIs and also load `libnvidia-ml.so.1`. ( #795 )
+- Fix [--vpp-onnx](./NVEncC_Options.en.md#--vpp-onnx-param1value1param2value2) `out_res=` accepting non-OpenCL resize algorithms.
+- Fix shared-memory race in [--vpp-afs](./NVEncC_Options.en.md#--vpp-afs-param1value1param2value2) subgroup reduction.
+- Speed up [--vpp-descale](./NVEncC_Options.en.md#--vpp-descale-param1value1param2value2).
+- Speed up [--vpp-hqdn3d](./NVEncC_Options.en.md#--vpp-hqdn3d-param1value1param2value2).
+- Speed up [--vpp-maa](./NVEncC_Options.en.md#--vpp-maa-param1value1param2value2).
+- Speed up [--vpp-softlight](./NVEncC_Options.en.md#--vpp-softlight-param1value1param2value2).
+
 ## 9.34
 
 - Fix issues with timestamp when using y4m reader.
