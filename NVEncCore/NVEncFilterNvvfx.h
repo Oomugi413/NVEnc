@@ -87,27 +87,12 @@ public:
     virtual tstring print() const override;
 };
 
-class NVEncFilterParamNvvfxArtifactReduction : public NVEncFilterParamNvvfx {
+class NVEncFilterParamNvvfxFrameGen : public NVEncFilterParamNvvfx {
 public:
-    VppNvvfxArtifactReduction nvvfxArtifactReduction;
-    NVEncFilterParamNvvfxArtifactReduction() : nvvfxArtifactReduction() {};
-    virtual ~NVEncFilterParamNvvfxArtifactReduction() {};
-    virtual tstring print() const override;
-};
-
-class NVEncFilterParamNvvfxSuperRes : public NVEncFilterParamNvvfx {
-public:
-    VppNvvfxSuperRes nvvfxSuperRes;
-    NVEncFilterParamNvvfxSuperRes() : nvvfxSuperRes() {};
-    virtual ~NVEncFilterParamNvvfxSuperRes() {};
-    virtual tstring print() const override;
-};
-
-class NVEncFilterParamNvvfxUpScaler : public NVEncFilterParamNvvfx {
-public:
-    VppNvvfxUpScaler nvvfxUpscaler;
-    NVEncFilterParamNvvfxUpScaler() : nvvfxUpscaler() {};
-    virtual ~NVEncFilterParamNvvfxUpScaler() {};
+    VppNvvfxFrameGen nvvfxFrameGen;
+    rgy_rational<int> timebase;
+    NVEncFilterParamNvvfxFrameGen() : nvvfxFrameGen(), timebase() {};
+    virtual ~NVEncFilterParamNvvfxFrameGen() {};
     virtual tstring print() const override;
 };
 
@@ -121,32 +106,34 @@ protected:
     virtual bool compareParam(const NVEncFilterParam *param) const override;
 };
 
-class NVEncFilterNvvfxArtifactReduction : public NVEncFilterNvvfxEffect {
+// VFG (Video Frame Generation) is a 1-in / N-out temporal interpolation filter,
+// so it overrides init() and run_filter() instead of reusing the 1-in / 1-out base implementation.
+class NVEncFilterNvvfxFrameGeneration : public NVEncFilterNvvfxEffect {
 public:
-    NVEncFilterNvvfxArtifactReduction();
-    virtual ~NVEncFilterNvvfxArtifactReduction();
+    NVEncFilterNvvfxFrameGeneration();
+    virtual ~NVEncFilterNvvfxFrameGeneration();
+    virtual RGY_ERR init(shared_ptr<NVEncFilterParam> pParam, shared_ptr<RGYLog> pPrintMes) override;
+    virtual int requiredOutputFrames() const override;
 protected:
     virtual RGY_ERR checkParam(const NVEncFilterParam *param) override;
     virtual RGY_ERR setParam(const NVEncFilterParam *param) override;
     virtual bool compareParam(const NVEncFilterParam *param) const override;
-};
+    virtual RGY_ERR run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum, cudaStream_t stream) override;
+    virtual void close() override;
 
-class NVEncFilterNvvfxSuperRes : public NVEncFilterNvvfxEffect {
-public:
-    NVEncFilterNvvfxSuperRes();
-    virtual ~NVEncFilterNvvfxSuperRes();
-protected:
-    virtual RGY_ERR checkParam(const NVEncFilterParam *param) override;
-    virtual RGY_ERR setParam(const NVEncFilterParam *param) override;
-    virtual bool compareParam(const NVEncFilterParam *param) const override;
-};
+    RGYFrameInfo *getNextOutFrame(RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum);
+#if ENABLE_NVVFX
+    // interpolate the frame at frameIndex/multiplier between m_prevImg and m_srcImg
+    RGY_ERR genFrame(RGYFrameInfo *outFrame, const RGYFrameInfo *frameProp,
+        int frameIndex, int multiplier,
+        int64_t genPts, int64_t genDuration, cudaStream_t stream);
+    RGY_ERR convertToNvCVImage(const RGYFrameInfo *src, NvCVImage *dst, cudaStream_t stream);
 
-class NVEncFilterNvvfxUpScaler : public NVEncFilterNvvfxEffect {
-public:
-    NVEncFilterNvvfxUpScaler();
-    virtual ~NVEncFilterNvvfxUpScaler();
-protected:
-    virtual RGY_ERR checkParam(const NVEncFilterParam *param) override;
-    virtual RGY_ERR setParam(const NVEncFilterParam *param) override;
-    virtual bool compareParam(const NVEncFilterParam *param) const override;
+    // previous frame input; m_srcImg and m_dstImg are provided by the base class
+    std::unique_ptr<NvCVImage> m_prevImg;
+#endif
+    std::vector<std::unique_ptr<CUFrameBuf>> m_outFrameBuf;
+    rgy_rational<int> m_targetFps;
+    int64_t m_prevTimestamp;
+    int m_inputFrames;
 };

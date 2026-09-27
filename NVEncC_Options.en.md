@@ -156,7 +156,7 @@
   - [--video-tag \<string\>](#--video-tag-string)
   - [--video-metadata \<string\> or \<string\>=\<string\>](#--video-metadata-string-or-stringstring)
   - [--avcodec-prms \<string\>](#--avcodec-prms-string)
-  - [--audio-copy \[\<int/string\>;\[,\<int/string\>\]...\]](#--audio-copy-intstringintstring)
+  - [--audio-copy \[\<int/string\>\[,\<int/string\>\]...\]](#--audio-copy-intstringintstring)
   - [--audio-codec \[\[\<int/string\>?\]\<string\>\[:\<string\>=\<string\>\[,\<string\>=\<string\>\]...\]...\]](#--audio-codec-intstringstringstringstringstringstring)
   - [--audio-encode-other-codec-only](#--audio-encode-other-codec-only)
   - [--audio-bitrate \[\<int/string\>?\]\<int\> or \[\<int/string\>?\]\<string\>:\<int\>\[,\<string\>:\<int\>\]\[,...\]](#--audio-bitrate-intstringint-or-intstringstringintstringint)
@@ -179,7 +179,7 @@
   - [--key-on-chapter](#--key-on-chapter)
   - [--keyfile \<string\>](#--keyfile-string)
   - [--sub-source \<string\>\[:{\<int\>?}\[;\<param1\>=\<value1\>...\]/\[\]...\]](#--sub-source-stringintparam1value1)
-  - [--sub-copy \[\<int/string\>;\[,\<int/string\>\]...\]](#--sub-copy-intstringintstring)
+  - [--sub-copy \[\<int/string\>\[,\<int/string\>\]...\]](#--sub-copy-intstringintstring)
   - [--sub-codec \[\[\<int/string\>?\]\<string\>\]](#--sub-codec-intstringstring)
   - [--sub-disposition \[\<int/string\>?\]\<string\>](#--sub-disposition-intstringstring)
   - [--sub-metadata \[\<int/string\>?\]\<string\> or \[\<int/string\>?\]\<string\>=\<string\>](#--sub-metadata-intstringstring-or-intstringstringstring)
@@ -228,9 +228,11 @@
   - [--vpp-select-every \<int\>\[,\<param1\>=\<int\>\]](#--vpp-select-every-intparam1int)
   - [--vpp-rotate \<int\>](#--vpp-rotate-int)
   - [--vpp-transform \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-transform-param1value1param2value2)
+  - [--vpp-lenscorrection \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-lenscorrection-param1value1param2value2)
+  - [--vpp-v360 \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-v360-param1value1param2value2)
   - [--vpp-convolution3d \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-convolution3d-param1value1param2value2)
   - [--vpp-nvvfx-denoise \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-nvvfx-denoise-param1value1param2value2)
-  - [--vpp-nvvfx-artifact-reduction \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-nvvfx-artifact-reduction-param1value1param2value2)
+  - [--vpp-nvvfx-framegen \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-nvvfx-framegen-param1value1param2value2)
   - [--vpp-smooth \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-smooth-param1value1param2value2)
   - [--vpp-msmooth \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-msmooth-param1value1param2value2)
   - [--vpp-denoise-dct \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-denoise-dct-param1value1param2value2)
@@ -286,7 +288,7 @@
   - [--cuda-stream \<int\>](#--cuda-stream-int)
   - [--cuda-mt \<int\>](#--cuda-mt-int)
   - [--disable-nvml \<int\>](#--disable-nvml-int)
-  - [--disable-nvml](#--disable-nvml)
+  - [--disable-dx11](#--disable-dx11)
   - [--output-buf \<int\>](#--output-buf-int)
   - [--output-thread \<int\>](#--output-thread-int)
   - [--log \<string\>](#--log-string)
@@ -524,7 +526,7 @@ Read VapourSynth script file using vpy reader.
 Read input file using avformat + libavcodec's sw decoder. The optional parameter will set decoder name to be used, otherwise decoder will be selected automatically.
 
 ### --avhw
-Read input file using avformat + QSV hw decoder. Using this mode will provide maximum performance,
+Read input file using avformat + NVDEC/CUVID hw decoder. Using this mode will provide maximum performance,
 since entire transcode process will be run on the GPU.
 
 **Codecs supported by avhw reader**  
@@ -1287,7 +1289,7 @@ This option is only available when avcodec encoder is enabled by specifying `-c 
   -c av_libvpx-vp9 --avcodec-prms crf=30,b=0,cpu-used=2
   ```
 
-### --audio-copy [&lt;int/string&gt;;[,&lt;int/string&gt;]...]
+### --audio-copy [&lt;int/string&gt;[,&lt;int/string&gt;]...]
 Copy audio track into output file. Available only when avhw / avsw reader is used.
 
 If it does not work well, try encoding with [--audio-codec](#--audio-codec-intstring), which is more stable.
@@ -1700,7 +1702,7 @@ Read subtitle from the specified file and mux into the output file.
   Example2: --sub-source "<sub_file>:disposition=default,forced;metadata=language=jpn"
   ```
 
-### --sub-copy [&lt;int/string&gt;;[,&lt;int/string&gt;]...]
+### --sub-copy [&lt;int/string&gt;[,&lt;int/string&gt;]...]
 Copy subtitle tracks from input file. Available only when avhw / avsw reader is used.
 It is also possible to specify subtitle tracks (1, 2, ...) to extract with [&lt;int&gt;], or select subtitle tracks to copy by language with [&lt;string&gt;].
 Prefix a track number with `!` to exclude that track (for example, `!1,!3`).
@@ -1912,7 +1914,7 @@ Vpp filters will be applied in fixed order, regardless of the order in the comma
 - [--vpp-transform/rotate](#--vpp-rotate-int)
 - [--vpp-convolution3d](#--vpp-convolution3d-param1value1param2value2)
 - [--vpp-nvvfx-denoise](#--vpp-nvvfx-denoise-param1value1param2value2)
-- [--vpp-nvvfx-artifact-reduction](#--vpp-nvvfx-artifact-reduction-param1value1param2value2)
+- [--vpp-nvvfx-framegen](#--vpp-nvvfx-framegen-param1value1param2value2)
 - [--vpp-smooth](#--vpp-smooth-param1value1param2value2)
 - [--vpp-denoise-dct](#--vpp-denoise-dct-param1value1param2value2)
 - [--vpp-bm3d](#--vpp-bm3d-param1value1param2value2)
@@ -1953,7 +1955,7 @@ Vpp filters will be applied in fixed order, regardless of the order in the comma
 - [--vpp-padding](#--vpp-pad-intintintint)
 - [--vpp-overlay](#--vpp-overlay-param1value1param2value2)
 - [--vpp-ngx-truehdr](#--vpp-ngx-truehdr-param1value1param2value2)
-- [--vpp-fruc](#--vpp-overlay-param1value1param2value2)
+- [--vpp-fruc](#--vpp-fruc-param1value1param2value2)
 - [--vpp-anime4k-shader](#--vpp-anime4k-shader-param1value1param2value2)
 - [--vpp-onnx](#--vpp-onnx-param1value1param2value2)
 - [--vpp-onnx-deint](#--vpp-onnx-deint-param1value1param2value2)
@@ -2154,7 +2156,7 @@ Performs tone mapping using [libplacebo](https://code.videolan.org/videolan/libp
 
     - exposure=&lt;float&gt;   (0.0 - 10.0, default: 1.0)  
       Linear exposure/gain applied.
-  - metadata=&lt;int&gt;  
+  - metadata=&lt;string&gt;  
     Data source to use for tone mapping.
     ```
     any, none, hdr10, hdr10plus, cie_y
@@ -2771,6 +2773,7 @@ Correct radial lens distortion using Brown-Conrady coefficients.
 
 - k1=&lt;float&gt;, k2=&lt;float&gt;: radial distortion coefficients.
 - cx=&lt;float&gt;, cy=&lt;float&gt;: correction centre in normalized image coordinates (default: 0.5).
+- vignette=&lt;float&gt;: corner brightness, gain at the corner is 1+vignette. Positive removes a falloff, negative adds one (default: 0.0, -1.0 - 4.0).
 
 ```
 --vpp-lenscorrection k1=-0.20,k2=0.04
@@ -2835,8 +2838,10 @@ Webcam denoise filter from [NVIDIA MAXINE VideoEffects SDK](https://github.com/N
 This will removes low-light camera noise from a webcam video while preserving the texture details,
 supporting resolutions between 80p to 1080p.
 
-This fitler is supported on Turing Gen GPU (RTX20xx) or later. 
-Please download and install [Video Effect models and runtime dependencies](https://www.nvidia.com/broadcast-sdk-resources) to use this filter.
+This filter is supported on Turing Gen GPU (RTX20xx) or later.
+VFX SDK 1.3 requires the `nvvfxdenoising` feature package and its `nvVFXDenoising.dll`.
+To use this filter, download the optional package [NVEncNVVFXDenoise_20260925_x64.7z](https://github.com/rigaya/NVEnc/releases/download/9.35/NVEncNVVFXDenoise_20260925_x64.7z) and extract it into the directory containing the NVEncC executable.
+When a `models` directory exists next to the executable, model files for the current GPU architecture are loaded from it automatically.
 
 - **parameters**
   - strength=&lt;int&gt;
@@ -2846,21 +2851,35 @@ Please download and install [Video Effect models and runtime dependencies](https
     - 1  
       Stronger effect, which places a higher emphasis on noise removal. 
 
-### --vpp-nvvfx-artifact-reduction [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
-Artifact reduction filter from [NVIDIA MAXINE VideoEffects SDK](https://github.com/NVIDIA/MAXINE-VFX-SDK), which is supported on  x64 version only.
-This will reduce encoder artifacts, while preserving the details of orginal video,
-supporting resolutions between 90p to 1080p.
+The former `--vpp-nvvfx-artifact-reduction` filter has been removed because NVIDIA VFX SDK 1.1 and later no longer provide this feature. There is no replacement mapping.
 
-This fitler is supported on Turing Gen GPU (RTX20xx) or later. 
+### --vpp-nvvfx-framegen [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+Video Frame Generation (VFG) filter from [NVIDIA MAXINE VideoEffects SDK](https://github.com/NVIDIA-Maxine/Maxine-VFX-SDK), which is supported on  x64 version only.
+This synthesizes intermediate frames between two consecutive frames, increasing the frame rate of the output video.
+
+This filter is supported on Ada Gen GPU (RTX40xx) or later.
 Please download and install [Video Effect models and runtime dependencies](https://www.nvidia.com/broadcast-sdk-resources) to use this filter.
 
 - **parameters**
-  - mode=&lt;int&gt;
-    - 0 (default)  
-      Removes lesser artifacts, preserves low gradient information better, and is suited for higher bitrate videos.
+  - mode=&lt;string&gt;
+    - low  
+      Selects the lowest-complexity model.
 
-    - 1  
-      Results stronger effect, suitable for lower bitrate videos.
+    - medium (default)  
+      Selects the balanced model.
+
+    - high  
+      Selects the highest-complexity model.
+  - multiplier=&lt;int&gt;  (default=2, 2-8)  
+    Specifies how many frames are output for each input frame.
+    2 - 8 generates (multiplier - 1) frames between each input frame pair,
+    so the output frame rate is multiplied by the specified value.
+  - autoshotchange=&lt;bool&gt;  (default=true)  
+    Enables automatic shot change detection. When a shot change is detected,
+    interpolation is bypassed and the current frame is copied instead.
+
+Note that this filter changes the number of frames, so it should not be combined
+with other filters which also change the number of frames, such as --vpp-fruc.
 
 ### --vpp-smooth [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
 
@@ -3380,36 +3399,35 @@ Specify the resizing algorithm.
        To use those algorithms, you need to download nppc64_11.dll, nppif64_11.dll, nppig64_11.dll separately and place it in the same folder as NVEncC64.exe.
        The npp dlls can be downloaded from [this link](https://github.com/rigaya/NVEnc/releases/tag/8.01) (npp64_11_dll.7z). It can also be found under ```<CUDA Install Path>\bin``` if you install CUDA 11.
 
-    - [nvvfx](https://github.com/NVIDIA/MAXINE-VFX-SDK) library resize filters
-
-      | name | description |
-      |:---|:---|
-      | nvvfx-superres | Super Resolution based on nvvfx library (upscale only)     |
-
-      ```nvvfx-superres``` is super resolution filter from [NVIDIA MAXINE VideoEffects SDK](https://github.com/NVIDIA/MAXINE-VFX-SDK), which is supported on  x64 version only.
-      This mode is supported on Turing Gen GPU (RTX20xx) or later. Please download and install [Video Effect models and runtime dependencies](https://www.nvidia.com/broadcast-sdk-resources) to use this mode.
-
-      - Additional parameters
-        - superres-mode=&lt;int&gt;  
-          select mode for nvvfx-superres
-          - 0 ... conservative
-          - 1 ... aggressive (default)
-      
-        - superres-strength=&lt;float&gt;  
-          strength for nvvfx-superres (0.0 - 1.0, default = 0.4)
-
     - [NGX](https://docs.nvidia.com/rtx/ngx/programming-guide/index.html) library resize filters
 
       | name | description |
       |:---|:---|
       | ngx-vsr        | NVIDIA VSR (Video Super Resolution)     |   |
 
+      The former `nvvfx-superres` filter has been removed. For compatibility, specifying it displays a warning and maps it to `ngx-vsr`.
+
       Requires Turing GPUs or later, and requires driver version 550.58 or higher. Supported on Windows system only.
 
       - Additional parameters
         - vsr-quality=&lt;int&gt;  
-          quality for ngx-vsr (1 - 4, default=1)
-          larger value results higher quality.
+          selects the model/mode for ngx-vsr (NVIDIA's parameter name is "QualityLevel"; 0, 1 - 4, 8 - 19, 21, 23, default=1)
+          - 0 ... bicubic baseline (non-AI, useful as a comparison baseline)
+          - 1 - 4 ... VSR quality levels
+          - 8 - 11 ... denoise
+          - 12 - 15 ... deblur
+          - 16 - 19 ... high-bitrate detail restoration
+          - 21 ... streaming medium
+          - 23 ... streaming ultra
+          larger values give higher quality within 1 - 4, 16 - 19, 21 and 23, and stronger effects within 8 - 15.
+          modes 0 and 8 - 19 require nvngx_vsr.dll from VFX SDK 1.2 or later.
+          modes 21 and 23 require nvngx_vsr.dll from VFX SDK 1.3 or later, and an Ampere or newer GPU.
+          modes 5 - 7, 20 and 22 are reserved by NVIDIA, and cannot be used.
+          modes 8 - 15 do not resize the frame, and require the output resolution to be the same as the input.
+        - vsr-strength=&lt;float&gt;  
+          strength of the ngx-vsr effect (0.0 - 1.0, default=1.0)
+          larger value applies stronger enhancement.
+          requires nvngx_vsr.dll from VFX SDK 1.3 or later, and is ignored by the 1.2 dll.
       
     - [libplacebo](https://code.videolan.org/videolan/libplacebo) library resize filters
 
@@ -3468,9 +3486,6 @@ Specify the resizing algorithm.
 
   Examples: Use spline64
   --vpp-resize algo=spline64 
-
-  Examples: Use nvvfx-superres in mode 1
-  --vpp-resize algo=nvvfx-superres,superres-mode=1
 
   Examples: Use ngx-vsr in best quality
   --vpp-resize algo=ngx-vsr,vsr-quality=4
@@ -4157,6 +4172,9 @@ Overlay image on top of base video.
   
   - lumakey_softness=&lt;float&gt; (default: 0.0 (0.0 - 1.0))  
     set the range of softness for lumakey.
+  
+  - loop=&lt;bool&gt; (default=false)  
+    loop the overlay file if it is a video shorter than the base video.
 
 - Example:
   ```
@@ -4563,6 +4581,8 @@ RIFE v4.x frame interpolation filter using ONNX Runtime CUDA/TensorRT. Input mus
     Registered RIFE v4.x model name or path to an ONNX model (required). When `--vpp-onnx-model-dir` is specified, a name from `rife_ov_models.json` such as `rife_v4_6` can be used. Values containing `/`, `\\`, or `.` are treated as direct paths for compatibility.
   - multi=&lt;int&gt; (default: 2, minimum: 2)  
     Frame-rate multiplier.
+  - fps=&lt;int&gt; or &lt;num&gt;/&lt;den&gt;  
+    Target frame rate as a ratio or a decimal number. Overrides multi when both are specified.
   - device=&lt;string&gt; (default: GPU.0)  
     Accepted for cross-encoder compatibility; NVEnc uses its selected CUDA device.
   - colormatrix=&lt;string&gt; (default: auto)  
@@ -4679,7 +4699,7 @@ Disable NVML GPU monitoring。
   - 2
     Always disable NVML.
 
-### --disable-nvml
+### --disable-dx11
 Skip DX11 initilization. NGX and libplacebo filters cannot be used with this option.
 
 ### --output-buf &lt;int&gt;

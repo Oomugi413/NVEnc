@@ -34,6 +34,7 @@
 
 #if ENABLE_AVSW_READER
 #include "rgy_avutil.h"
+#include <libavutil/hwcontext.h>
 #include "rgy_queue.h"
 #include "rgy_perf_monitor.h"
 #include "rgy_bitstream.h"
@@ -56,6 +57,21 @@ static const int FRAMEPOS_POC_INVALID = -1;
 
 static const char* HDR10PLUS_METADATA_KEY = "rgy_hdr10plus_metadata";
 static const char* DOVI_RPU_METADATA_KEY = "rgy_dovi_rpu_metadata";
+
+// HWデコード面をCPUへ転送せず、AVFrameの参照とフレーム属性を保持する。
+class RGYFrameHWAVFrame : public RGYSysFrame {
+public:
+    explicit RGYFrameHWAVFrame(const RGYFrameInfo& info) : RGYSysFrame(info), m_hwframe(av_frame_alloc(), RGYAVDeleter<AVFrame>(av_frame_free)) {}
+    bool isempty() const override { return (!m_hwframe || !m_hwframe->buf[0]) && RGYSysFrame::isempty(); }
+    AVFrame *avframe() const { return m_hwframe.get(); }
+    int setAVFrame(const AVFrame *source) {
+        if (!m_hwframe) return AVERROR(ENOMEM);
+        av_frame_unref(m_hwframe.get());
+        return av_frame_ref(m_hwframe.get(), source);
+    }
+private:
+    std::unique_ptr<AVFrame, RGYAVDeleter<AVFrame>> m_hwframe;
+};
 
 enum RGYPtsStatus : uint32_t {
     RGY_PTS_UNKNOWN           = 0x00,
@@ -746,6 +762,8 @@ struct AVDemuxVideo {
     const AVCodec            *codecDecode;           //動画のデコーダ (使用しない場合はnullptr)
     AVCodecContext           *codecCtxDecode;        //動画のデコーダ (使用しない場合はnullptr)
     AVFrame                  *frame;                 //動画デコード用のフレーム
+    AVFrame                  *frameSW;               //hwaccel出力をソフトウェアフレームへ転送する作業領域
+    AVPixelFormat             hwPixelFormat;         //hwaccelで使用するピクセル形式
     int                       index;                 //動画のストリームID
     int                       pmtTrackPos;            //追従対象program内で同じcodec_typeの何番目か (-1: 追従対象外)
     bool                      pmtNoSuccessorWarned;  //後継ストリーム消失のWARNを出し済みか (同一状態での重複WARN抑制用)
@@ -873,7 +891,6 @@ public:
     RGYHEVCBsf     hevcbsf;
     std::pair<int, int> adaptResolution;    // pipelineの入力プールと同じ物理確保上限。{ 0, 0 }なら初期入力解像度を上限にする。
     tstring        avswDecoder;             //avswデコーダの指定
-
     RGYInputAvcodecPrm(RGYInputPrm base);
     virtual ~RGYInputAvcodecPrm() {};
 };
@@ -979,8 +996,19 @@ public:
     //並列エンコードの親側で不要なデコーダを終了させる
     void CloseVideoDecoder();
 
+    //initSWVideoDecoder()が出力する色空間の希望を設定する (RGY_CSP_NAなら入力に合わせる)
+    //HWデコード(avhw)として開いた場合、m_inputVideoInfo.cspはデコーダの出力形式になっているため、
+    //あとからswデコード/hwaccelに切り替えるときに、avswと同じ色空間を選ばせるために使う
+    void setPreferredOutputCsp(RGY_CSP csp) { m_inputVideoInfo.csp = csp; }
+
     //swデコーダの初期化
-    RGY_ERR initSWVideoDecoder(const tstring& avswDecoder);
+    RGY_ERR initSWVideoDecoder(const tstring& avswDecoder, AVBufferRef *hwdevice = nullptr, AVHWDeviceType hwdeviceType = AV_HWDEVICE_TYPE_NONE, int extraHWFrames = 0);
+    bool canPassHWFrame(RGY_CSP expectedCsp) const {
+        return m_hwaccelActive && m_Demux.video.hwPixelFormat != AV_PIX_FMT_NONE
+            && m_inputCsp != RGY_CSP_NA && m_inputVideoInfo.csp == expectedCsp
+            && RGY_CSP_BIT_DEPTH[m_inputCsp] == RGY_CSP_BIT_DEPTH[expectedCsp]
+            && RGY_CSP_CHROMA_FORMAT[m_inputCsp] == RGY_CSP_CHROMA_FORMAT[expectedCsp];
+    }
 
     void setInputInfo();
 
@@ -1101,6 +1129,8 @@ protected:
     int              m_maxSrcHeight;
     bool             m_suppressPulldownDetect;     // true: skip avgDuration *= 1.25 after bPulldown is detected. bPulldown itself is still set so log/diagnostic paths see it. Mirrors RGYInputAvcodecPrm::suppressPulldownMutation.
     bool             m_pulldownDetected;           // true when getFirstFramePosAndFrameRate detected soft pulldown.
+    bool             m_hwaccelActive;
+    bool             m_hwFramePassDisabled;
 
 public:
     void setSuppressPulldownDetect(bool v) { m_suppressPulldownDetect = v; }

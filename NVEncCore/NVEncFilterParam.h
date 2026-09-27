@@ -55,12 +55,15 @@ static const int FILTER_DEFAULT_CUSTOM_PIXEL_PER_THREAD_X = 1;
 static const int FILTER_DEFAULT_CUSTOM_PIXEL_PER_THREAD_Y = 1;
 
 static const float FILTER_DEFAULT_NVVFX_DENOISE_STRENGTH = 0.0f;
-static const int FILTER_DEFAULT_NVVFX_ARTIFACT_REDUCTION_MODE = 0;
 static const float FILTER_DEFAULT_NVVFX_SUPER_RES_STRENGTH = 0.4f;
 static const int FILTER_DEFAULT_NVVFX_SUPER_RES_MODE = 1;
-static const float FILTER_DEFAULT_NVVFX_UPSCALER_STRENGTH = 0.4f;
+
+static const int   FILTER_DEFAULT_NVVFX_FRAMEGEN_MODE = 1;      // medium
+static const int   FILTER_DEFAULT_NVVFX_FRAMEGEN_MULTIPLIER = 2; // x2 => 1 generated frame per input pair
+static const bool  FILTER_DEFAULT_NVVFX_FRAMEGEN_AUTO_SHOT_CHANGE = true;
 
 static const int FILTER_DEFAULT_NGX_VSR_QUALITY = 1;
+static const float FILTER_DEFAULT_NGX_VSR_STRENGTH = 1.0f;
 static const int FILTER_DEFAULT_NGX_TRUEHDR_CONTRAST = 125;
 static const int FILTER_DEFAULT_NGX_TRUEHDR_SATURATION = 75;
 static const int FILTER_DEFAULT_NGX_TRUEHDR_MIDDLE_GRAY = 44;
@@ -152,6 +155,13 @@ const CX_DESC list_vpp_nvvfx_mode[] = {
     { NULL, 0 }
 };
 
+const CX_DESC list_vpp_nvvfx_framegen_mode[] = {
+    { _T("low"),    0 },
+    { _T("medium"), 1 },
+    { _T("high"),   2 },
+    { NULL, 0 }
+};
+
 struct VppNvvfxDenoise {
     bool enable;
     float strength;
@@ -162,40 +172,22 @@ struct VppNvvfxDenoise {
     tstring print() const;
 };
 
-struct VppNvvfxArtifactReduction {
+struct VppNvvfxFrameGen {
     bool enable;
-    int mode; // 0: conservative, 1: aggressive
+    int mode;         // 0: low, 1: medium, 2: high
+    int multiplier;   // 2 - 8: generate (multiplier - 1) frames between each input pair
+    bool autoShotChangeDetection;
 
-    VppNvvfxArtifactReduction();
-    bool operator==(const VppNvvfxArtifactReduction &x) const;
-    bool operator!=(const VppNvvfxArtifactReduction &x) const;
-    tstring print() const;
-};
-
-struct VppNvvfxSuperRes {
-    bool enable;
-    int mode; // 0: conservative, 1: aggressive
-    float strength;
-
-    VppNvvfxSuperRes();
-    bool operator==(const VppNvvfxSuperRes &x) const;
-    bool operator!=(const VppNvvfxSuperRes &x) const;
-    tstring print() const;
-};
-
-struct VppNvvfxUpScaler {
-    bool enable;
-    float strength;
-
-    VppNvvfxUpScaler();
-    bool operator==(const VppNvvfxUpScaler &x) const;
-    bool operator!=(const VppNvvfxUpScaler &x) const;
+    VppNvvfxFrameGen();
+    bool operator==(const VppNvvfxFrameGen &x) const;
+    bool operator!=(const VppNvvfxFrameGen &x) const;
     tstring print() const;
 };
 
 struct VppNGXVSR {
     bool enable;
     int quality;
+    float strength;
 
     VppNGXVSR();
     bool operator==(const VppNGXVSR &x) const;
@@ -222,9 +214,7 @@ struct VppParam {
     NppiMaskSize              gaussMaskSize;
 #endif //#if ENCODER_NVENC
     VppNvvfxDenoise           nvvfxDenoise;
-    VppNvvfxArtifactReduction nvvfxArtifactReduction;
-    VppNvvfxSuperRes          nvvfxSuperRes;
-    VppNvvfxUpScaler          nvvfxUpScaler;
+    VppNvvfxFrameGen          nvvfxFrameGen;
     tstring                   nvvfxModelDir;
     VppNGXVSR                 ngxVSR;
     VppNGXTrueHDR             ngxTrueHDR;

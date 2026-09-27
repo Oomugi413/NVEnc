@@ -13988,7 +13988,7 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
         cmd << _T(" --vpp-deint-csp output");
     }
 
-    if (!isNvvfxResizeFiter(param->resize_algo) && !isNgxResizeFiter(param->resize_algo) && !isQSVMFXResizeFiter(param->resize_algo)) {
+    if (!isNgxResizeFiter(param->resize_algo) && !isQSVMFXResizeFiter(param->resize_algo)) {
         if (isLibplaceboResizeFiter(param->resize_algo)) {
             OPT_LST(_T("--vpp-resize"), resize_algo, list_vpp_resize);
             if (param->resize_libplacebo.radius != defaultPrm->resize_libplacebo.radius) {
@@ -17571,18 +17571,20 @@ tstring gen_cmd_help_vpp() {
                _T("      c=<float>                 for bicubic: Mitchell-Netravali C parameter (default=%.2f)\n")
                _T("                                 aliases: mitchell, catmull-rom, hermite\n"),
             FILTER_DEFAULT_RESIZE_BICUBIC_B, FILTER_DEFAULT_RESIZE_BICUBIC_C);
-#if ENABLE_NVVFX
-            str += strsprintf(_T("\n")
-                _T("      superres-mode=<int>\n")
-                _T("        mode for nvvfx-superres     0 ... conservative\n")
-                _T("                                    1 ... aggressive (default)\n")
-                _T("      superres-strength=<float>\n")
-                _T("        strength for nvvfx-superres (0.0 - 1.0, default = 0.4)\n"));
-#endif
 #if ENABLE_NVSDKNGX
             str += strsprintf(_T("\n")
                 _T("      vsr-quality=<int>\n")
-                _T("        quality for ngx-vsr\n"));
+                _T("        model/mode for ngx-vsr (NVIDIA \"QualityLevel\"; 0, 1 - 4, 8 - 19, 21, 23, default = 1)\n")
+                _T("        0 = bicubic baseline (non-AI, useful as a comparison baseline)\n")
+                _T("        8-11 = denoise, 12-15 = deblur, 16-19 = high-bitrate detail restoration\n")
+                _T("        larger values give higher quality within 1-4, 16-19, 21 and 23,\n")
+                _T("        and stronger effects within 8-15\n")
+                _T("        modes 0 and 8-19 require nvngx_vsr.dll from VFX SDK 1.2 or later\n")
+                _T("        21 / 23 = streaming (medium / ultra), require nvngx_vsr.dll from\n")
+                _T("                  VFX SDK 1.3 or later and an Ampere or newer GPU\n")
+                _T("      vsr-strength=<float>\n")
+                _T("        strength for ngx-vsr (0.0 - 1.0, default = 1.0)\n")
+                _T("        requires nvngx_vsr.dll from VFX SDK 1.3 or later\n"));
 #endif
 #if ENCODER_QSV
             str += strsprintf(_T("\n")

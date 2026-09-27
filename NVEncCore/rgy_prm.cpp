@@ -67,7 +67,7 @@ static const auto VPPTYPE_TO_STR = make_array<std::pair<VppType, tstring>>(
 #endif //#if ENCODER_QSV
 #if ENCODER_NVENC || CLFILTERS_AUF
     std::make_pair(VppType::NVVFX_DENOISE,            _T("nvvfx_denoise")),
-    std::make_pair(VppType::NVVFX_ARTIFACT_REDUCTION, _T("nvvfx_artifact_reduction")),
+    std::make_pair(VppType::NVVFX_FRAME_GENERATION,   _T("nvvfx_framegen")),
 #endif
 #if ENCODER_NVENC || CLFILTERS_AUF
     std::make_pair(VppType::NGX_TRUEHDR,              _T("ngx_truehdr")),
@@ -281,10 +281,6 @@ RGY_VPP_RESIZE_TYPE getVppResizeType(RGY_VPP_RESIZE_ALGO resize) {
 #if ENCODER_NVENC && (!defined(_M_IX86) || FOR_AUO)
     } else if (resize < RGY_VPP_RESIZE_NPPI_MAX) {
         return RGY_VPP_RESIZE_TYPE_NPPI;
-#endif
-#if ENCODER_NVENC && (!defined(_M_IX86) || FOR_AUO) || CUFILTERS || CLFILTERS_AUF
-    } else if (resize < RGY_VPP_RESIZE_NVVFX_MAX) {
-        return RGY_VPP_RESIZE_TYPE_NVVFX;
 #endif
 #if ENCODER_NVENC && (!defined(_M_IX86) || FOR_AUO) || CUFILTERS || CLFILTERS_AUF
     } else if (resize < RGY_VPP_RESIZE_NGX_MAX) {

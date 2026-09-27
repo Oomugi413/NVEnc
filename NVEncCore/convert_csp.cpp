@@ -343,7 +343,7 @@ void copy_nv12_to_nv12_c_internal(void **dst, const void **src, int width, int s
     const int pixel_size = highbit_depth ? 2 : 1;
     for (int i = 0; i < 2; i++) {
         const auto y_range = thread_y_range(crop_up >> i, (height - crop_bottom) >> i, thread_id, thread_n);
-        const uint8_t *srcYLine = (const uint8_t *)src[i] + src_y_pitch_byte * y_range.start_src + crop_left;
+        const uint8_t *srcYLine = (const uint8_t *)src[i] + src_y_pitch_byte * y_range.start_src + crop_left * pixel_size;
         uint8_t *dstLine = (uint8_t *)dst[i] + dst_y_pitch_byte * y_range.start_dst;
         const int y_width = width - crop_right - crop_left;
         for (int y = 0; y < y_range.len; y++, srcYLine += src_y_pitch_byte, dstLine += dst_y_pitch_byte) {
@@ -368,7 +368,7 @@ void copy_nv12p010_to_nv12p010_c_internal(void **dst, const void **src, int widt
     const int crop_bottom = crop[3];
     for (int i = 0; i < 2; i++) {
         const auto y_range = thread_y_range(crop_up >> i, (height - crop_bottom) >> i, thread_id, thread_n);
-        const uint8_t *srcYLine = ((const uint8_t *)src[i] + src_y_pitch_byte * y_range.start_src + crop_left * sizeof(uint16_t));
+        const uint8_t *srcYLine = ((const uint8_t *)src[i] + src_y_pitch_byte * y_range.start_src + crop_left * sizeof(Tin));
         uint8_t *dstLine = (uint8_t *)dst[i] + dst_y_pitch_byte * y_range.start_dst;
         for (int y = 0; y < y_range.len; y++, srcYLine += src_y_pitch_byte, dstLine += dst_y_pitch_byte) {
             const int x_fin = width - crop_right - crop_left;
@@ -382,11 +382,11 @@ void copy_nv12p010_to_nv12p010_c_internal(void **dst, const void **src, int widt
 }
 
 void copy_p010_to_nv12_c(void **dst, const void **src, int width, int src_y_pitch_byte, int src_uv_pitch_byte, int dst_y_pitch_byte, int dst_uv_pitch_byte, int height, int dst_height, int thread_id, int thread_n, int *crop) {
-    return copy_nv12p010_to_nv12p010_c_internal<uint8_t, 8, uint16_t, 16>(dst, src, width, src_y_pitch_byte, src_uv_pitch_byte, dst_y_pitch_byte, dst_uv_pitch_byte, height, dst_height, thread_id, thread_n, crop);
+    return copy_nv12p010_to_nv12p010_c_internal<uint16_t, 16, uint8_t, 8>(dst, src, width, src_y_pitch_byte, src_uv_pitch_byte, dst_y_pitch_byte, dst_uv_pitch_byte, height, dst_height, thread_id, thread_n, crop);
 }
 
 void copy_nv12_to_p010_c(void **dst, const void **src, int width, int src_y_pitch_byte, int src_uv_pitch_byte, int dst_y_pitch_byte, int dst_uv_pitch_byte, int height, int dst_height, int thread_id, int thread_n, int *crop) {
-    return copy_nv12p010_to_nv12p010_c_internal<uint16_t, 16, uint8_t, 8>(dst, src, width, src_y_pitch_byte, src_uv_pitch_byte, dst_y_pitch_byte, dst_uv_pitch_byte, height, dst_height, thread_id, thread_n, crop);
+    return copy_nv12p010_to_nv12p010_c_internal<uint8_t, 8, uint16_t, 16>(dst, src, width, src_y_pitch_byte, src_uv_pitch_byte, dst_y_pitch_byte, dst_uv_pitch_byte, height, dst_height, thread_id, thread_n, crop);
 }
 
 template<typename Tin, int in_bit_depth, typename Tout, int out_bit_depth, bool uv_only>
@@ -2199,7 +2199,7 @@ static void convert_yv12_to_p010_c(void **dst, const void **src, int width, int 
         for (int y = 0; y < y_range.len; y++, srcYLine += src_y_pitch_byte, dstLine += dst_y_pitch_byte) {
             uint16_t *dst_ptr = (uint16_t *)dstLine;
             for (int x = 0; x < y_width; x++) {
-                dst_ptr[x] = (uint16_t)((((uint32_t)srcYLine[x]) << 8) + (2 << 6));
+                dst_ptr[x] = (uint16_t)((((uint32_t)srcYLine[x]) << 8));
             }
         }
     }
@@ -2214,8 +2214,8 @@ static void convert_yv12_to_p010_c(void **dst, const void **src, int width, int 
         uint8_t *src_v_ptr = srcVLine;
         uint16_t *dst_ptr = (uint16_t *)dstLine;
         for (int x = crop_left; x < x_fin; x += 2, src_u_ptr++, src_v_ptr++, dst_ptr += 2) {
-            dst_ptr[0] = (uint16_t)((((uint32_t)src_u_ptr[0]) << 8) + (2<<6));
-            dst_ptr[1] = (uint16_t)((((uint32_t)src_v_ptr[0]) << 8) + (2<<6));
+            dst_ptr[0] = (uint16_t)((((uint32_t)src_u_ptr[0]) << 8));
+            dst_ptr[1] = (uint16_t)((((uint32_t)src_v_ptr[0]) << 8));
         }
     }
 }

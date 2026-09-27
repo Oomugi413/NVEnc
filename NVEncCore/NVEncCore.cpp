@@ -725,6 +725,15 @@ RGY_ERR NVEncCore::InitInput(InEncodeVideoParam *inputParam, DeviceCodecCsp& HWD
             PrintMes(RGY_LOG_DEBUG, _T("timebase changed to %d/%d, as vpp-fruc targets %d/%d fps\n"), m_outputTimebase.n(), m_outputTimebase.d(), frucfps.n(), frucfps.d());
         }
     }
+    if (inputParam->vppnv.nvvfxFrameGen.enable) {
+        const int fpsMultiplier = (inputParam->vppnv.nvvfxFrameGen.multiplier >= 2) ? inputParam->vppnv.nvvfxFrameGen.multiplier : 2;
+        const rgy_rational<int> framegenfps = m_inputFps * fpsMultiplier;
+        if (framegenfps.is_valid()) {
+            const auto timbeaselcm = rgy_lcm(m_outputTimebase.d(), framegenfps.n() * 2);
+            m_outputTimebase *= rgy_rational<int>(1, timbeaselcm / m_outputTimebase.d());
+            PrintMes(RGY_LOG_DEBUG, _T("timebase changed to %d/%d, as vpp-nvvfx-framegen targets %d/%d fps\n"), m_outputTimebase.n(), m_outputTimebase.d(), framegenfps.n(), framegenfps.d());
+        }
+    }
 #if !FOR_AUO
     if (inputParam->common.dynamicHdr10plusJson.length() > 0) {
         m_hdr10plus = initDynamicHDR10Plus(inputParam->common.dynamicHdr10plusJson, m_pLog);
@@ -861,10 +870,9 @@ RGY_ERR NVEncCore::InitParallelEncode(InEncodeVideoParam *inputParam, std::vecto
         // とんでもなく大きい値にする人がいそうなので、適当に制限する
         const int maxParallelCount = std::max(4, encoderCount * 2);
         // nvvfx, ngx使用時はGPUメモリ使用量の問題があるため、GPUにつき1スレッドに制限する
-        const bool limitOnePerGPU = !inputParam->ctrl.parallelEnc.forceLargeMemoryFilters && (inputParam->vppnv.nvvfxArtifactReduction.enable
-            || inputParam->vppnv.nvvfxDenoise.enable
+        const bool limitOnePerGPU = !inputParam->ctrl.parallelEnc.forceLargeMemoryFilters && (inputParam->vppnv.nvvfxDenoise.enable
+            || inputParam->vppnv.nvvfxFrameGen.enable
             || inputParam->vppnv.ngxTrueHDR.enable
-            || isNvvfxResizeFiter(inputParam->vpp.resize_algo)
             || isNgxResizeFiter(inputParam->vpp.resize_algo));
         if (inputParam->ctrl.parallelEnc.parallelCount < 0) {
             inputParam->ctrl.parallelEnc.parallelCount = (limitOnePerGPU) ? (int)gpuList.size() : encoderCount;
@@ -957,11 +965,8 @@ RGY_ERR NVEncCore::InitOutput(InEncodeVideoParam *inputParams, NV_ENC_BUFFER_FOR
 bool NVEncCore::useNVVFX(const InEncodeVideoParam *inputParam) const {
 #if (!defined(_M_IX86))
     const auto& vppnv = inputParam->vppnv;
-    if (   vppnv.nvvfxArtifactReduction.enable
-        || vppnv.nvvfxDenoise.enable
-        || vppnv.nvvfxSuperRes.enable
-        || vppnv.nvvfxUpScaler.enable
-        || inputParam->vpp.resize_algo == RGY_VPP_RESIZE_NVVFX_SUPER_RES) {
+    if (   vppnv.nvvfxDenoise.enable
+        || vppnv.nvvfxFrameGen.enable) {
         return true;
     }
 #endif
@@ -1149,6 +1154,15 @@ RGY_ERR NVEncCore::CheckGPUListByEncoder(std::vector<std::unique_ptr<NVGPUInfo>>
             const int nvvfxRequiredCCMajor = 7;
             if ((*gpu)->cc().first < nvvfxRequiredCCMajor) {
                 message += strsprintf(_T("GPU #%d (%s) does not support fruc, CC 7.0 is required but GPU is CC %d.%d.\n"), (*gpu)->id(), (*gpu)->name().c_str(), (*gpu)->cc().first, (*gpu)->cc().second);
+                gpu = gpuList.erase(gpu);
+                continue;
+            }
+        }
+        if (inputParam->vppnv.nvvfxFrameGen.enable) {
+            //nvvfx-framegenにはada以降(CC8.9)が必要
+            if ((*gpu)->cc().first < 8
+                || ((*gpu)->cc().first == 8 && (*gpu)->cc().second < 9)) {
+                message += strsprintf(_T("GPU #%d (%s) does not support nvvfx-framegen, CC 8.9 is required but GPU is CC %d.%d.\n"), (*gpu)->id(), (*gpu)->name().c_str(), (*gpu)->cc().first, (*gpu)->cc().second);
                 gpu = gpuList.erase(gpu);
                 continue;
             }
@@ -1694,7 +1708,6 @@ bool NVEncCore::enableCuvidResize(const InEncodeVideoParam *inputParam) const {
             || inputParam->vpp.fft3d.enable
             || inputParam->vpp.msmooth.enable
             || inputParam->vppnv.nvvfxDenoise.enable
-            || inputParam->vppnv.nvvfxArtifactReduction.enable
             || inputParam->vpp.deband.enable
             || inputParam->vpp.libplacebo_deband.enable
             || inputParam->vpp.deflicker.enable
@@ -3037,7 +3050,6 @@ std::vector<VppType> NVEncCore::InitFiltersCreateVppList(const InEncodeVideoPara
     if (inputParam->vpp.v360.enable)           filterPipeline.push_back(VppType::CL_V360);
     if (inputParam->vpp.convolution3d.enable) filterPipeline.push_back(VppType::CL_CONVOLUTION3D);
     if (inputParam->vppnv.nvvfxDenoise.enable) filterPipeline.push_back(VppType::NVVFX_DENOISE);
-    if (inputParam->vppnv.nvvfxArtifactReduction.enable) filterPipeline.push_back(VppType::NVVFX_ARTIFACT_REDUCTION);
     if (inputParam->vpp.smooth.enable)        filterPipeline.push_back(VppType::CL_DENOISE_SMOOTH);
     if (inputParam->vpp.dct.enable)           filterPipeline.push_back(VppType::CL_DENOISE_DCT);
     if (inputParam->vpp.fft3d.enable)         filterPipeline.push_back(VppType::CL_DENOISE_FFT3D);
@@ -3092,6 +3104,7 @@ std::vector<VppType> NVEncCore::InitFiltersCreateVppList(const InEncodeVideoPara
     if (inputParam->vpp.rife_ov.enable)    filterPipeline.push_back(VppType::CL_RIFE_OV);
     if (inputParam->vpp.anime4k.enable)     filterPipeline.push_back(VppType::CL_ANIME4K);
     if (inputParam->vpp.fruc.enable)     filterPipeline.push_back(VppType::CL_FRUC);
+    if (inputParam->vppnv.nvvfxFrameGen.enable) filterPipeline.push_back(VppType::NVVFX_FRAME_GENERATION);
 
     if (filterPipeline.size() == 0) {
         return filterPipeline;
@@ -3195,8 +3208,20 @@ RGY_ERR NVEncCore::InitFilters(const InEncodeVideoParam *inputParam) {
         }
     }
     RGY_VPP_RESIZE_TYPE resizeRequired = RGY_VPP_RESIZE_TYPE_NONE;
+    // ngx-vsr quality 8-15 (denoise/deblur) from VFX SDK 1.2 nvngx_vsr.dll
+    // run at input=output resolution; the resize filter must be created even
+    // when no resize is requested (requires an explicit --output-res matching
+    // the input resolution). 16-19 (high-bitrate) are upscalers like 1-4 and
+    // follow the normal resize rules.
+#if (ENCODER_NVENC && (!defined(_M_IX86) || FOR_AUO)) || CUFILTERS || CLFILTERS_AUF
+    const bool ngxVsrSameRes = inputParam->vpp.resize_algo == RGY_VPP_RESIZE_NGX_VSR
+        && inputParam->vppnv.ngxVSR.quality >= 8
+        && inputParam->vppnv.ngxVSR.quality <= 15;
+#else
+    const bool ngxVsrSameRes = false;
+#endif
     if ((resizeWidth > 0 && resizeHeight > 0) &&
-        (croppedWidth != resizeWidth || croppedHeight != resizeHeight)) {
+        (croppedWidth != resizeWidth || croppedHeight != resizeHeight || ngxVsrSameRes)) {
         resizeRequired = getVppResizeType(inputParam->vpp.resize_algo);
         if (resizeRequired == RGY_VPP_RESIZE_TYPE_UNKNOWN) {
             PrintMes(RGY_LOG_ERROR, _T("Unknown resize type.\n"));
@@ -3241,6 +3266,27 @@ RGY_ERR NVEncCore::InitFilters(const InEncodeVideoParam *inputParam) {
         if (inputParam->vpp.ivtc.enable && inputParam->vpp.ivtc.expand > 0) {
             PrintMes(RGY_LOG_ERROR, _T("vpp-rff cannot be used with vpp-ivtc expand=on.\n"));
             return RGY_ERR_UNSUPPORTED;
+        }
+    }
+
+    //vpp-nvvfx-framegenの制約事項
+    //フレーム数を変更するフィルタなので、同じくフレーム数を変更するフィルタとは併用できない
+    if (inputParam->vppnv.nvvfxFrameGen.enable) {
+        const std::vector<std::pair<bool, const TCHAR *>> frameCountChangingFilters = {
+            { inputParam->vpp.fruc.enable,                                    _T("--vpp-fruc") },
+            { inputParam->vpp.rife_ov.enable,                                 _T("--vpp-rife-ov") },
+            { inputParam->vpp.afs.enable,                                     _T("--vpp-afs") },
+            { inputParam->vpp.selectevery.enable,                             _T("--vpp-select-every") },
+            { inputParam->vpp.decimate.enable,                                _T("--vpp-decimate") },
+            { inputParam->vpp.mpdecimate.enable,                              _T("--vpp-mpdecimate") },
+            // cycle = 0 のivtcはフレーム数を変更しない
+            { inputParam->vpp.ivtc.enable && inputParam->vpp.ivtc.cycle != 0, _T("--vpp-ivtc") },
+        };
+        for (const auto& filter : frameCountChangingFilters) {
+            if (filter.first) {
+                PrintMes(RGY_LOG_ERROR, _T("--vpp-nvvfx-framegen cannot be used with %s, as both change the number of frames.\n"), filter.second);
+                return RGY_ERR_UNSUPPORTED;
+            }
         }
     }
 
@@ -3423,10 +3469,9 @@ RGY_ERR NVEncCore::InitFilters(const InEncodeVideoParam *inputParam) {
         //autoは拡大/縮小の比率から実際のアルゴリズムを決めるが、ここでは比率が事前に決まらないのでbicubic固定とする
         m_normalizeResizeParam->interp = RGY_VPP_RESIZE_BICUBIC;
         PrintMes(RGY_LOG_DEBUG, _T("resolution change: normalization resize uses bicubic for auto resize mode.\n"));
-    //nvvfx/ngx/libplaceboのresizeは初期化時の解像度に固定された外部ライブラリのモデル/コンテキストを持つため、
+    //ngx/libplaceboのresizeは初期化時の解像度に固定された外部ライブラリのモデル/コンテキストを持つため、
     //解像度が動的に変わる正規化resizeには使えない。bicubicへフォールバックする(警告を出してユーザーに知らせる)。
-    } else if (isNvvfxResizeFiter(inputParam->vpp.resize_algo)
-        || isNgxResizeFiter(inputParam->vpp.resize_algo)
+    } else if (isNgxResizeFiter(inputParam->vpp.resize_algo)
         || isLibplaceboResizeFiter(inputParam->vpp.resize_algo)) {
         m_normalizeResizeParam->interp = RGY_VPP_RESIZE_BICUBIC;
         PrintMes(RGY_LOG_WARN, _T("resolution change: normalization resize falls back from %s to bicubic.\n"),
@@ -4257,11 +4302,11 @@ RGY_ERR NVEncCore::AddFilterCUDA(std::vector<std::unique_ptr<NVEncFilter>>& cufi
         m_encFps = param->baseFps;
         return RGY_ERR_NONE;
     }
-    //ノイズ除去 (nvvfx-artifact-reduction)
-    if (vppType == VppType::NVVFX_ARTIFACT_REDUCTION) {
-        unique_ptr<NVEncFilter> filter(new NVEncFilterNvvfxArtifactReduction());
-        shared_ptr<NVEncFilterParamNvvfxArtifactReduction> param(new NVEncFilterParamNvvfxArtifactReduction());
-        param->nvvfxArtifactReduction = inputParam->vppnv.nvvfxArtifactReduction;
+    //フレーム補間 (nvvfx-framegen)
+    if (vppType == VppType::NVVFX_FRAME_GENERATION) {
+        unique_ptr<NVEncFilter> filter(new NVEncFilterNvvfxFrameGeneration());
+        shared_ptr<NVEncFilterParamNvvfxFrameGen> param(new NVEncFilterParamNvvfxFrameGen());
+        param->nvvfxFrameGen = inputParam->vppnv.nvvfxFrameGen;
         param->compute_capability = m_dev->cc();
         param->modelDir = inputParam->vppnv.nvvfxModelDir;
         param->vuiInfo = vuiInfo;
@@ -4269,6 +4314,7 @@ RGY_ERR NVEncCore::AddFilterCUDA(std::vector<std::unique_ptr<NVEncFilter>>& cufi
         param->frameOut = inputFrame;
         param->baseFps = m_encFps;
         param->bOutOverwrite = false;
+        param->timebase = m_outputTimebase;
         NVEncCtxAutoLock(cxtlock(m_dev->vidCtxLock()));
         auto sts = filter->init(param, m_pLog);
         if (sts != RGY_ERR_NONE) {
@@ -4661,13 +4707,7 @@ RGY_ERR NVEncCore::AddFilterCUDA(std::vector<std::unique_ptr<NVEncFilter>>& cufi
         param->dpid = inputParam->vpp.resize_dpid;
         param->nis = inputParam->vpp.resize_nis;
         param->bicubic = inputParam->vpp.resize_bicubic;
-        if (isNvvfxResizeFiter(inputParam->vpp.resize_algo)) {
-            param->nvvfxSuperRes = std::make_shared<NVEncFilterParamNvvfxSuperRes>();
-            param->nvvfxSuperRes->nvvfxSuperRes = inputParam->vppnv.nvvfxSuperRes;
-            param->nvvfxSuperRes->compute_capability = m_dev->cc();
-            param->nvvfxSuperRes->modelDir = inputParam->vppnv.nvvfxModelDir;
-            param->nvvfxSuperRes->vuiInfo = vuiInfo;
-        } else if (isNgxResizeFiter(inputParam->vpp.resize_algo)) {
+        if (isNgxResizeFiter(inputParam->vpp.resize_algo)) {
             param->ngxvsr = std::make_shared<NVEncFilterParamNGXVSR>();
             param->ngxvsr->ngxvsr = inputParam->vppnv.ngxVSR;
             param->ngxvsr->compute_capability = m_dev->cc();
