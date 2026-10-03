@@ -401,6 +401,7 @@ protected:
     int deint60CacheTrimFloor() const;
     bool lazyDeint60Enabled(const NVEncFilterParamKfm& prm) const;
     const RGYFrameInfo *findDeint60Frame(int n60, std::vector<RGYCudaEvent> *wait_events) const;
+    const KfmCachedSource *findSourceByFrame(const RGYFrameInfo *frame) const;
     const RGYFrameInfo *findSourceFrame(const RGYFrameInfo *frame, std::vector<RGYCudaEvent> *wait_events);
     const KfmCachedSource *findSourceByIndex(int sourceIndex) const;
     const KfmCachedSource *findSourceByIndexExact(int sourceIndex) const;
@@ -598,10 +599,14 @@ protected:
 
     struct KfmPendingFMCount {
         int cycle;
+        int countParity;
+        bool completeWindow;
+        bool reusePrevious;
+        std::array<int, 6> tailSourceIndices;
         std::unique_ptr<CUMemBufPair> countBuf;
         RGYCudaEvent event;
 
-        KfmPendingFMCount() : cycle(-1), countBuf(), event() {};
+        KfmPendingFMCount() : cycle(-1), countParity(0), completeWindow(false), reusePrevious(false), tailSourceIndices(), countBuf(), event() {};
     };
 
     struct KfmPendingVfrOutput {
@@ -687,6 +692,8 @@ protected:
     std::array<std::unique_ptr<CUFrameBuf>, 5> m_staticWorkFrames;
     std::array<std::unique_ptr<CUMemBuf>, 2> m_analyzeFlags;
     std::deque<KfmPendingFMCount> m_pendingFMCounts;
+    std::array<RGYKFM::FMCount, 18> m_previousFMCounts;
+    int m_previousFMCountCycle;
     std::deque<KfmPendingVfrOutput> m_pendingVfrOutputs;
     KfmVfrRunStats m_vfrRunStats;
     mutable KfmProfileStats m_kfmProfile;

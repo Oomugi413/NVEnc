@@ -179,15 +179,15 @@ static bool kfmCspHasInterleavedUV(const RGY_CSP csp) {
         || csp == RGY_CSP_NV16 || csp == RGY_CSP_P210;
 }
 
-static const char *kfmUcfKernelName(VppKfmMode mode) {
+static const TCHAR *kfmUcfKernelName(VppKfmMode mode) {
     switch (mode) {
     case VppKfmMode::P60:
-        return "kernel_kfm_ucf_60";
+        return _T("kernel_kfm_ucf_60");
     case VppKfmMode::P24:
-        return "kernel_kfm_ucf_24";
+        return _T("kernel_kfm_ucf_24");
     case VppKfmMode::VFR:
     default:
-        return "kernel_kfm_ucf_param";
+        return _T("kernel_kfm_ucf_param");
     }
 }
 
@@ -348,6 +348,8 @@ NVEncFilterKfm::NVEncFilterKfm() :
     m_staticWorkFrames(),
     m_analyzeFlags(),
     m_pendingFMCounts(),
+    m_previousFMCounts(),
+    m_previousFMCountCycle(-1),
     m_pendingVfrOutputs(),
     m_telecineSuperRaw(),
     m_telecineSuperFrames(),
@@ -520,7 +522,7 @@ RGY_ERR NVEncFilterKfm::KfmRtgmcLane::drain(cudaStream_t stream, int maxDrainIte
     }
     for (int iter = 0; !m_rtgmc->drainComplete(); iter++) {
         if (iter >= maxDrainIterations) {
-            m_owner->AddMessage(RGY_LOG_ERROR, _T("KFM %S RTGMC drain did not complete after %d iterations.\n"), m_stage, maxDrainIterations);
+            m_owner->AddMessage(RGY_LOG_ERROR, _T("KFM %s RTGMC drain did not complete after %d iterations.\n"), char_to_tstring(m_stage).c_str(), maxDrainIterations);
             return RGY_ERR_INVALID_CALL;
         }
         int drainedFrames = 0;
@@ -542,8 +544,8 @@ RGY_ERR NVEncFilterKfm::KfmRtgmcLane::drainTo(int n60end, cudaStream_t stream) {
     const auto maxDrainIterations = std::max(256, m_owner ? m_owner->m_cachedSourceFrames * 4 + 256 : 256);
     for (int iter = 0; m_nextOutputN60 < n60end && !m_rtgmc->drainComplete(); iter++) {
         if (iter >= maxDrainIterations) {
-            m_owner->AddMessage(RGY_LOG_ERROR, _T("KFM %S RTGMC demand drain did not reach n60=%d after %d iterations.\n"),
-                m_stage, n60end, maxDrainIterations);
+            m_owner->AddMessage(RGY_LOG_ERROR, _T("KFM %s RTGMC demand drain did not reach n60=%d after %d iterations.\n"),
+                char_to_tstring(m_stage).c_str(), n60end, maxDrainIterations);
             return RGY_ERR_INVALID_CALL;
         }
         auto sts = feed(nullptr, stream, {});
@@ -634,8 +636,8 @@ RGY_ERR NVEncFilterKfm::KfmRtgmcLane::ensureRange(int n60begin, int n60end, cuda
                 return ensureSts;
             }
             if (!m_owner->pushDeint60Intermediates(m_rtgmc, source->sourceIndex, &intermediateGeneration)) {
-                m_owner->AddMessage(RGY_LOG_WARN, _T("KFM %S RTGMC skipped sourceIndex=%d because deint60 intermediates were not ready.\n"),
-                    m_stage, source->sourceIndex);
+                m_owner->AddMessage(RGY_LOG_WARN, _T("KFM %s RTGMC skipped sourceIndex=%d because deint60 intermediates were not ready.\n"),
+                    char_to_tstring(m_stage).c_str(), source->sourceIndex);
                 return RGY_ERR_MORE_DATA;
             }
         }
@@ -675,8 +677,8 @@ RGY_ERR NVEncFilterKfm::KfmRtgmcLane::feedHot(cudaStream_t stream) {
             return RGY_ERR_NONE;
         }
         if (!m_owner->pushDeint60Intermediates(m_rtgmc, source->sourceIndex, &intermediateGeneration)) {
-            m_owner->AddMessage(RGY_LOG_WARN, _T("KFM %S RTGMC hot feed stopped at sourceIndex=%d because deint60 intermediates were not ready.\n"),
-                m_stage, source->sourceIndex);
+            m_owner->AddMessage(RGY_LOG_WARN, _T("KFM %s RTGMC hot feed stopped at sourceIndex=%d because deint60 intermediates were not ready.\n"),
+                char_to_tstring(m_stage).c_str(), source->sourceIndex);
             return RGY_ERR_NONE;
         }
     }
@@ -704,7 +706,13 @@ RGY_ERR NVEncFilterKfm::KfmRtgmcLane::cacheFrame(const RGYFrameInfo *frame, cuda
     }
 
     if (m_owner && (m_rtgmc == m_owner->m_before60Rtgmc.get() || m_rtgmc == m_owner->m_after60Rtgmc.get()) && frame->inputFrameId >= 0) {
-        const int frameN60Base = frame->inputFrameId * 2;
+        // trim後の入力番号は内部のsourceIndexと異なり、複数区間では途中でも飛ぶ。
+        const auto *source = m_owner->findSourceByFrame(frame);
+        if (!source) {
+            m_owner->AddMessage(RGY_LOG_ERROR, _T("KFM UCFの元フレームが見つかりません: inputFrameId=%d。\n"), frame->inputFrameId);
+            return RGY_ERR_INVALID_CALL;
+        }
+        const int frameN60Base = source->sourceIndex * 2;
         if (m_submittedFrames < frameN60Base || m_submittedFrames > frameN60Base + 1) {
             m_submittedFrames = frameN60Base;
         }
@@ -727,8 +735,8 @@ RGY_ERR NVEncFilterKfm::KfmRtgmcLane::cacheFrame(const RGYFrameInfo *frame, cuda
     const int sourceIndex = entry.n60 >> 1;
     const auto *source = m_owner->findSourceByIndexExact(sourceIndex);
     if (!source) {
-        m_owner->AddMessage(RGY_LOG_ERROR, _T("KFM source frame is missing for %S output n60=%d, sourceIndex=%d, inputFrameId=%d.\n"),
-            m_stage, entry.n60, sourceIndex, frame->inputFrameId);
+        m_owner->AddMessage(RGY_LOG_ERROR, _T("KFM source frame is missing for %s output n60=%d, sourceIndex=%d, inputFrameId=%d.\n"),
+            char_to_tstring(m_stage).c_str(), entry.n60, sourceIndex, frame->inputFrameId);
         return RGY_ERR_INVALID_CALL;
     }
     if (source->event() != nullptr) {
@@ -758,7 +766,7 @@ RGY_ERR NVEncFilterKfm::KfmRtgmcLane::cacheFrame(const RGYFrameInfo *frame, cuda
     }
     sts = m_owner->mergeStatic(&entry.frame->frame, frame, &source->frame->frame, stream, mergeWaitEvents, &entry.event);
     if (sts != RGY_ERR_NONE) {
-        m_owner->AddMessage(RGY_LOG_ERROR, _T("failed to merge/cache KFM %S frame: %s.\n"), m_stage, get_err_mes(sts));
+        m_owner->AddMessage(RGY_LOG_ERROR, _T("failed to merge/cache KFM %s frame: %s.\n"), char_to_tstring(m_stage).c_str(), get_err_mes(sts));
         return sts;
     }
     if (event && entry.event() != nullptr) {
@@ -1448,7 +1456,7 @@ RGY_ERR NVEncFilterKfm::padSourceFrame(RGYFrameInfo *pPaddedFrame, const RGYFram
             ? run_kfm_padv_inplace_plane(&dst, src.height, vpad, stream)
             : run_kfm_pad_plane(&dst, &src, vpad, stream);
         if (sts != RGY_ERR_NONE) {
-            AddMessage(RGY_LOG_ERROR, _T("error at %S (plane %d): %s.\n"), sourceInPaddedFrame ? "kernel_kfm_padv_inplace" : "kernel_kfm_pad", iplane, get_err_mes(sts));
+            AddMessage(RGY_LOG_ERROR, _T("error at %s (plane %d): %s.\n"), sourceInPaddedFrame ? _T("kernel_kfm_padv_inplace") : _T("kernel_kfm_pad"), iplane, get_err_mes(sts));
             return sts;
         }
     }
@@ -2048,8 +2056,8 @@ bool NVEncFilterKfm::pushDeint60Intermediates(NVEncFilterRtgmc *rtgmc, int sourc
             return true;
         }
     }
-    const char *stage = (rtgmc == m_before60Rtgmc.get()) ? "before60" : ((rtgmc == m_after60Rtgmc.get()) ? "after60" : "unknown");
-    AddMessage(RGY_LOG_WARN, _T("KFM %S RTGMC shared-analysis intermediates missing for sourceIndex=%d; feed postponed.\n"),
+    const TCHAR *stage = (rtgmc == m_before60Rtgmc.get()) ? _T("before60") : ((rtgmc == m_after60Rtgmc.get()) ? _T("after60") : _T("unknown"));
+    AddMessage(RGY_LOG_WARN, _T("KFM %s RTGMC shared-analysis intermediates missing for sourceIndex=%d; feed postponed.\n"),
         stage, sourceIndex);
     return false;
 }
@@ -2106,7 +2114,7 @@ RGY_ERR NVEncFilterKfm::copyUcfFrame(const NVEncFilterParamKfm& prm, RGYFrameInf
         }
         sts = run_kfm_ucf_copy_plane(&dst, &src, stream);
         if (sts != RGY_ERR_NONE) {
-            AddMessage(RGY_LOG_ERROR, _T("error at %S (plane %d): %s.\n"), kernelName, iplane, get_err_mes(sts));
+            AddMessage(RGY_LOG_ERROR, _T("error at %s (plane %d): %s.\n"), kernelName, iplane, get_err_mes(sts));
             return sts;
         }
         sts = kfmRecordEvent(stream, &prevEvent);
@@ -2725,27 +2733,32 @@ RGY_ERR NVEncFilterKfm::drainDeint60Branch(cudaStream_t stream, int *cachedFrame
     return m_deint60Lane.drain(stream, maxDrainIterations, cachedFrames);
 }
 
-const RGYFrameInfo *NVEncFilterKfm::findSourceFrame(const RGYFrameInfo *frame, std::vector<RGYCudaEvent> *wait_events) {
+const NVEncFilterKfm::KfmCachedSource *NVEncFilterKfm::findSourceByFrame(const RGYFrameInfo *frame) const {
     if (!frame) {
         return nullptr;
     }
     for (auto it = m_sourceCache.rbegin(); it != m_sourceCache.rend(); ++it) {
         if (it->inputFrameId == frame->inputFrameId && it->timestamp == frame->timestamp) {
-            if (wait_events && it->event() != nullptr) {
-                wait_events->push_back(it->event);
-            }
-            return &it->frame->frame;
+            return &(*it);
         }
     }
     for (auto it = m_sourceCache.rbegin(); it != m_sourceCache.rend(); ++it) {
         if (it->inputFrameId == frame->inputFrameId) {
-            if (wait_events && it->event() != nullptr) {
-                wait_events->push_back(it->event);
-            }
-            return &it->frame->frame;
+            return &(*it);
         }
     }
     return nullptr;
+}
+
+const RGYFrameInfo *NVEncFilterKfm::findSourceFrame(const RGYFrameInfo *frame, std::vector<RGYCudaEvent> *wait_events) {
+    const auto *source = findSourceByFrame(frame);
+    if (!source) {
+        return nullptr;
+    }
+    if (wait_events && source->event() != nullptr) {
+        wait_events->push_back(source->event);
+    }
+    return &source->frame->frame;
 }
 
 const NVEncFilterKfm::KfmCachedSource *NVEncFilterKfm::findSourceByIndex(int sourceIndex) const {
@@ -4048,7 +4061,7 @@ RGY_ERR NVEncFilterKfm::renderTelecine24(RGYFrameInfo *pOutputFrame, int frame24
     try {
         info = m_analyzer->patterns().getFrame24(result.pattern, frame24Index);
     } catch (const std::exception& e) {
-        AddMessage(RGY_LOG_ERROR, _T("failed to resolve KFM 24p frame %d: %S.\n"), frame24Index, e.what());
+        AddMessage(RGY_LOG_ERROR, _T("failed to resolve KFM 24p frame %d: %s.\n"), frame24Index, char_to_tstring(e.what()).c_str());
         return RGY_ERR_INVALID_CALL;
     }
     const int firstField = info.cycleIndex * 10 + info.fieldStartIndex;
@@ -4507,7 +4520,7 @@ RGY_ERR NVEncFilterKfm::renderTelecineSuper24(RGYFrameInfo *pOutputFrame, int fr
     try {
         info = m_analyzer->patterns().getFrame24(result.pattern, frame24Index);
     } catch (const std::exception& e) {
-        AddMessage(RGY_LOG_ERROR, _T("failed to resolve KFM 24p super frame %d: %S.\n"), frame24Index, e.what());
+        AddMessage(RGY_LOG_ERROR, _T("failed to resolve KFM 24p super frame %d: %s.\n"), frame24Index, char_to_tstring(e.what()).c_str());
         return RGY_ERR_INVALID_CALL;
     }
     const int firstField = info.cycleIndex * 10 + info.fieldStartIndex;
@@ -4589,7 +4602,7 @@ RGY_ERR NVEncFilterKfm::getCachedCleanSuper(KfmCleanSuperMode mode, int frameInd
             key.lastField = key.firstField + info.numFields - 2;
             key.propSourceIndex = (key.firstField & ~1) >> 1;
         } catch (const std::exception& e) {
-            AddMessage(RGY_LOG_ERROR, _T("failed to resolve KFM 24p clean-super cache key %d: %S.\n"), frameIndex, e.what());
+            AddMessage(RGY_LOG_ERROR, _T("failed to resolve KFM 24p clean-super cache key %d: %s.\n"), frameIndex, char_to_tstring(e.what()).c_str());
             return RGY_ERR_INVALID_CALL;
         }
     } else if (mode == KFM_CLEAN_SUPER_30) {
@@ -4743,7 +4756,7 @@ RGY_ERR NVEncFilterKfm::removeCombe24(RGYFrameInfo *pOutputFrame, const RGYFrame
     try {
         info = m_analyzer->patterns().getFrame24(result.pattern, frame24Index);
     } catch (const std::exception& e) {
-        AddMessage(RGY_LOG_ERROR, _T("failed to resolve KFM 24p frame %d: %S.\n"), frame24Index, e.what());
+        AddMessage(RGY_LOG_ERROR, _T("failed to resolve KFM 24p frame %d: %s.\n"), frame24Index, char_to_tstring(e.what()).c_str());
         return RGY_ERR_INVALID_CALL;
     }
     const int firstField = info.cycleIndex * 10 + info.fieldStartIndex;
@@ -5654,21 +5667,7 @@ RGY_ERR NVEncFilterKfm::processMainRtgmcOutputs(const NVEncFilterParamKfm& prm, 
         mergeWaitEvents.push_back(staticEvent);
     }
     for (int i = 0; i < rtgmcOutNum; i++) {
-        const KfmCachedSource *sourceEntry = nullptr;
-        for (auto it = m_sourceCache.rbegin(); it != m_sourceCache.rend(); ++it) {
-            if (it->inputFrameId == rtgmcOutFrames[i]->inputFrameId && it->timestamp == rtgmcOutFrames[i]->timestamp) {
-                sourceEntry = &(*it);
-                break;
-            }
-        }
-        if (!sourceEntry) {
-            for (auto it = m_sourceCache.rbegin(); it != m_sourceCache.rend(); ++it) {
-                if (it->inputFrameId == rtgmcOutFrames[i]->inputFrameId) {
-                    sourceEntry = &(*it);
-                    break;
-                }
-            }
-        }
+        const auto *sourceEntry = findSourceByFrame(rtgmcOutFrames[i]);
         if (!sourceEntry || !sourceEntry->frame || !sourceEntry->frame->frame.ptr[0]) {
             AddMessage(RGY_LOG_ERROR, _T("KFM source frame is missing for output inputFrameId=%d.\n"), rtgmcOutFrames[i]->inputFrameId);
             return RGY_ERR_INVALID_CALL;
@@ -6098,6 +6097,8 @@ void NVEncFilterKfm::releaseUcfNoiseResultBuf(std::unique_ptr<CUMemBufPair>&& bu
 }
 
 RGY_ERR NVEncFilterKfm::clearPendingFMCounts() {
+    m_previousFMCounts = {};
+    m_previousFMCountCycle = -1;
     if (m_pendingFMCounts.empty()) {
         return RGY_ERR_NONE;
     }
@@ -6142,6 +6143,22 @@ RGY_ERR NVEncFilterKfm::submitFMCounts(int cycle, bool drain, cudaStream_t strea
     const size_t countBytes = sizeof(RGYKFM::FMCount) * KFM_FMCOUNT_PAIRS * 2;
     KfmPendingFMCount pending;
     pending.cycle = cycle;
+    pending.countParity = kfmFrameParity(&src[3]->frame->frame);
+    pending.completeWindow = !drain;
+    for (int i = 0; i < 6; i++) {
+        pending.tailSourceIndices[i] = src[i + 5]->sourceIndex;
+    }
+    // 周期は5フレームずつ進むため、先頭4組は直前周期の末尾4組と同じ画像を読む。
+    // 全入力が揃う通常経路でparityも同じ場合だけ再利用し、drainでは全組を計算する。
+    if (!drain && !m_pendingFMCounts.empty()) {
+        const auto& previous = m_pendingFMCounts.back();
+        pending.reusePrevious = previous.cycle + 1 == cycle
+            && previous.completeWindow && previous.countParity == pending.countParity;
+        // cache端へのクランプで別画像になる場合は、要求番号が重なっても再計算する。
+        for (int i = 0; pending.reusePrevious && i < 6; i++) {
+            pending.reusePrevious = src[i]->sourceIndex == previous.tailSourceIndices[i];
+        }
+    }
     pending.countBuf = std::make_unique<CUMemBufPair>(countBytes);
     auto sts = pending.countBuf->alloc();
     if (sts != RGY_ERR_NONE) {
@@ -6154,7 +6171,7 @@ RGY_ERR NVEncFilterKfm::submitFMCounts(int cycle, bool drain, cudaStream_t strea
         return sts;
     }
 
-    for (int pair = 0; pair < KFM_FMCOUNT_PAIRS; pair++) {
+    for (int pair = pending.reusePrevious ? 4 : 0; pair < KFM_FMCOUNT_PAIRS; pair++) {
         const auto csp = src[pair + 1]->frame->frame.csp;
         const bool interleavedUV = kfmCspHasInterleavedUV(csp);
         const int targetPlanes = (RGY_CSP_PLANES[csp] >= 3) ? 3 : (interleavedUV ? 3 : 1);
@@ -6261,12 +6278,20 @@ RGY_ERR NVEncFilterKfm::readbackFMCounts(std::array<RGYKFM::FMCount, 18>& counts
         AddMessage(RGY_LOG_ERROR, _T("failed to access KFM FMCount buffer.\n"));
         return RGY_ERR_NULL_PTR;
     }
+    // 読み戻しは周期順なので、直前周期の解決済み整数カウントを同期追加なしで補える。
+    if (pending.reusePrevious && m_previousFMCountCycle + 1 != pending.cycle) {
+        AddMessage(RGY_LOG_ERROR, _T("KFM previous FMCount cycle is missing.\n"));
+        return RGY_ERR_INVALID_CALL;
+    }
     for (int pair = 0; pair < KFM_FMCOUNT_PAIRS; pair++) {
         const int countFrameIndex = pending.cycle * 5 - 3 + pair + 1;
         if (countFrameIndex >= 0) {
             counts[pair * 2 + 0] = gpuCounts[pair * 2 + 0];
             counts[pair * 2 + 1] = gpuCounts[pair * 2 + 1];
         }
+    }
+    if (pending.reusePrevious) {
+        std::copy_n(m_previousFMCounts.begin() + 10, 8, counts.begin());
     }
     const int firstSourceIndex = pending.cycle * 5 - 3;
     const int firstValidPair = std::max(0, -(firstSourceIndex + 1));
@@ -6276,6 +6301,8 @@ RGY_ERR NVEncFilterKfm::readbackFMCounts(std::array<RGYKFM::FMCount, 18>& counts
             counts[pair * 2 + 1] = counts[firstValidPair * 2 + 1];
         }
     }
+    m_previousFMCounts = counts;
+    m_previousFMCountCycle = pending.cycle;
     m_pendingFMCounts.pop_front();
     return RGY_ERR_NONE;
 }
@@ -6345,7 +6372,7 @@ RGY_ERR NVEncFilterKfm::analyzeAvailableSource(bool drain, cudaStream_t stream) 
                 }
             }
         } catch (const std::exception& e) {
-            AddMessage(RGY_LOG_ERROR, _T("failed to analyze KFM cycle %d: %S.\n"), m_nextAnalyzeCycle, e.what());
+            AddMessage(RGY_LOG_ERROR, _T("failed to analyze KFM cycle %d: %s.\n"), m_nextAnalyzeCycle, char_to_tstring(e.what()).c_str());
             return RGY_ERR_INVALID_CALL;
         }
         m_nextAnalyzeCycle++;
@@ -6408,7 +6435,7 @@ void NVEncFilterKfm::writeUcfNoiseResultDump(const KfmUcfNoiseDumpRecord& record
             hasCalc1 = true;
         }
     } catch (const std::exception& e) {
-        AddMessage(RGY_LOG_WARN, _T("failed to calculate KFM UCF classification dump for frame %d: %S.\n"), record.sourceIndex, e.what());
+        AddMessage(RGY_LOG_WARN, _T("failed to calculate KFM UCF classification dump for frame %d: %s.\n"), record.sourceIndex, char_to_tstring(e.what()).c_str());
     }
     static const char *planeNames[2] = { "Y", "UV" };
     for (int i = 0; i < 2; i++) {
@@ -6972,25 +6999,9 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                 }
                 auto super24 = &m_telecineSuperFrames[superIndex]->frame;
 
-                const auto savedTelecine24Frame = m_nextTelecine24Frame;
-                const auto savedTelecine24Pts = m_nextTelecine24Pts;
-                RGYCudaEvent deintEvent;
-                sts = renderTelecine24(deint24, outputTiming.frame24Index, drain, stream, {}, &deintEvent);
-                m_nextTelecine24Frame = savedTelecine24Frame;
-                m_nextTelecine24Pts = savedTelecine24Pts;
-                if (sts == RGY_ERR_MORE_DATA) {
-                    m_workBufferIndex = savedWorkBufferIndex;
-                    m_telecineSuperBufferIndex = savedTelecineSuperBufferIndex;
-                    break;
-                }
-                if (sts != RGY_ERR_NONE) {
-                    return sts;
-                }
-
+                // clean-superはsource cacheから直接作り、deint24画像を入力にしない。
+                // count/readbackを先に投入し、その待ちにweaveとcombe除去を重ねる。
                 std::vector<RGYCudaEvent> superWaitEvents;
-                if (deintEvent() != nullptr) {
-                    superWaitEvents.push_back(deintEvent);
-                }
                 RGYCudaEvent superEvent;
                 sts = getCachedCleanSuper(KFM_CLEAN_SUPER_24, outputTiming.frame24Index, super24, &super24, drain, stream, superWaitEvents, &superEvent);
                 if (sts == RGY_ERR_MORE_DATA) {
@@ -7093,6 +7104,27 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                     }
                     return RGY_ERR_NONE;
                 };
+                const auto savedTelecine24Frame = m_nextTelecine24Frame;
+                const auto savedTelecine24Pts = m_nextTelecine24Pts;
+                RGYCudaEvent deintEvent;
+                sts = renderTelecine24(deint24, outputTiming.frame24Index, drain, stream, {}, &deintEvent);
+                m_nextTelecine24Frame = savedTelecine24Frame;
+                m_nextTelecine24Pts = savedTelecine24Pts;
+                if (sts == RGY_ERR_MORE_DATA) {
+                    const auto cleanupSts = resolveContainsCombeCount(containsCombeReadback, nullptr);
+                    if (cleanupSts != RGY_ERR_NONE) { return cleanupSts; }
+                    m_workBufferIndex = savedWorkBufferIndex;
+                    m_telecineSuperBufferIndex = savedTelecineSuperBufferIndex;
+                    break;
+                }
+                if (sts != RGY_ERR_NONE) {
+                    resolveContainsCombeCount(containsCombeReadback, nullptr);
+                    return sts;
+                }
+                if (deintEvent() != nullptr) {
+                    removeWaitEvents.push_back(deintEvent);
+                }
+
                 if (auto debugOut = kfmDebugStageFrame(prm->kfm.debugStage, switchFlag, containsCombe, combeMask)) {
                     copyFramePropWithoutRes(debugOut, deint24);
                     debugOut->picstruct = RGY_PICSTRUCT_FRAME;
@@ -7324,15 +7356,21 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                 }
 
                 RGYCudaEvent deintEvent;
-                sts = copyFrameWithEvent(deint30, &source->frame->frame, deintWaitEvents, &deintEvent, _T("deint30 source"));
-                if (sts != RGY_ERR_NONE) {
-                    return sts;
-                }
-                copyFramePropWithoutRes(deint30, &source->frame->frame);
-                deint30->picstruct = RGY_PICSTRUCT_FRAME;
-                deint30->flags = RGY_FRAME_FLAG_NONE;
-                attachSwitchFrameData(deint30, outputTiming, switchResult);
-                writeFrameInfoDump("deint30", deint30, switchResult);
+                // super/countは元のsourceから計算する。画像コピーだけをcount投入後へ遅らせる。
+                // super不足のfallbackも同じ処理を呼び、重複投入しない。
+                auto queueDeint30Copy = [&]() -> RGY_ERR {
+                    if (deintEvent() != nullptr) { return RGY_ERR_NONE; }
+                    auto copySts = copyFrameWithEvent(deint30, &source->frame->frame, deintWaitEvents, &deintEvent, _T("deint30 source"));
+                    if (copySts != RGY_ERR_NONE) {
+                        return copySts;
+                    }
+                    copyFramePropWithoutRes(deint30, &source->frame->frame);
+                    deint30->picstruct = RGY_PICSTRUCT_FRAME;
+                    deint30->flags = RGY_FRAME_FLAG_NONE;
+                    attachSwitchFrameData(deint30, outputTiming, switchResult);
+                    writeFrameInfoDump("deint30", deint30, switchResult);
+                    return RGY_ERR_NONE;
+                };
 
                 const int superIndex = m_telecineSuperBufferIndex++ & 1;
                 if (!m_telecineSuperFrames[superIndex]) {
@@ -7352,9 +7390,6 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                 }
 
                 std::vector<RGYCudaEvent> copyWaitEvents;
-                if (deintEvent() != nullptr) {
-                    copyWaitEvents.push_back(deintEvent);
-                }
                 const bool patchCombe30Enabled = kfmDeint60BranchEnabled() && m_deint60Rtgmc;
                 bool patched30 = false;
                 bool baseCopyQueued30 = false;
@@ -7431,6 +7466,14 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                     if (fullCombeMaskGenerated && maskEvent() != nullptr) {
                         copyWaitEvents.push_back(maskEvent);
                     }
+                    sts = queueDeint30Copy();
+                    if (sts != RGY_ERR_NONE) {
+                        resolveContainsCombeCount(containsCombeReadback, nullptr);
+                        return sts;
+                    }
+                    if (deintEvent() != nullptr) {
+                        copyWaitEvents.push_back(deintEvent);
+                    }
                     if (!prm->kfm.ucf) {
                         sts = copyFrameWithEvent(out, deint30, copyWaitEvents, &outputEvent, _T("deint30 output"));
                         if (sts != RGY_ERR_NONE) {
@@ -7491,6 +7534,11 @@ RGY_ERR NVEncFilterKfm::run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo
                     }
                 }
                 if (!patched30) {
+                    if (deintEvent() == nullptr) {
+                        sts = queueDeint30Copy();
+                        if (sts != RGY_ERR_NONE) { return sts; }
+                        if (deintEvent() != nullptr) { copyWaitEvents.push_back(deintEvent); }
+                    }
                     const RGYFrameInfo *ucf30 = deint30;
                     if (prm->kfm.ucf) {
                         sts = resolveUcfNoiseResults(outputTiming.sourceIndex, stream);
