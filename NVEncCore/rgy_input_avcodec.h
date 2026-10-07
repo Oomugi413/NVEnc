@@ -771,6 +771,7 @@ struct AVDemuxVideo {
     int                       pmtSwitchDropCount;    //切替後キーフレーム待ちで捨てたパケット数
     int64_t                   streamFirstKeyPts;     //動画ファイルの最初のpts
     int64_t                   beforeSeekStreamFirstKeyPts; //シーク前の動画ファイルの最初のpts (checkTimeSeekToでしか使わないはず)
+    int64_t                   seekTargetPts;         //--seekの目標pts、これ以降の最初のキーフレームから読み込みを開始する (AV_NOPTS_VALUE: 無効)
     AVPacket                 *firstPkt;              //動画の最初のpacket
     uint32_t                  streamPtsInvalid;      //動画ファイルのptsが無効 (H.264/ES, 等)
     int                       RFFEstimate;           //動画がRFFの可能性がある
@@ -869,7 +870,7 @@ public:
     int            procSpeedLimit;          //プリデコードする場合の処理速度制限 (0で制限なし)
     float          seekRatio;               //指定された割合に頭出しする
     float          seekSec;                 //指定された秒数分先頭を飛ばす
-    float          seekToSec;               //終了時刻(秒)
+    double         seekToSec;               //終了時刻(秒)
     tstring        logFramePosList;         //FramePosListの内容を入力終了時に出力する (デバッグ用)
     tstring        logCopyFrameData;        //frame情報copy関数のログ出力先 (デバッグ用)
     tstring        logPackets;              //読み込んだパケットの情報を出力する

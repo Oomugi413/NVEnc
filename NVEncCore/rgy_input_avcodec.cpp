@@ -167,6 +167,7 @@ AVDemuxVideo::AVDemuxVideo() :
     pmtSwitchDropCount(0),
     streamFirstKeyPts(0),
     beforeSeekStreamFirstKeyPts(0),
+    seekTargetPts(AV_NOPTS_VALUE),
     firstPkt(nullptr),
     streamPtsInvalid(0),
     RFFEstimate(0),
@@ -1736,7 +1737,7 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
     } else {
         m_readerName = _T("avsw");
     }
-    m_seek = std::pair<float, float>(0.0f, 0.0f);
+    m_seek = std::pair<float, double>(0.0f, 0.0);
     m_Demux.video.readVideo = input_prm->readVideo;
     m_Demux.video.hevcbsf = input_prm->hevcbsf;
     m_Demux.thread.queueInfo = input_prm->queueInfo;
@@ -2249,9 +2250,20 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
                 seek_sec = seek_start_sec + (duration_fin_sec - seek_start_sec) * input_prm->seekRatio;
             }
             const auto seek_time = av_rescale_q(1, av_d2q(seek_sec, 1<<24), m_Demux.video.stream->time_base);
-            int seek_ret = av_seek_frame(m_Demux.format.formatCtx, m_Demux.video.index, firstpkt->pts + seek_time, 0);
+            // 基準は最初のキーフレームのpts (firstpktはヘッダ取得のために読んだパケットの後続である場合がある)
+            const auto seek_target = m_Demux.video.streamFirstKeyPts + seek_time;
+            // mpegtsやmp4などはdtsでシークするため(mpegtsではキーフレームかどうかも考慮されない)、
+            // 目標時刻に直接シークすると目標のキーフレームを飛ばして次のキーフレームから開始してしまう。
+            // そこで、デコード遅延(pts-dts)より十分手前にシークし、目標時刻以降の最初のキーフレームまではgetSampleで読み捨てる。
+            static const double SEEK_MARGIN_SEC = 3.0;
+            const auto seek_margin = av_rescale_q(1, av_d2q(SEEK_MARGIN_SEC, 1<<24), m_Demux.video.stream->time_base);
+            const auto seek_pos = std::max(m_Demux.video.streamFirstKeyPts, seek_target - seek_margin);
+            int seek_ret = av_seek_frame(m_Demux.format.formatCtx, m_Demux.video.index, seek_pos, AVSEEK_FLAG_BACKWARD);
             if (0 > seek_ret) {
-                seek_ret = av_seek_frame(m_Demux.format.formatCtx, m_Demux.video.index, firstpkt->pts + seek_time, AVSEEK_FLAG_ANY);
+                seek_ret = av_seek_frame(m_Demux.format.formatCtx, m_Demux.video.index, seek_pos, 0);
+            }
+            if (0 > seek_ret) {
+                seek_ret = av_seek_frame(m_Demux.format.formatCtx, m_Demux.video.index, seek_pos, AVSEEK_FLAG_ANY);
             }
             if (0 > seek_ret) {
                 AddMessage(RGY_LOG_ERROR, _T("failed to seek %s.\n"), print_time(seek_sec).c_str());
@@ -2264,8 +2276,15 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
             m_Demux.frames.clear();
             m_seek.first = (float)seek_sec;
             m_Demux.video.gotFirstKeyframe = false;
+            m_Demux.video.seekTargetPts = seek_target;
             m_Demux.video.beforeSeekStreamFirstKeyPts = m_Demux.video.streamFirstKeyPts;
             m_Demux.video.streamFirstKeyPts = 0;
+        }
+
+        // getFirstFramePosAndFrameRateで読み込んだ音声等のパケットもseektoで判定されるよう、ここで設定しておく
+        m_seek.second = input_prm->seekToSec;
+        if (input_prm->seekToSec > 0.0f) {
+            AddMessage(RGY_LOG_DEBUG, _T("set seekto %s.\n"), print_time(input_prm->seekToSec).c_str());
         }
 
         //parserはseek後に初期化すること
@@ -2311,6 +2330,7 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
         //キーフレームに到達するまでQSVではフレームが出てこない
         //そのぶんのずれを記録しておき、Trim値などに補正をかける
         if (m_trimParam.offset) {
+            const bool trimSpecified = m_trimParam.list.size() > 0;
             for (int i = (int)m_trimParam.list.size() - 1; i >= 0; i--) {
                 if (m_trimParam.list[i].fin - m_trimParam.offset < 0) {
                     m_trimParam.list.erase(m_trimParam.list.begin() + i);
@@ -2321,17 +2341,18 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
                     }
                 }
             }
+            //指定された範囲がすべてデコードできないフレーム(最初のキーフレームより前)だった場合、
+            //下のダミーの全域指定で全フレームをエンコードしてしまわないよう、エラーとする
+            if (trimSpecified && m_trimParam.list.size() == 0) {
+                AddMessage(RGY_LOG_ERROR, _T("all frames in the trim range are before the first keyframe and cannot be decoded (offset %d).\n"), m_trimParam.offset);
+                return RGY_ERR_INVALID_PARAM;
+            }
             //ずれが存在し、範囲指定がない場合はダミーの全域指定を追加する
             //これにより、自動的に音声側との同期がとれるようになる
             if (m_trimParam.list.size() == 0) {
                 m_trimParam.list.push_back({ 0, TRIM_MAX });
             }
             AddMessage(RGY_LOG_DEBUG, _T("adjust trim by offset %d.\n"), m_trimParam.offset);
-        }
-
-        m_seek.second = input_prm->seekToSec;
-        if (input_prm->seekToSec > 0.0f) {
-            AddMessage(RGY_LOG_DEBUG, _T("set seekto %s.\n"), print_time(input_prm->seekSec).c_str());
         }
 
         m_Demux.video.simdCsp = input_prm->simdCsp;
@@ -2797,10 +2818,15 @@ bool RGYInputAvcodec::checkTimeSeekTo(int64_t pts, rgy_rational<int> timebase, f
         || !m_Demux.video.gotFirstKeyframe) {
         return true;
     }
-    const float pts_sec = pts * timebase.qfloat();
     const AVRational vid_pkt_timebase = (m_Demux.video.stream) ? m_Demux.video.stream->time_base : av_inv_q(m_Demux.video.nAvgFramerate);
-    const float vid_first_pts_sec = m_Demux.video.beforeSeekStreamFirstKeyPts * vid_pkt_timebase.num / (float)vid_pkt_timebase.den;
-    return (pts_sec - vid_first_pts_sec) < m_seek.second + marginSec;
+    // seektoは動画の先頭(最初のキーフレーム)からの時刻、--seekしていない場合はstreamFirstKeyPtsが先頭
+    const int64_t vid_first_pts = (m_seek.first > 0.0f) ? m_Demux.video.beforeSeekStreamFirstKeyPts : m_Demux.video.streamFirstKeyPts;
+    // 映像の粗いtimebaseへ丸めると、25fpsのAVIではseekto=0.09が0.08秒になり、終端前のフレームまで落ちる。
+    // 終了時刻はdoubleで保持し、終端ちょうどのフレームを含めないよう各時刻をマイクロ秒の整数に揃える。
+    const int64_t seekto_pts = av_rescale_q(vid_first_pts, vid_pkt_timebase, AV_TIME_BASE_Q)
+        + av_rescale_q(1, av_d2q(m_seek.second, 1<<24), AV_TIME_BASE_Q)
+        + av_rescale_q(1, av_d2q(marginSec, 1<<24), AV_TIME_BASE_Q);
+    return av_rescale_q(pts, AVRational{ timebase.n(), timebase.d() }, AV_TIME_BASE_Q) < seekto_pts;
 }
 
 bool RGYInputAvcodec::checkTimeSeekTo(int64_t pts, AVRational timebase, float marginSec) {
@@ -3501,6 +3527,16 @@ std::tuple<int, std::unique_ptr<AVPacket, RGYAVDeleter<AVPacket>>> RGYInputAvcod
             //mkv入りのVC-1をカットしたものなど、動画によってはpkt->flagsにフラグがセットされていないことがある
             //parserの情報も活用してキーフレームかどうかを判定する
             const bool keyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0 || pos.pict_type == AV_PICTURE_TYPE_I;
+            //--seekでは目標時刻より手前にシークしているので、目標時刻以降の最初のキーフレームまで読み捨てる
+            //これはシーク位置の調整であり、trimのずれ(m_trimParam.offset)には含めない
+            if (!m_Demux.video.gotFirstKeyframe && m_Demux.video.seekTargetPts != AV_NOPTS_VALUE) {
+                const auto timestamp = (pkt->pts == AV_NOPTS_VALUE) ? pkt->dts : pkt->pts;
+                if (!keyframe || (timestamp != AV_NOPTS_VALUE && timestamp < m_Demux.video.seekTargetPts)) {
+                    av_packet_unref(pkt.get());
+                    continue;
+                }
+                m_Demux.video.seekTargetPts = AV_NOPTS_VALUE;
+            }
             //最初のキーフレームを取得するまではスキップする
             //スキップした枚数はi_samplesでカウントし、trim時に同期を適切にとるため、m_trimParam.offsetに格納する
             //  ただし、bTreatFirstPacketAsKeyframeが指定されている場合には、キーフレームでなくてもframePosListへの追加を許可する
