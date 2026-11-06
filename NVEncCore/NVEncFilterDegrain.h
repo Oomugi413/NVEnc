@@ -32,6 +32,7 @@
 #include <deque>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "NVEncFilter.h"
@@ -40,13 +41,27 @@
 
 using NVEncDegrainKernelProgram = std::string;
 
+// 一時入力viewの所有者。cacheの専用shared_ptrへ移した後はdataListから外し、
+// 解析画像や出力へ所有参照を伝搬させない。所有frame自身へ添付すると自己循環する。
+class RGYFrameDataDegrainInputRef : public RGYFrameData {
+public:
+    explicit RGYFrameDataDegrainInputRef(std::shared_ptr<CUFrameBuf> frame) : m_frame(std::move(frame)) {}
+    std::shared_ptr<CUFrameBuf> frameRef() const { return m_frame; }
+private:
+    std::shared_ptr<CUFrameBuf> m_frame;
+};
+
 class NVEncFilterParamDegrain : public NVEncFilterParam {
 public:
     VppDegrain degrain;
     bool attachAnalysisData;
     bool zeroCopyCache;
+    // 有限窓の内部呼出しは中央画像を直ちに返すため、SC判定の追加出力遅延を無効にする。
+    bool deferSceneChange;
+    // 内部呼出側が必要な時間窓に絞る場合のみ指定する。通常のストリームは16枚。
+    int inputCacheSize;
 
-    NVEncFilterParamDegrain() : degrain(), attachAnalysisData(true), zeroCopyCache(false) {};
+    NVEncFilterParamDegrain() : degrain(), attachAnalysisData(true), zeroCopyCache(false), deferSceneChange(true), inputCacheSize(16) {};
     virtual ~NVEncFilterParamDegrain() {};
     virtual tstring print() const override {
         auto str = degrain.print();
@@ -91,7 +106,7 @@ public:
 protected:
 
     RGY_ERR checkParam(const std::shared_ptr<NVEncFilterParamDegrain> &prm);
-    RGY_ERR allocCacheFrames(const RGYFrameInfo &frameInfo);
+    RGY_ERR allocCacheFrames(const RGYFrameInfo &frameInfo, int cacheSize);
     RGY_ERR pushCacheFrame(const RGYFrameInfo *pInputFrame, cudaStream_t stream, const std::vector<RGYCudaEvent> &wait_events, RGYCudaEvent *event = nullptr);
     const RGYFrameInfo *cacheFrame(int frame) const;
     RGY_ERR emitSourceFrame(const RGYFrameInfo *pCurrentFrame, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
@@ -255,7 +270,7 @@ protected:
         }
     };
 
-    std::array<std::unique_ptr<CUFrameBuf>, DEGRAIN_CACHE_SIZE> m_cacheFrames;
+    std::vector<std::unique_ptr<CUFrameBuf>> m_cacheFrames;
     std::array<RGYFrameInfo, DEGRAIN_CACHE_SIZE> m_cacheFrameRefs;
     std::array<std::shared_ptr<CUFrameBuf>, DEGRAIN_CACHE_SIZE> m_cacheFrameOwners;
     NVEncDegrainKernelProgram m_degrain;

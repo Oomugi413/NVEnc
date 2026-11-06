@@ -68,19 +68,13 @@ static constexpr float RTGMC_SEARCH_REFINE2_GAUSS_W4 = 0.024685025f;
 
 struct NVEncRtgmcSearchPrefilterLaunchFuncs {
     RGY_ERR (*scenechange)(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, uint32_t *, int, cudaStream_t);
-    RGY_ERR (*fieldStable)(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, uint32_t, int, cudaStream_t);
-    RGY_ERR (*luma)(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, int, uint32_t, int, int, cudaStream_t);
     RGY_ERR (*refine2Tile)(const RGYFrameInfo&, const RGYFrameInfo&, int, cudaStream_t);
     RGY_ERR (*edgeSoftenedSearch)(const RGYFrameInfo&, const RGYFrameInfo&, cudaStream_t);
     RGY_ERR (*searchSmoothed3x3)(const RGYFrameInfo&, const RGYFrameInfo&, cudaStream_t);
     RGY_ERR (*softenedSearchBlend)(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, int, cudaStream_t);
     RGY_ERR (*softenedSearchBlendStabilized)(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, int, cudaStream_t);
     RGY_ERR (*stabilizedSearch)(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, int, cudaStream_t);
-    RGY_ERR (*halfSearch)(bool, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, uint32_t, int, cudaStream_t);
-    RGY_ERR (*halfSearchBaseFromGuide)(const RGYFrameInfo&, const RGYFrameInfo&, cudaStream_t);
     RGY_ERR (*halfResolutionUpsample)(const RGYFrameInfo&, const RGYFrameInfo&, int, cudaStream_t);
-    RGY_ERR (*rangeConvert)(const RGYFrameInfo&, int, cudaStream_t);
-    RGY_ERR (*debug)(int, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, uint32_t, int, cudaStream_t);
 };
 
 const NVEncRtgmcSearchPrefilterLaunchFuncs *getNVEncRtgmcSearchPrefilterU8TR0();
@@ -88,6 +82,7 @@ const NVEncRtgmcSearchPrefilterLaunchFuncs *getNVEncRtgmcSearchPrefilterU8TRP();
 const NVEncRtgmcSearchPrefilterLaunchFuncs *getNVEncRtgmcSearchPrefilterU16TR0();
 const NVEncRtgmcSearchPrefilterLaunchFuncs *getNVEncRtgmcSearchPrefilterU16TRP();
 
+RGY_ERR launchRtgmcSearchPrefilterScenechangeReduce(uint32_t *state, int groupCount, uint64_t sceneThreshold, int smoothRadius, cudaStream_t stream);
 RGY_ERR launchRtgmcSearchPrefilterScenechangeU8(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, uint32_t *, int, cudaStream_t);
 RGY_ERR launchRtgmcSearchPrefilterScenechangeU16(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, uint32_t *, int, cudaStream_t);
 RGY_ERR launchRtgmcSearchPrefilterRefine2TileU8(const RGYFrameInfo&, const RGYFrameInfo&, int, cudaStream_t);
@@ -102,10 +97,13 @@ RGY_ERR launchRtgmcSearchPrefilterSoftenedSearchBlendStabilizedU8(const RGYFrame
 RGY_ERR launchRtgmcSearchPrefilterSoftenedSearchBlendStabilizedU16(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, int, cudaStream_t);
 RGY_ERR launchRtgmcSearchPrefilterStabilizedSearchU8(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, int, cudaStream_t);
 RGY_ERR launchRtgmcSearchPrefilterStabilizedSearchU16(const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, int, cudaStream_t);
-RGY_ERR launchRtgmcSearchPrefilterRangeConvertU8(const RGYFrameInfo&, int, cudaStream_t);
-RGY_ERR launchRtgmcSearchPrefilterRangeConvertU16(const RGYFrameInfo&, int, cudaStream_t);
-RGY_ERR launchRtgmcSearchPrefilterDebugU8(int, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, uint32_t, int, cudaStream_t);
-RGY_ERR launchRtgmcSearchPrefilterDebugU16(int, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, const RGYFrameInfo&, uint32_t, int, cudaStream_t);
+
+RGY_ERR launchRtgmcSearchPrefilterRepairTemporal(const RGYFrameInfo &prev2, const RGYFrameInfo &prev, const RGYFrameInfo &cur, const RGYFrameInfo &next, const RGYFrameInfo &next2, const RGYFrameInfo &tc, const RGYFrameInfo &delta, int tr0, const uint32_t *sceneFlags, cudaStream_t stream);
+RGY_ERR launchRtgmcSearchPrefilterRepairStage(const RGYFrameInfo &srcPos, const RGYFrameInfo &srcNeg, int srcHx, int srcHy, const RGYFrameInfo &dstPos, const RGYFrameInfo &dstNeg, int dstHx, int dstHy, int width, int height, uint32_t repairProfile, int stage, const RGYFrameInfo &corePos, const RGYFrameInfo &coreNeg, int coreHx, int coreHy, cudaStream_t stream);
+RGY_ERR launchRtgmcSearchPrefilterRepairApply(const RGYFrameInfo &tc, const RGYFrameInfo &delta, const RGYFrameInfo &gatePos, const RGYFrameInfo &gateNeg, int gateHx, int gateHy, const RGYFrameInfo &dst, int dstHx, int dstHy, int width, int height, uint32_t repairProfile, cudaStream_t stream);
+RGY_ERR launchRtgmcSearchPrefilterRepairCopy(const RGYFrameInfo &src, int srcHx, int srcHy, const RGYFrameInfo &dst, int fullRangeMode, int constantValue, cudaStream_t stream);
+RGY_ERR launchRtgmcSearchPrefilterRepairHalfSearch(bool smoothed, const RGYFrameInfo &fc, int fcHx, int fcHy, const RGYFrameInfo &dst, cudaStream_t stream);
+RGY_ERR launchRtgmcSearchPrefilterRepairLuma(const RGYFrameInfo &fc, int fcHx, int fcHy, const RGYFrameInfo &cur, const RGYFrameInfo &dst, int searchRefine, int fullRangeMode, cudaStream_t stream);
 
 #ifndef NVENC_RTGMC_SEARCH_PREFILTER_DECLARE_ONLY
 
@@ -141,10 +139,6 @@ template<typename TypePixel>
 __device__ __forceinline__ void rtgmc_search_prefilter_pixel_store(
     uint8_t *dst, const int pitch, const int x, const int y, const int value) {
     *(TypePixel *)(dst + y * pitch + x * (int)sizeof(TypePixel)) = rtgmc_search_prefilter_clamp_pixel<TypePixel>(value);
-}
-
-__device__ __forceinline__ int rtgmc_search_repair_profile_thin_reject_level(const uint32_t repairProfile) {
-    return (int)(repairProfile & 0xffu);
 }
 
 __device__ __forceinline__ int rtgmc_search_repair_profile_restore_padding_level(const uint32_t repairProfile) {
@@ -222,11 +216,6 @@ __device__ __forceinline__ int rtgmc_search_prefilter_blur3x3_weighted(
     return (sum + 8) >> 4;
 }
 
-__device__ __forceinline__ int rtgmc_search_prefilter_edge_soften_cross(
-    const int left, const int up, const int center, const int down, const int right) {
-    return (left + up + 4 * center + down + right + 4) >> 3;
-}
-
 template<typename TypePixel>
 __device__ __forceinline__ int rtgmc_search_prefilter_temporal_sample(
     const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
@@ -285,11 +274,6 @@ __device__ __forceinline__ int rtgmc_search_prefilter_makediff_value(const int r
 }
 
 template<typename TypePixel>
-__device__ __forceinline__ int rtgmc_search_prefilter_adddiff_value(const int src, const int diff) {
-    return rtgmc_search_prefilter_clamp_int(src + diff - rtgmc_search_prefilter_range_half<TypePixel>(), 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
-}
-
-template<typename TypePixel>
 __device__ __forceinline__ int rtgmc_search_prefilter_round_float_to_pixel(const float value) {
     return rtgmc_search_prefilter_clamp_int((int)(value + 0.5f), 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
 }
@@ -307,361 +291,6 @@ __device__ __forceinline__ int rtgmc_search_prefilter_polarity_core_seed(const i
 template<typename TypePixel>
 __device__ __forceinline__ int rtgmc_search_prefilter_polarity_envelope_seed(const int positive) {
     return rtgmc_search_prefilter_extreme_seed<TypePixel>(positive);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_mean3x3_diff_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py, const int smoothRadius) {
-    if (px <= 0 || py <= 0 || px >= srcWidth - 1 || py >= srcHeight - 1) {
-        const int src = rtgmc_search_prefilter_temporal_candidate_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, smoothRadius);
-        const int ref = rtgmc_search_prefilter_pixel_load<TypePixel>(srcCur, pitch, srcWidth, srcHeight, px, py);
-        return rtgmc_search_prefilter_makediff_value<TypePixel>(ref, src);
-    }
-    int sum = 0;
-    for (int iy = -1; iy <= 1; iy++) {
-        for (int ix = -1; ix <= 1; ix++) {
-            const int src = rtgmc_search_prefilter_temporal_candidate_value<TypePixel, SMOOTH_RADIUS>(
-                srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + ix, py + iy, smoothRadius);
-            const int ref = rtgmc_search_prefilter_pixel_load<TypePixel>(srcCur, pitch, srcWidth, srcHeight, px + ix, py + iy);
-            sum += rtgmc_search_prefilter_makediff_value<TypePixel>(ref, src);
-        }
-    }
-    return (sum + 4) / 9;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ __forceinline__ int rtgmc_search_prefilter_search_correction_delta_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py, const int smoothRadius) {
-    const int src = rtgmc_search_prefilter_temporal_candidate_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, smoothRadius);
-    const int ref = rtgmc_search_prefilter_pixel_load<TypePixel>(srcCur, pitch, srcWidth, srcHeight, px, py);
-    return rtgmc_search_prefilter_makediff_value<TypePixel>(ref, src);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_removegrain4_diff_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py, const int smoothRadius) {
-    const int s = rtgmc_search_prefilter_search_correction_delta_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, smoothRadius);
-    if (px <= 0 || py <= 0 || px >= srcWidth - 1 || py >= srcHeight - 1) {
-        return s;
-    }
-    int v[8];
-    int count = 0;
-#pragma unroll
-    for (int dy = -1; dy <= 1; dy++) {
-#pragma unroll
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx != 0 || dy != 0) {
-                v[count++] = rtgmc_search_prefilter_search_correction_delta_value<TypePixel, SMOOTH_RADIUS>(
-                    srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + dx, py + dy, smoothRadius);
-            }
-        }
-    }
-    rtgmc_search_prefilter_sort8(v);
-    return rtgmc_search_prefilter_clamp_int(s, v[3], v[4]);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_vertical_thin_reject_diff_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py, const int radius, const int positive, const int smoothRadius) {
-    int value = rtgmc_search_prefilter_polarity_core_seed<TypePixel>(positive);
-    for (int iy = -radius; iy <= radius; iy++) {
-        const int diff = rtgmc_search_prefilter_search_correction_delta_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py + iy, smoothRadius);
-        value = rtgmc_search_prefilter_polarity_core_merge(value, diff, positive);
-    }
-    return value;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_vertical_restore_diff_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const int thinRejectRadius, const int restorePaddingRadius, const int positive, const int smoothRadius) {
-    int value = rtgmc_search_prefilter_polarity_envelope_seed<TypePixel>(positive);
-    for (int iy = -restorePaddingRadius; iy <= restorePaddingRadius; iy++) {
-        const int diff = rtgmc_search_prefilter_vertical_thin_reject_diff_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py + iy, thinRejectRadius, positive, smoothRadius);
-        value = rtgmc_search_prefilter_polarity_envelope_merge(value, diff, positive);
-    }
-    return value;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_area_envelope_diff_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py, const int positive, const int smoothRadius) {
-    int value = rtgmc_search_prefilter_polarity_envelope_seed<TypePixel>(positive);
-    for (int iy = -1; iy <= 1; iy++) {
-        for (int ix = -1; ix <= 1; ix++) {
-            const int diff = rtgmc_search_prefilter_search_correction_delta_value<TypePixel, SMOOTH_RADIUS>(
-                srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + ix, py + iy, smoothRadius);
-            value = rtgmc_search_prefilter_polarity_envelope_merge(value, diff, positive);
-        }
-    }
-    return value;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_thin_core_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int smoothRadius) {
-    const int thinRejectRadius = 2 + ((rtgmc_search_repair_profile_thin_reject_flags(repairProfile) & RGY_RTGMC_REPAIR_THIN_WIDE_CORE) ? 1 : 0);
-    return rtgmc_search_prefilter_vertical_thin_reject_diff_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, thinRejectRadius, positive, smoothRadius);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_mean3x3_correction_gate_thin_core_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int smoothRadius) {
-    if (px <= 0 || py <= 0 || px >= srcWidth - 1 || py >= srcHeight - 1) {
-        return rtgmc_search_prefilter_correction_gate_thin_core_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, smoothRadius);
-    }
-    int sum = 0;
-    for (int iy = -1; iy <= 1; iy++) {
-        for (int ix = -1; ix <= 1; ix++) {
-            sum += rtgmc_search_prefilter_correction_gate_thin_core_value<TypePixel, SMOOTH_RADIUS>(
-                srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + ix, py + iy, repairProfile, positive, smoothRadius);
-        }
-    }
-    return (sum + 4) / 9;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int smoothRadius) {
-    int value = rtgmc_search_prefilter_correction_gate_thin_core_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, smoothRadius);
-    if (rtgmc_search_repair_profile_thin_reject_flags(repairProfile) & RGY_RTGMC_REPAIR_THIN_CORE_BLEND) {
-        const int mean3x3 = rtgmc_search_prefilter_mean3x3_correction_gate_thin_core_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, smoothRadius);
-        value = rtgmc_search_prefilter_polarity_core_merge(value, mean3x3, positive);
-    }
-    return value;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_rank_limit4_correction_gate_mid_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int smoothRadius) {
-    const int s = rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, smoothRadius);
-    if (px <= 0 || py <= 0 || px >= srcWidth - 1 || py >= srcHeight - 1) {
-        return s;
-    }
-    int v[8] = {
-        rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px - 1, py - 1, repairProfile, positive, smoothRadius),
-        rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + 0, py - 1, repairProfile, positive, smoothRadius),
-        rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + 1, py - 1, repairProfile, positive, smoothRadius),
-        rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px - 1, py + 0, repairProfile, positive, smoothRadius),
-        rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + 1, py + 0, repairProfile, positive, smoothRadius),
-        rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px - 1, py + 1, repairProfile, positive, smoothRadius),
-        rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + 0, py + 1, repairProfile, positive, smoothRadius),
-        rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + 1, py + 1, repairProfile, positive, smoothRadius)
-    };
-    rtgmc_search_prefilter_sort8(v);
-    return rtgmc_search_prefilter_clamp_int(s, v[3], v[4]);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_mid_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int smoothRadius) {
-    if (rtgmc_search_repair_profile_thin_reject_flags(repairProfile) & RGY_RTGMC_REPAIR_THIN_RANK_LIMIT) {
-        return rtgmc_search_prefilter_rank_limit4_correction_gate_mid_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, smoothRadius);
-    }
-    return rtgmc_search_prefilter_correction_gate_mid_before_rank_limit_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, smoothRadius);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_base_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int smoothRadius) {
-    const int restorePaddingRadius = 2 + ((rtgmc_search_repair_profile_restore_flags(repairProfile) & RGY_RTGMC_REPAIR_RESTORE_WIDE_ENVELOPE) ? 1 : 0);
-    int value = rtgmc_search_prefilter_polarity_envelope_seed<TypePixel>(positive);
-    for (int iy = -restorePaddingRadius; iy <= restorePaddingRadius; iy++) {
-        const int cur = rtgmc_search_prefilter_correction_gate_mid_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py + iy, repairProfile, positive, smoothRadius);
-        value = rtgmc_search_prefilter_polarity_envelope_merge(value, cur, positive);
-    }
-    return value;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_mean3x3_correction_gate_base_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int smoothRadius) {
-    if (px <= 0 || py <= 0 || px >= srcWidth - 1 || py >= srcHeight - 1) {
-        return rtgmc_search_prefilter_correction_gate_base_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, smoothRadius);
-    }
-    int sum = 0;
-    for (int iy = -1; iy <= 1; iy++) {
-        for (int ix = -1; ix <= 1; ix++) {
-            sum += rtgmc_search_prefilter_correction_gate_base_value<TypePixel, SMOOTH_RADIUS>(
-                srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + ix, py + iy, repairProfile, positive, smoothRadius);
-        }
-    }
-    return (sum + 4) / 9;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_rank_smooth1_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int useMax, const int smoothRadius) {
-    const int s = rtgmc_search_prefilter_correction_gate_base_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, smoothRadius);
-    const int mean3x3 = rtgmc_search_prefilter_mean3x3_correction_gate_base_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, smoothRadius);
-    return rtgmc_search_prefilter_extreme_merge(s, mean3x3, useMax);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_mean3x3_correction_gate_rank_smooth1_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int useMax, const int smoothRadius) {
-    if (px <= 0 || py <= 0 || px >= srcWidth - 1 || py >= srcHeight - 1) {
-        return rtgmc_search_prefilter_correction_gate_rank_smooth1_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, useMax, smoothRadius);
-    }
-    int sum = 0;
-    for (int iy = -1; iy <= 1; iy++) {
-        for (int ix = -1; ix <= 1; ix++) {
-            sum += rtgmc_search_prefilter_correction_gate_rank_smooth1_value<TypePixel, SMOOTH_RADIUS>(
-                srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + ix, py + iy, repairProfile, positive, useMax, smoothRadius);
-        }
-    }
-    return (sum + 4) / 9;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_rank_smooth2_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int useMax, const int smoothRadius) {
-    const int s = rtgmc_search_prefilter_correction_gate_rank_smooth1_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, useMax, smoothRadius);
-    const int mean3x3 = rtgmc_search_prefilter_mean3x3_correction_gate_rank_smooth1_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, useMax, smoothRadius);
-    return rtgmc_search_prefilter_extreme_merge(s, mean3x3, useMax);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_area_envelope_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int useMax, const int smoothRadius) {
-    int value = rtgmc_search_prefilter_extreme_seed<TypePixel>(useMax);
-    for (int iy = -1; iy <= 1; iy++) {
-        for (int ix = -1; ix <= 1; ix++) {
-            const int cur = rtgmc_search_prefilter_correction_gate_base_value<TypePixel, SMOOTH_RADIUS>(
-                srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + ix, py + iy, repairProfile, positive, smoothRadius);
-            value = rtgmc_search_prefilter_extreme_merge(value, cur, useMax);
-        }
-    }
-    return value;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_level4_core_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py, const int positive, const int smoothRadius) {
-    int value = rtgmc_search_prefilter_polarity_core_seed<TypePixel>(positive);
-    for (int iy = -2; iy <= 2; iy++) {
-        const int sampleY = ((py + iy) < 0 || (py + iy) >= srcHeight) ? py : (py + iy);
-        const int diff = rtgmc_search_prefilter_search_correction_delta_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, sampleY, smoothRadius);
-        value = rtgmc_search_prefilter_polarity_core_merge(value, diff, positive);
-    }
-    return value;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_level4_mean3x3_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py, const int positive, const int smoothRadius) {
-    const int s = rtgmc_search_prefilter_correction_gate_level4_core_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, positive, smoothRadius);
-    if (px <= 0 || py <= 0 || px >= srcWidth - 1 || py >= srcHeight - 1) {
-        return s;
-    }
-    int sum = 0;
-    for (int iy = -1; iy <= 1; iy++) {
-        for (int ix = -1; ix <= 1; ix++) {
-            sum += rtgmc_search_prefilter_correction_gate_level4_core_value<TypePixel, SMOOTH_RADIUS>(
-                srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + ix, py + iy, positive, smoothRadius);
-        }
-    }
-    return (sum + 4) / 9;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_level4_mid_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py, const int positive, const int smoothRadius) {
-    const int s = rtgmc_search_prefilter_correction_gate_level4_core_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, positive, smoothRadius);
-    const int mean3x3 = rtgmc_search_prefilter_correction_gate_level4_mean3x3_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, positive, smoothRadius);
-    return rtgmc_search_prefilter_polarity_core_merge(s, mean3x3, positive);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_correction_gate_level4_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py, const int positive, const int smoothRadius) {
-    int value = rtgmc_search_prefilter_polarity_envelope_seed<TypePixel>(positive);
-    for (int iy = -2; iy <= 2; iy++) {
-        const int sampleY = ((py + iy) < 0 || (py + iy) >= srcHeight) ? py : (py + iy);
-        const int cur = rtgmc_search_prefilter_correction_gate_level4_mid_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, sampleY, positive, smoothRadius);
-        value = rtgmc_search_prefilter_polarity_envelope_merge(value, cur, positive);
-    }
-    return value;
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ __noinline__ int rtgmc_search_prefilter_correction_gate_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int positive, const int smoothRadius) {
-    const int restorePaddingLevel = rtgmc_search_repair_profile_restore_padding_level(repairProfile);
-    if (rtgmc_search_repair_profile_restore_flags(repairProfile) & RGY_RTGMC_REPAIR_RESTORE_LEVEL4_PATH) {
-        return rtgmc_search_prefilter_correction_gate_level4_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, positive, smoothRadius);
-    }
-    switch (restorePaddingLevel) {
-    case 0:
-        return rtgmc_search_prefilter_correction_gate_base_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, smoothRadius);
-    case 1:
-        return rtgmc_search_prefilter_correction_gate_rank_smooth1_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, positive, smoothRadius);
-    case 2:
-        return rtgmc_search_prefilter_correction_gate_rank_smooth2_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, positive, smoothRadius);
-    default:
-        return rtgmc_search_prefilter_correction_gate_area_envelope_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, positive, positive, smoothRadius);
-    }
 }
 
 __device__ __forceinline__ int rtgmc_search_prefilter_select_signed_correction(
@@ -682,161 +311,8 @@ __device__ __forceinline__ int rtgmc_search_prefilter_apply_signed_correction(
     return rtgmc_search_prefilter_clamp_int(src + appliedSigned, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
 }
 
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_field_corrected_search_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py, const uint32_t repairProfile, const int smoothRadius) {
-    if (rtgmc_search_repair_profile_restore_flags(repairProfile) == 0) {
-        return rtgmc_search_prefilter_temporal_candidate_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, smoothRadius);
-    }
-    const int base = rtgmc_search_prefilter_temporal_candidate_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, smoothRadius);
-    const int diff = rtgmc_search_prefilter_search_correction_delta_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, smoothRadius);
-    const int positiveMask = rtgmc_search_prefilter_correction_gate_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, 1, smoothRadius);
-    const int negativeMask = rtgmc_search_prefilter_correction_gate_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px, py, repairProfile, 0, smoothRadius);
-    const int rangeHalf = rtgmc_search_prefilter_range_half<TypePixel>();
-    return rtgmc_search_prefilter_apply_signed_correction<TypePixel>(
-        base, diff - rangeHalf, positiveMask - rangeHalf, negativeMask - rangeHalf, rtgmc_search_prefilter_range_scale<TypePixel>());
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_half_search_base_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int hx, const int hy,
-    const uint32_t repairProfile, const int smoothRadius) {
-    const int filterSize = 4;
-    const float filterSupport = 2.0f;
-    const float filterStep = 0.5f;
-    const float posY = 0.5f + 2.0f * (float)hy;
-    int endY = (int)(posY + filterSupport);
-    endY = min(endY, srcHeight - 1);
-    int startY = max(endY - filterSize + 1, 0);
-    const float okPosY = rtgmc_search_prefilter_clamp_float(posY, 0.0f, (float)(srcHeight - 1));
-
-    float totalY = 0.0f;
-    float coeffY[4];
-    for (int iy = 0; iy < filterSize; iy++) {
-        const float d = fabsf(((float)(startY + iy) - okPosY) * filterStep);
-        coeffY[iy] = (d < 1.0f) ? (1.0f - d) : 0.0f;
-        totalY += coeffY[iy];
-    }
-    totalY = (totalY == 0.0f) ? 1.0f : totalY;
-
-    const float posX = 0.5f + 2.0f * (float)hx;
-    int endX = (int)(posX + filterSupport);
-    endX = min(endX, srcWidth - 1);
-    int startX = max(endX - filterSize + 1, 0);
-    const float okPosX = rtgmc_search_prefilter_clamp_float(posX, 0.0f, (float)(srcWidth - 1));
-
-    float totalX = 0.0f;
-    float coeffX[4];
-    for (int ix = 0; ix < filterSize; ix++) {
-        const float d = fabsf(((float)(startX + ix) - okPosX) * filterStep);
-        coeffX[ix] = (d < 1.0f) ? (1.0f - d) : 0.0f;
-        totalX += coeffX[ix];
-    }
-    totalX = (totalX == 0.0f) ? 1.0f : totalX;
-
-    float sumY = 0.5f;
-    for (int iy = 0; iy < filterSize; iy++) {
-        float sumX = 0.5f;
-        for (int ix = 0; ix < filterSize; ix++) {
-            const int sample = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(
-                srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch,
-                srcWidth, srcHeight,
-                startX + ix, startY + iy, repairProfile, smoothRadius);
-            sumX += (coeffX[ix] / totalX) * (float)sample;
-        }
-        const int rowValue = rtgmc_search_prefilter_clamp_int((int)sumX, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
-        sumY += (coeffY[iy] / totalY) * (float)rowValue;
-    }
-    return rtgmc_search_prefilter_clamp_int((int)sumY, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_half_search_smoothed_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int hx, const int hy,
-    const uint32_t repairProfile, const int smoothRadius) {
-    const int halfWidth = max(srcWidth >> 1, 1);
-    const int halfHeight = max(srcHeight >> 1, 1);
-    if (hx <= 0 || hy <= 0 || hx >= halfWidth - 1 || hy >= halfHeight - 1) {
-        return rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight,
-            rtgmc_search_prefilter_clamp_int(hx, 0, halfWidth - 1),
-            rtgmc_search_prefilter_clamp_int(hy, 0, halfHeight - 1),
-            repairProfile, smoothRadius);
-    }
-    const int x0 = rtgmc_search_prefilter_clamp_int(hx - 1, 0, halfWidth - 1);
-    const int x1 = rtgmc_search_prefilter_clamp_int(hx,     0, halfWidth - 1);
-    const int x2 = rtgmc_search_prefilter_clamp_int(hx + 1, 0, halfWidth - 1);
-    const int y0 = rtgmc_search_prefilter_clamp_int(hy - 1, 0, halfHeight - 1);
-    const int y1 = rtgmc_search_prefilter_clamp_int(hy,     0, halfHeight - 1);
-    const int y2 = rtgmc_search_prefilter_clamp_int(hy + 1, 0, halfHeight - 1);
-    const int p00 = rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, x0, y0, repairProfile, smoothRadius);
-    const int p10 = rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, x1, y0, repairProfile, smoothRadius);
-    const int p20 = rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, x2, y0, repairProfile, smoothRadius);
-    const int p01 = rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, x0, y1, repairProfile, smoothRadius);
-    const int p11 = rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, x1, y1, repairProfile, smoothRadius);
-    const int p21 = rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, x2, y1, repairProfile, smoothRadius);
-    const int p02 = rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, x0, y2, repairProfile, smoothRadius);
-    const int p12 = rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, x1, y2, repairProfile, smoothRadius);
-    const int p22 = rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, x2, y2, repairProfile, smoothRadius);
-    return rtgmc_search_prefilter_blur3x3_weighted(p00, p10, p20, p01, p11, p21, p02, p12, p22);
-}
-
-// search_refine=1 段階実行用。half_search_base_value と同じ係数・丸め手順で、
-// 実体化済みの field-corrected plane から半解像度 base を生成する。
 template<typename TypePixel>
 __device__ __forceinline__ int rtgmc_search_prefilter_to_full_range(const int value, const int planeMode);
-
-template<typename TypePixel>
-__device__ int rtgmc_search_prefilter_half_search_base_from_guide_value(
-    const uint8_t *guide, const int guidePitch, const int srcWidth, const int srcHeight, const int hx, const int hy) {
-    const int filterSize = 4;
-    const float filterSupport = 2.0f;
-    const float filterStep = 0.5f;
-    const float posY = 0.5f + 2.0f * (float)hy;
-    int endY = (int)(posY + filterSupport);
-    endY = min(endY, srcHeight - 1);
-    const int startY = max(endY - filterSize + 1, 0);
-    const float okPosY = rtgmc_search_prefilter_clamp_float(posY, 0.0f, (float)(srcHeight - 1));
-
-    float totalY = 0.0f;
-    float coeffY[4];
-    for (int iy = 0; iy < filterSize; iy++) {
-        const float d = fabsf(((float)(startY + iy) - okPosY) * filterStep);
-        coeffY[iy] = (d < 1.0f) ? (1.0f - d) : 0.0f;
-        totalY += coeffY[iy];
-    }
-    totalY = (totalY == 0.0f) ? 1.0f : totalY;
-
-    const float posX = 0.5f + 2.0f * (float)hx;
-    int endX = (int)(posX + filterSupport);
-    endX = min(endX, srcWidth - 1);
-    const int startX = max(endX - filterSize + 1, 0);
-    const float okPosX = rtgmc_search_prefilter_clamp_float(posX, 0.0f, (float)(srcWidth - 1));
-
-    float totalX = 0.0f;
-    float coeffX[4];
-    for (int ix = 0; ix < filterSize; ix++) {
-        const float d = fabsf(((float)(startX + ix) - okPosX) * filterStep);
-        coeffX[ix] = (d < 1.0f) ? (1.0f - d) : 0.0f;
-        totalX += coeffX[ix];
-    }
-    totalX = (totalX == 0.0f) ? 1.0f : totalX;
-
-    float sumY = 0.5f;
-    for (int iy = 0; iy < filterSize; iy++) {
-        float sumX = 0.5f;
-        for (int ix = 0; ix < filterSize; ix++) {
-            const int sample = rtgmc_search_prefilter_pixel_load<TypePixel>(guide, guidePitch, srcWidth, srcHeight, startX + ix, startY + iy);
-            sumX += (coeffX[ix] / totalX) * (float)sample;
-        }
-        const int rowValue = rtgmc_search_prefilter_clamp_int((int)sumX, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
-        sumY += (coeffY[iy] / totalY) * (float)rowValue;
-    }
-    return rtgmc_search_prefilter_clamp_int((int)sumY, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
-}
 
 // search_refine=1 段階実行用。half_resolution_search_value と同じ係数・丸め手順で、
 // 半解像度 smoothed plane をフル解像度へ戻し、fullRangeMode を同時に適用する。
@@ -892,100 +368,6 @@ __device__ int rtgmc_search_prefilter_half_resolution_upsample_value(
     }
     return rtgmc_search_prefilter_to_full_range<TypePixel>(
         rtgmc_search_prefilter_clamp_int((int)sumY, 0, rtgmc_search_prefilter_pixel_max<TypePixel>()), fullRangeMode);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_half_resolution_search_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int smoothRadius) {
-    const int halfWidth = max(srcWidth >> 1, 1);
-    const int halfHeight = max(srcHeight >> 1, 1);
-    const int filterSize = 2;
-    const float filterSupport = 1.0f;
-    const float posY = -0.25f + 0.5f * (float)py;
-    int endY = (int)(posY + filterSupport);
-    endY = min(endY, halfHeight - 1);
-    int startY = max(endY - filterSize + 1, 0);
-    const float okPosY = rtgmc_search_prefilter_clamp_float(posY, 0.0f, (float)(halfHeight - 1));
-
-    float totalY = 0.0f;
-    float coeffY[2];
-    for (int iy = 0; iy < filterSize; iy++) {
-        const float d = fabsf((float)(startY + iy) - okPosY);
-        coeffY[iy] = (d < 1.0f) ? (1.0f - d) : 0.0f;
-        totalY += coeffY[iy];
-    }
-    totalY = (totalY == 0.0f) ? 1.0f : totalY;
-
-    const float posX = -0.25f + 0.5f * (float)px;
-    int endX = (int)(posX + filterSupport);
-    endX = min(endX, halfWidth - 1);
-    int startX = max(endX - filterSize + 1, 0);
-    const float okPosX = rtgmc_search_prefilter_clamp_float(posX, 0.0f, (float)(halfWidth - 1));
-
-    float totalX = 0.0f;
-    float coeffX[2];
-    for (int ix = 0; ix < filterSize; ix++) {
-        const float d = fabsf((float)(startX + ix) - okPosX);
-        coeffX[ix] = (d < 1.0f) ? (1.0f - d) : 0.0f;
-        totalX += coeffX[ix];
-    }
-    totalX = (totalX == 0.0f) ? 1.0f : totalX;
-
-    float sumY = 0.5f;
-    for (int iy = 0; iy < filterSize; iy++) {
-        float sumX = 0.5f;
-        for (int ix = 0; ix < filterSize; ix++) {
-            const int sample = rtgmc_search_prefilter_half_search_smoothed_value<TypePixel, SMOOTH_RADIUS>(
-                srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch,
-                srcWidth, srcHeight,
-                rtgmc_search_prefilter_clamp_int(startX + ix, 0, halfWidth - 1),
-                rtgmc_search_prefilter_clamp_int(startY + iy, 0, halfHeight - 1),
-                repairProfile, smoothRadius);
-            sumX += (coeffX[ix] / totalX) * (float)sample;
-        }
-        const int rowValue = rtgmc_search_prefilter_clamp_int((int)sumX, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
-        sumY += (coeffY[iy] / totalY) * (float)rowValue;
-    }
-    return rtgmc_search_prefilter_clamp_int((int)sumY, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const int searchRefine, const uint32_t repairProfile, const int smoothRadius) {
-    if (searchRefine >= 1) {
-        return rtgmc_search_prefilter_half_resolution_search_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch,
-            srcWidth, srcHeight, px, py, repairProfile, smoothRadius);
-    }
-    return rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(
-        srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch,
-        srcWidth, srcHeight, px, py, repairProfile, smoothRadius);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__device__ int rtgmc_search_prefilter_field_corrected_search_weighted3x3_value(
-    const uint8_t *srcPrev2, const uint8_t *srcPrev, const uint8_t *srcCur, const uint8_t *srcNext, const uint8_t *srcNext2,
-    const int pitch, const int srcWidth, const int srcHeight, const int px, const int py,
-    const uint32_t repairProfile, const int smoothRadius) {
-    if (px <= 0 || py <= 0 || px >= srcWidth - 1 || py >= srcHeight - 1) {
-        return rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(
-            srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch,
-            srcWidth, srcHeight, px, py, repairProfile, smoothRadius);
-    }
-    const int p00 = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px - 1, py - 1, repairProfile, smoothRadius);
-    const int p10 = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px,     py - 1, repairProfile, smoothRadius);
-    const int p20 = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + 1, py - 1, repairProfile, smoothRadius);
-    const int p01 = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px - 1, py,     repairProfile, smoothRadius);
-    const int p11 = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px,     py,     repairProfile, smoothRadius);
-    const int p21 = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + 1, py,     repairProfile, smoothRadius);
-    const int p02 = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px - 1, py + 1, repairProfile, smoothRadius);
-    const int p12 = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px,     py + 1, repairProfile, smoothRadius);
-    const int p22 = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(srcPrev2, srcPrev, srcCur, srcNext, srcNext2, pitch, srcWidth, srcHeight, px + 1, py + 1, repairProfile, smoothRadius);
-    return rtgmc_search_prefilter_blur3x3_weighted(p00, p10, p20, p01, p11, p21, p02, p12, p22);
 }
 
 template<typename TypePixel>
@@ -1096,25 +478,403 @@ __global__ void kernel_rtgmc_search_prefilter_scenechange_cuda(
         __syncthreads();
     }
     if (lid == 0 && groupIndex < groupCount) {
-        partial[groupIndex + groupCount * 0] = sadPrev[0];
-        partial[groupIndex + groupCount * 1] = sadNext[0];
-        partial[groupIndex + groupCount * 2] = sadPrev2[0];
-        partial[groupIndex + groupCount * 3] = sadNext2[0];
+        partial[4 + groupIndex + groupCount * 0] = sadPrev[0];
+        partial[4 + groupIndex + groupCount * 1] = sadNext[0];
+        partial[4 + groupIndex + groupCount * 2] = sadPrev2[0];
+        partial[4 + groupIndex + groupCount * 3] = sadNext2[0];
     }
 }
 
-template<typename TypePixel, int SMOOTH_RADIUS>
-__global__ void kernel_rtgmc_search_prefilter_field_stable_search_cuda(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, uint8_t *dst, const int width, const int height, const uint32_t repairProfile, const int smoothRadius) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+// 参照なしの特殊化では判定バッファを読まない。整数演算へ渡す前に参照だけを置換する。
+template<int SMOOTH_RADIUS>
+__device__ __forceinline__ void rtgmc_search_prefilter_apply_scene_flags(
+    const uint8_t *&prev2, const uint8_t *&prev, const uint8_t *cur, const uint8_t *&next, const uint8_t *&next2,
+    const uint32_t *sceneFlags, const int smoothRadius) {
+    if constexpr (SMOOTH_RADIUS != 0) {
+        if (sceneFlags && (SMOOTH_RADIUS >= 1 || smoothRadius >= 1)) {
+            prev = sceneFlags[0] ? cur : prev;
+            next = sceneFlags[1] ? cur : next;
+            if (SMOOTH_RADIUS >= 2 || (SMOOTH_RADIUS < 0 && smoothRadius >= 2)) {
+                prev2 = sceneFlags[2] ? cur : prev2;
+                next2 = sceneFlags[3] ? cur : next2;
+            }
+        }
+    }
+}
+
+// 中間プレーンは仮想座標を保持し、画面内へのクランプはTC/Dの参照で行う。
+template<typename TypePixel>
+__device__ __forceinline__ int rtgmc_search_prefilter_repair_plane_load(
+    const uint8_t *src, const int pitch,
+    const int hx, const int hy, const int x, const int y) {
+    return (int)(*(const TypePixel *)(src + (y + hy) * pitch + (x + hx) * (int)sizeof(TypePixel)));
+}
+
+// 端分岐はハローの格納座標ではなく、元の仮想的な評価座標で判定する。
+template<typename TypePixel>
+__device__ __forceinline__ int rtgmc_search_prefilter_repair_plane_mean3x3(
+    const uint8_t *src, const int pitch, const int hx, const int hy,
+    const int width, const int height, const int x, const int y) {
+    if (x <= 0 || y <= 0 || x >= width - 1 || y >= height - 1) {
+        return rtgmc_search_prefilter_repair_plane_load<TypePixel>(src, pitch, hx, hy, x, y);
+    }
+    int sum = 0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            sum += rtgmc_search_prefilter_repair_plane_load<TypePixel>(src, pitch, hx, hy, x + dx, y + dy);
+        }
+    }
+    return (sum + 4) / 9;
+}
+
+template<typename TypePixel>
+__device__ __forceinline__ int rtgmc_search_prefilter_repair_stage_value(
+    const uint8_t *src, const int pitch, const int hx, const int hy,
+    const int width, const int height, const int x, const int y,
+    const uint32_t repairProfile, const int stage, const int positive,
+    const uint8_t *core, const int corePitch, const int coreHx, const int coreHy) {
+    const uint32_t thinFlags = rtgmc_search_repair_profile_thin_reject_flags(repairProfile);
+    const uint32_t restoreFlags = rtgmc_search_repair_profile_restore_flags(repairProfile);
+    if (restoreFlags & RGY_RTGMC_REPAIR_RESTORE_LEVEL4_PATH) {
+        if (stage == 0 || stage == 3) {
+            int value = (stage == 0) ? rtgmc_search_prefilter_polarity_core_seed<TypePixel>(positive)
+                : rtgmc_search_prefilter_polarity_envelope_seed<TypePixel>(positive);
+            for (int dy = -2; dy <= 2; dy++) {
+                // はみ出した行は評価行へ戻す。例えばy=1,dy=-2では0ではなく1を読む。
+                // Dの画面クランプとは別の置換であり、仮想座標での評価でもこの順序を保つ。
+                const int sampleY = (y + dy < 0 || y + dy >= height) ? y : y + dy;
+                const int sample = (stage == 0)
+                    ? rtgmc_search_prefilter_pixel_load<TypePixel>(src, pitch, width, height, x, sampleY)
+                    : rtgmc_search_prefilter_repair_plane_load<TypePixel>(src, pitch, hx, hy, x, sampleY);
+                value = (stage == 0) ? rtgmc_search_prefilter_polarity_core_merge(value, sample, positive)
+                    : rtgmc_search_prefilter_polarity_envelope_merge(value, sample, positive);
+            }
+            return value;
+        }
+        if (stage == 1) {
+            return rtgmc_search_prefilter_repair_plane_mean3x3<TypePixel>(src, pitch, hx, hy, width, height, x, y);
+        }
+        // level4のmidは前段の平均とstage0のcoreを合成する。平均だけをcoreと再合成してはいけない。
+        const int mean = rtgmc_search_prefilter_repair_plane_load<TypePixel>(src, pitch, hx, hy, x, y);
+        const int center = rtgmc_search_prefilter_repair_plane_load<TypePixel>(core, corePitch, coreHx, coreHy, x, y);
+        return rtgmc_search_prefilter_polarity_core_merge(center, mean, positive);
+    }
+    if (stage == 0) {
+        const int radius = 2 + ((thinFlags & RGY_RTGMC_REPAIR_THIN_WIDE_CORE) ? 1 : 0);
+        int value = rtgmc_search_prefilter_polarity_core_seed<TypePixel>(positive);
+        for (int dy = -radius; dy <= radius; dy++) {
+            // Dだけは画面サイズ。旧実装の入力画素読み込みと同じクランプを保つ。
+            const int sample = rtgmc_search_prefilter_pixel_load<TypePixel>(src, pitch, width, height, x, y + dy);
+            value = rtgmc_search_prefilter_polarity_core_merge(value, sample, positive);
+        }
+        return value;
+    }
+    if (stage == 3) {
+        const int radius = 2 + ((restoreFlags & RGY_RTGMC_REPAIR_RESTORE_WIDE_ENVELOPE) ? 1 : 0);
+        int value = rtgmc_search_prefilter_polarity_envelope_seed<TypePixel>(positive);
+        for (int dy = -radius; dy <= radius; dy++) {
+            const int sample = rtgmc_search_prefilter_repair_plane_load<TypePixel>(src, pitch, hx, hy, x, y + dy);
+            value = rtgmc_search_prefilter_polarity_envelope_merge(value, sample, positive);
+        }
+        return value;
+    }
+    const int center = rtgmc_search_prefilter_repair_plane_load<TypePixel>(src, pitch, hx, hy, x, y);
+    if (stage == 1 && (thinFlags & RGY_RTGMC_REPAIR_THIN_CORE_BLEND)) {
+        const int mean = rtgmc_search_prefilter_repair_plane_mean3x3<TypePixel>(src, pitch, hx, hy, width, height, x, y);
+        return rtgmc_search_prefilter_polarity_core_merge(center, mean, positive);
+    }
+    if (stage == 2 && (thinFlags & RGY_RTGMC_REPAIR_THIN_RANK_LIMIT)) {
+        if (x <= 0 || y <= 0 || x >= width - 1 || y >= height - 1) {
+            return center;
+        }
+        int v[8];
+        int count = 0;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx != 0 || dy != 0) {
+                    v[count++] = rtgmc_search_prefilter_repair_plane_load<TypePixel>(src, pitch, hx, hy, x + dx, y + dy);
+                }
+            }
+        }
+        rtgmc_search_prefilter_sort8(v);
+        return rtgmc_search_prefilter_clamp_int(center, v[3], v[4]);
+    }
+    const int padding = rtgmc_search_repair_profile_restore_padding_level(repairProfile);
+    if ((stage == 4 && (padding == 1 || padding == 2)) || stage == 5) {
+        // pad=2ではR1を保持した後、同じ端分岐と整数丸めでR2を別段として評価する。
+        const int mean = rtgmc_search_prefilter_repair_plane_mean3x3<TypePixel>(src, pitch, hx, hy, width, height, x, y);
+        return rtgmc_search_prefilter_extreme_merge(center, mean, positive);
+    }
+    if (stage == 4 && padding >= 3) {
+        // area envelopeには平均の端分岐がない。画面外のBも仮想座標のまま参照する。
+        int value = rtgmc_search_prefilter_extreme_seed<TypePixel>(positive);
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                const int sample = rtgmc_search_prefilter_repair_plane_load<TypePixel>(src, pitch, hx, hy, x + dx, y + dy);
+                value = rtgmc_search_prefilter_extreme_merge(value, sample, positive);
+            }
+        }
+        return value;
+    }
+    return center;
+}
+
+template<typename TypePixel>
+__global__ void kernel_rtgmc_search_prefilter_repair_temporal(
+    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur,
+    const uint8_t *next, const uint8_t *next2, const int srcPitch,
+    uint8_t *tc, uint8_t *delta, const int planePitch,
+    const int width, const int height, const int tr0, const uint32_t *sceneFlags) {
+    rtgmc_search_prefilter_apply_scene_flags<-1>(prev2, prev, cur, next, next2, sceneFlags, tr0);
+    const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
     if (x >= width || y >= height) {
         return;
     }
-    const int value = rtgmc_search_prefilter_field_corrected_search_value<TypePixel, SMOOTH_RADIUS>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, repairProfile, smoothRadius);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, pitch, x, y, value);
+    const int value = rtgmc_search_prefilter_temporal_candidate_value<TypePixel, -1>(
+        prev2, prev, cur, next, next2, srcPitch, width, height, x, y, tr0);
+    const int ref = rtgmc_search_prefilter_pixel_load<TypePixel>(cur, srcPitch, width, height, x, y);
+    rtgmc_search_prefilter_pixel_store<TypePixel>(tc, planePitch, x, y, value);
+    rtgmc_search_prefilter_pixel_store<TypePixel>(delta, planePitch, x, y, rtgmc_search_prefilter_makediff_value<TypePixel>(ref, value));
+}
+
+template<typename TypePixel>
+__global__ void kernel_rtgmc_search_prefilter_repair_stage(
+    const uint8_t *srcPos, const uint8_t *srcNeg,
+    const int srcPitch, const int srcHx, const int srcHy,
+    uint8_t *dstPos, uint8_t *dstNeg,
+    const int dstPitch, const int dstHx, const int dstHy,
+    const int width, const int height, const uint32_t repairProfile, const int stage,
+    const uint8_t *corePos, const uint8_t *coreNeg,
+    const int corePitch, const int coreHx, const int coreHy) {
+    const int sx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int sy = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    if (sx >= width + 2 * dstHx || sy >= height + 2 * dstHy) {
+        return;
+    }
+    const int x = sx - dstHx;
+    const int y = sy - dstHy;
+    const int positive = rtgmc_search_prefilter_repair_stage_value<TypePixel>(
+        srcPos, srcPitch, srcHx, srcHy, width, height, x, y, repairProfile, stage, 1, corePos, corePitch, coreHx, coreHy);
+    const int negative = rtgmc_search_prefilter_repair_stage_value<TypePixel>(
+        srcNeg, srcPitch, srcHx, srcHy, width, height, x, y, repairProfile, stage, 0, coreNeg, corePitch, coreHx, coreHy);
+    rtgmc_search_prefilter_pixel_store<TypePixel>(dstPos, dstPitch, sx, sy, positive);
+    rtgmc_search_prefilter_pixel_store<TypePixel>(dstNeg, dstPitch, sx, sy, negative);
+}
+
+template<typename TypePixel>
+__global__ void kernel_rtgmc_search_prefilter_repair_apply(
+    const uint8_t *tc, const uint8_t *delta, const int temporalPitch,
+    const uint8_t *gatePos, const uint8_t *gateNeg,
+    const int gatePitch, const int gateHx, const int gateHy,
+    uint8_t *dst, const int dstPitch, const int dstHx, const int dstHy,
+    const int width, const int height, const uint32_t repairProfile) {
+    const int sx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int sy = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    if (sx >= width + 2 * dstHx || sy >= height + 2 * dstHy) {
+        return;
+    }
+    const int x = sx - dstHx;
+    const int y = sy - dstHy;
+    const int base = rtgmc_search_prefilter_pixel_load<TypePixel>(tc, temporalPitch, width, height, x, y);
+    int value = base;
+    if (rtgmc_search_repair_profile_restore_flags(repairProfile) & RGY_RTGMC_REPAIR_RESTORE_ENABLED) {
+        const int rangeHalf = rtgmc_search_prefilter_range_half<TypePixel>();
+        const int diff = rtgmc_search_prefilter_pixel_load<TypePixel>(delta, temporalPitch, width, height, x, y);
+        const int positive = rtgmc_search_prefilter_repair_plane_load<TypePixel>(gatePos, gatePitch, gateHx, gateHy, x, y);
+        const int negative = rtgmc_search_prefilter_repair_plane_load<TypePixel>(gateNeg, gatePitch, gateHx, gateHy, x, y);
+        value = rtgmc_search_prefilter_apply_signed_correction<TypePixel>(
+            base, diff - rangeHalf, positive - rangeHalf, negative - rangeHalf, rtgmc_search_prefilter_range_scale<TypePixel>());
+    }
+    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, dstPitch, sx, sy, value);
+}
+
+template<typename TypePixel>
+__device__ __forceinline__ int rtgmc_search_prefilter_half_search_base_from_fc_value(
+    const uint8_t *fc, const int fcPitch, const int fcHx, const int fcHy,
+    const int srcWidth, const int srcHeight, const int hx, const int hy) {
+    const int filterSize = 4;
+    const float filterSupport = 2.0f;
+    const float filterStep = 0.5f;
+    const float posY = 0.5f + 2.0f * (float)hy;
+    int endY = (int)(posY + filterSupport);
+    endY = min(endY, srcHeight - 1);
+    int startY = max(endY - filterSize + 1, 0);
+    const float okPosY = rtgmc_search_prefilter_clamp_float(posY, 0.0f, (float)(srcHeight - 1));
+
+    float totalY = 0.0f;
+    float coeffY[4];
+    for (int iy = 0; iy < filterSize; iy++) {
+        const float d = fabsf(((float)(startY + iy) - okPosY) * filterStep);
+        coeffY[iy] = (d < 1.0f) ? (1.0f - d) : 0.0f;
+        totalY += coeffY[iy];
+    }
+    totalY = (totalY == 0.0f) ? 1.0f : totalY;
+
+    const float posX = 0.5f + 2.0f * (float)hx;
+    int endX = (int)(posX + filterSupport);
+    endX = min(endX, srcWidth - 1);
+    int startX = max(endX - filterSize + 1, 0);
+    const float okPosX = rtgmc_search_prefilter_clamp_float(posX, 0.0f, (float)(srcWidth - 1));
+
+    float totalX = 0.0f;
+    float coeffX[4];
+    for (int ix = 0; ix < filterSize; ix++) {
+        const float d = fabsf(((float)(startX + ix) - okPosX) * filterStep);
+        coeffX[ix] = (d < 1.0f) ? (1.0f - d) : 0.0f;
+        totalX += coeffX[ix];
+    }
+    totalX = (totalX == 0.0f) ? 1.0f : totalX;
+
+    float sumY = 0.5f;
+    for (int iy = 0; iy < filterSize; iy++) {
+        float sumX = 0.5f;
+        for (int ix = 0; ix < filterSize; ix++) {
+            // 小寸法では4タップが画面外へ出る。FCハローの仮想座標をクランプせず読む。
+            const int sample = rtgmc_search_prefilter_repair_plane_load<TypePixel>(
+                fc, fcPitch, fcHx, fcHy, startX + ix, startY + iy);
+            sumX += (coeffX[ix] / totalX) * (float)sample;
+        }
+        const int rowValue = rtgmc_search_prefilter_clamp_int((int)sumX, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
+        sumY += (coeffY[iy] / totalY) * (float)rowValue;
+    }
+    return rtgmc_search_prefilter_clamp_int((int)sumY, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
+}
+
+template<typename TypePixel>
+__device__ __forceinline__ int rtgmc_search_prefilter_half_search_smoothed_from_fc_value(
+    const uint8_t *fc, const int fcPitch, const int fcHx, const int fcHy,
+    const int srcWidth, const int srcHeight, const int hx, const int hy) {
+    const int halfWidth = max(srcWidth >> 1, 1);
+    const int halfHeight = max(srcHeight >> 1, 1);
+    if (hx <= 0 || hy <= 0 || hx >= halfWidth - 1 || hy >= halfHeight - 1) {
+        return rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(
+            fc, fcPitch, fcHx, fcHy, srcWidth, srcHeight,
+            rtgmc_search_prefilter_clamp_int(hx, 0, halfWidth - 1), rtgmc_search_prefilter_clamp_int(hy, 0, halfHeight - 1));
+    }
+    const int x0 = rtgmc_search_prefilter_clamp_int(hx - 1, 0, halfWidth - 1);
+    const int x1 = rtgmc_search_prefilter_clamp_int(hx,     0, halfWidth - 1);
+    const int x2 = rtgmc_search_prefilter_clamp_int(hx + 1, 0, halfWidth - 1);
+    const int y0 = rtgmc_search_prefilter_clamp_int(hy - 1, 0, halfHeight - 1);
+    const int y1 = rtgmc_search_prefilter_clamp_int(hy,     0, halfHeight - 1);
+    const int y2 = rtgmc_search_prefilter_clamp_int(hy + 1, 0, halfHeight - 1);
+    const int p00 = rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(fc, fcPitch, fcHx, fcHy, srcWidth, srcHeight, x0, y0);
+    const int p10 = rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(fc, fcPitch, fcHx, fcHy, srcWidth, srcHeight, x1, y0);
+    const int p20 = rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(fc, fcPitch, fcHx, fcHy, srcWidth, srcHeight, x2, y0);
+    const int p01 = rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(fc, fcPitch, fcHx, fcHy, srcWidth, srcHeight, x0, y1);
+    const int p11 = rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(fc, fcPitch, fcHx, fcHy, srcWidth, srcHeight, x1, y1);
+    const int p21 = rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(fc, fcPitch, fcHx, fcHy, srcWidth, srcHeight, x2, y1);
+    const int p02 = rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(fc, fcPitch, fcHx, fcHy, srcWidth, srcHeight, x0, y2);
+    const int p12 = rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(fc, fcPitch, fcHx, fcHy, srcWidth, srcHeight, x1, y2);
+    const int p22 = rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(fc, fcPitch, fcHx, fcHy, srcWidth, srcHeight, x2, y2);
+    return rtgmc_search_prefilter_blur3x3_weighted(p00, p10, p20, p01, p11, p21, p02, p12, p22);
+}
+
+template<typename TypePixel>
+__device__ __forceinline__ int rtgmc_search_prefilter_half_resolution_search_from_fc_value(
+    const uint8_t *fc, const int fcPitch, const int fcHx, const int fcHy,
+    const int srcWidth, const int srcHeight, const int px, const int py) {
+    const int halfWidth = max(srcWidth >> 1, 1);
+    const int halfHeight = max(srcHeight >> 1, 1);
+    const int filterSize = 2;
+    const float filterSupport = 1.0f;
+    const float posY = -0.25f + 0.5f * (float)py;
+    int endY = (int)(posY + filterSupport);
+    endY = min(endY, halfHeight - 1);
+    int startY = max(endY - filterSize + 1, 0);
+    const float okPosY = rtgmc_search_prefilter_clamp_float(posY, 0.0f, (float)(halfHeight - 1));
+
+    float totalY = 0.0f;
+    float coeffY[2];
+    for (int iy = 0; iy < filterSize; iy++) {
+        const float d = fabsf((float)(startY + iy) - okPosY);
+        coeffY[iy] = (d < 1.0f) ? (1.0f - d) : 0.0f;
+        totalY += coeffY[iy];
+    }
+    totalY = (totalY == 0.0f) ? 1.0f : totalY;
+
+    const float posX = -0.25f + 0.5f * (float)px;
+    int endX = (int)(posX + filterSupport);
+    endX = min(endX, halfWidth - 1);
+    int startX = max(endX - filterSize + 1, 0);
+    const float okPosX = rtgmc_search_prefilter_clamp_float(posX, 0.0f, (float)(halfWidth - 1));
+
+    float totalX = 0.0f;
+    float coeffX[2];
+    for (int ix = 0; ix < filterSize; ix++) {
+        const float d = fabsf((float)(startX + ix) - okPosX);
+        coeffX[ix] = (d < 1.0f) ? (1.0f - d) : 0.0f;
+        totalX += coeffX[ix];
+    }
+    totalX = (totalX == 0.0f) ? 1.0f : totalX;
+
+    float sumY = 0.5f;
+    for (int iy = 0; iy < filterSize; iy++) {
+        float sumX = 0.5f;
+        for (int ix = 0; ix < filterSize; ix++) {
+            const int sample = rtgmc_search_prefilter_half_search_smoothed_from_fc_value<TypePixel>(
+                fc, fcPitch, fcHx, fcHy,
+                srcWidth, srcHeight,
+                rtgmc_search_prefilter_clamp_int(startX + ix, 0, halfWidth - 1),
+                rtgmc_search_prefilter_clamp_int(startY + iy, 0, halfHeight - 1));
+            sumX += (coeffX[ix] / totalX) * (float)sample;
+        }
+        const int rowValue = rtgmc_search_prefilter_clamp_int((int)sumX, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
+        sumY += (coeffY[iy] / totalY) * (float)rowValue;
+    }
+    return rtgmc_search_prefilter_clamp_int((int)sumY, 0, rtgmc_search_prefilter_pixel_max<TypePixel>());
+}
+
+template<typename TypePixel>
+__global__ void kernel_rtgmc_search_prefilter_half_search_base_from_fc(
+    const uint8_t *fc, const int fcPitch, const int fcHx, const int fcHy,
+    uint8_t *dst, const int dstPitch, const int width, const int height) {
+    const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    if (x >= max(width >> 1, 1) || y >= max(height >> 1, 1)) return;
+    const int value = rtgmc_search_prefilter_half_search_base_from_fc_value<TypePixel>(
+        fc, fcPitch, fcHx, fcHy, width, height, x, y);
+    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, dstPitch, x, y, value);
+}
+
+template<typename TypePixel>
+__global__ void kernel_rtgmc_search_prefilter_half_search_smoothed_from_fc(
+    const uint8_t *fc, const int fcPitch, const int fcHx, const int fcHy,
+    uint8_t *dst, const int dstPitch, const int width, const int height) {
+    const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    if (x >= max(width >> 1, 1) || y >= max(height >> 1, 1)) return;
+    const int value = rtgmc_search_prefilter_half_search_smoothed_from_fc_value<TypePixel>(
+        fc, fcPitch, fcHx, fcHy, width, height, x, y);
+    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, dstPitch, x, y, value);
+}
+
+template<typename TypePixel>
+__global__ void kernel_rtgmc_search_prefilter_luma_from_fc(
+    const uint8_t *fc, const int fcPitch, const int fcHx, const int fcHy,
+    uint8_t *dst, const int dstPitch, const int width, const int height,
+    const int search_refine, const int fullRangeMode) {
+    const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    if (x >= width || y >= height) return;
+    const int value = (search_refine >= 1)
+        ? rtgmc_search_prefilter_half_resolution_search_from_fc_value<TypePixel>(fc, fcPitch, fcHx, fcHy, width, height, x, y)
+        : rtgmc_search_prefilter_repair_plane_load<TypePixel>(fc, fcPitch, fcHx, fcHy, x, y);
+    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, dstPitch, x, y,
+        rtgmc_search_prefilter_to_full_range<TypePixel>(value, fullRangeMode));
+}
+
+template<typename TypePixel>
+__global__ void kernel_rtgmc_search_prefilter_copy_from_plane(
+    const uint8_t *src, const int srcPitch, const int srcHx, const int srcHy,
+    uint8_t *dst, const int dstPitch, const int width, const int height, const int fullRangeMode, const int constantValue) {
+    const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    if (x >= width || y >= height) return;
+    const int value = (constantValue >= 0) ? constantValue
+        : rtgmc_search_prefilter_repair_plane_load<TypePixel>(src, srcPitch, srcHx, srcHy, x, y);
+    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, dstPitch, x, y,
+        rtgmc_search_prefilter_to_full_range<TypePixel>(value, fullRangeMode));
 }
 
 template<typename TypePixel>
@@ -1179,54 +939,6 @@ __global__ void kernel_rtgmc_search_prefilter_stabilized_search_cuda(
     rtgmc_search_prefilter_pixel_store<TypePixel>(dst, pitch, x, y, value);
 }
 
-template<typename TypePixel, int SMOOTH_RADIUS>
-__global__ void kernel_rtgmc_search_prefilter_half_search_base_cuda(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int src_pitch, uint8_t *dst, const int dst_pitch, const int width, const int height,
-    const uint32_t repairProfile, const int smoothRadius) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int halfWidth = max(width >> 1, 1);
-    const int halfHeight = max(height >> 1, 1);
-    if (x >= halfWidth || y >= halfHeight) {
-        return;
-    }
-    const int value = rtgmc_search_prefilter_half_search_base_value<TypePixel, SMOOTH_RADIUS>(
-        prev2, prev, cur, next, next2, src_pitch, width, height, x, y, repairProfile, smoothRadius);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, dst_pitch, x, y, value);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__global__ void kernel_rtgmc_search_prefilter_half_search_smoothed_cuda(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int src_pitch, uint8_t *dst, const int dst_pitch, const int width, const int height,
-    const uint32_t repairProfile, const int smoothRadius) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int halfWidth = max(width >> 1, 1);
-    const int halfHeight = max(height >> 1, 1);
-    if (x >= halfWidth || y >= halfHeight) {
-        return;
-    }
-    const int value = rtgmc_search_prefilter_half_search_smoothed_value<TypePixel, SMOOTH_RADIUS>(
-        prev2, prev, cur, next, next2, src_pitch, width, height, x, y, repairProfile, smoothRadius);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, dst_pitch, x, y, value);
-}
-
-template<typename TypePixel>
-__global__ void kernel_rtgmc_search_prefilter_half_search_base_from_guide_cuda(
-    const uint8_t *guide, const int guidePitch, uint8_t *dst, const int dstPitch, const int width, const int height) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int halfWidth = max(width >> 1, 1);
-    const int halfHeight = max(height >> 1, 1);
-    if (x >= halfWidth || y >= halfHeight) {
-        return;
-    }
-    const int value = rtgmc_search_prefilter_half_search_base_from_guide_value<TypePixel>(guide, guidePitch, width, height, x, y);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, dstPitch, x, y, value);
-}
-
 template<typename TypePixel>
 __global__ void kernel_rtgmc_search_prefilter_half_resolution_upsample_cuda(
     const uint8_t *smoothed, const int smoothedPitch, uint8_t *dst, const int dstPitch,
@@ -1239,142 +951,6 @@ __global__ void kernel_rtgmc_search_prefilter_half_resolution_upsample_cuda(
     const int value = rtgmc_search_prefilter_half_resolution_upsample_value<TypePixel>(
         smoothed, smoothedPitch, width, height, x, y, fullRangeMode);
     rtgmc_search_prefilter_pixel_store<TypePixel>(dst, dstPitch, x, y, value);
-}
-
-template<typename TypePixel>
-__global__ void kernel_rtgmc_search_prefilter_range_convert_cuda(
-    uint8_t *dst, const int pitch, const int width, const int height, const int fullRangeMode) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) {
-        return;
-    }
-    const int value = rtgmc_search_prefilter_to_full_range<TypePixel>(
-        rtgmc_search_prefilter_pixel_load<TypePixel>(dst, pitch, width, height, x, y),
-        fullRangeMode);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, pitch, x, y, value);
-}
-
-template<typename TypePixel>
-__device__ __noinline__ int rtgmc_search_prefilter_debug_temporal_candidate_value(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, const int width, const int height, const int x, const int y, const int smoothRadius) {
-    return rtgmc_search_prefilter_temporal_candidate_value<TypePixel, -1>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, smoothRadius);
-}
-
-template<typename TypePixel>
-__device__ __noinline__ int rtgmc_search_prefilter_debug_field_stable_search_value(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, const int width, const int height, const int x, const int y,
-    const uint32_t repairProfile, const int smoothRadius) {
-    return rtgmc_search_prefilter_field_corrected_search_value<TypePixel, -1>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, repairProfile, smoothRadius);
-}
-
-template<typename TypePixel>
-__device__ __noinline__ int rtgmc_search_prefilter_debug_search_correction_delta_value(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, const int width, const int height, const int x, const int y, const int smoothRadius) {
-    return rtgmc_search_prefilter_search_correction_delta_value<TypePixel, -1>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, smoothRadius);
-}
-
-template<typename TypePixel>
-__device__ __noinline__ int rtgmc_search_prefilter_debug_correction_gate_value(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, const int width, const int height, const int x, const int y,
-    const uint32_t repairProfile, const int positive, const int smoothRadius) {
-    return rtgmc_search_prefilter_correction_gate_value<TypePixel, -1>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, repairProfile, positive, smoothRadius);
-}
-
-template<typename TypePixel>
-__global__ void kernel_rtgmc_search_prefilter_debug_temporal_candidate_cuda(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, uint8_t *dst, const int width, const int height, const uint32_t repairProfile, const int smoothRadius) {
-    (void)repairProfile;
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) {
-        return;
-    }
-    const int value = rtgmc_search_prefilter_debug_temporal_candidate_value<TypePixel>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, smoothRadius);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, pitch, x, y, value);
-}
-
-template<typename TypePixel>
-__global__ void kernel_rtgmc_search_prefilter_debug_field_stable_search_cuda(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, uint8_t *dst, const int width, const int height, const uint32_t repairProfile, const int smoothRadius) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) {
-        return;
-    }
-    const int value = rtgmc_search_prefilter_debug_field_stable_search_value<TypePixel>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, repairProfile, smoothRadius);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, pitch, x, y, value);
-}
-
-template<typename TypePixel>
-__global__ void kernel_rtgmc_search_prefilter_debug_search_correction_delta_cuda(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, uint8_t *dst, const int width, const int height, const uint32_t repairProfile, const int smoothRadius) {
-    (void)repairProfile;
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) {
-        return;
-    }
-    const int value = rtgmc_search_prefilter_debug_search_correction_delta_value<TypePixel>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, smoothRadius);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, pitch, x, y, value);
-}
-
-template<typename TypePixel>
-__global__ void kernel_rtgmc_search_prefilter_debug_positive_correction_gate_cuda(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, uint8_t *dst, const int width, const int height, const uint32_t repairProfile, const int smoothRadius) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) {
-        return;
-    }
-    const int value = rtgmc_search_prefilter_debug_correction_gate_value<TypePixel>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, repairProfile, 1, smoothRadius);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, pitch, x, y, value);
-}
-
-template<typename TypePixel>
-__global__ void kernel_rtgmc_search_prefilter_debug_negative_correction_gate_cuda(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, uint8_t *dst, const int width, const int height, const uint32_t repairProfile, const int smoothRadius) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) {
-        return;
-    }
-    const int value = rtgmc_search_prefilter_debug_correction_gate_value<TypePixel>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, repairProfile, 0, smoothRadius);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, pitch, x, y, value);
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-__global__ void kernel_rtgmc_search_prefilter_luma_cuda(
-    const uint8_t *prev2, const uint8_t *prev, const uint8_t *cur, const uint8_t *next, const uint8_t *next2,
-    const int pitch, uint8_t *dst, const int width, const int height, const int searchRefine,
-    const uint32_t repairProfile, const int fullRangeMode, const int smoothRadius) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) {
-        return;
-    }
-    int value = rtgmc_search_prefilter_value<TypePixel, SMOOTH_RADIUS>(
-        prev2, prev, cur, next, next2, pitch, width, height, x, y, searchRefine, repairProfile, smoothRadius);
-    value = rtgmc_search_prefilter_to_full_range<TypePixel>(value, fullRangeMode);
-    rtgmc_search_prefilter_pixel_store<TypePixel>(dst, pitch, x, y, value);
 }
 
 template<typename TypePixel>
@@ -1494,29 +1070,6 @@ static RGY_ERR launchRtgmcSearchPrefilterScenechangeTyped(
     return err_to_rgy(cudaGetLastError());
 }
 
-template<typename TypePixel, int SMOOTH_RADIUS>
-static RGY_ERR launchRtgmcSearchPrefilterFieldStableTyped(
-    const RGYFrameInfo &prev2, const RGYFrameInfo &prev, const RGYFrameInfo &cur, const RGYFrameInfo &next, const RGYFrameInfo &next2,
-    const RGYFrameInfo &dst, const uint32_t repairProfile, const int smoothRadius, cudaStream_t stream) {
-    const auto block = rtgmcSearchPrefilterBlock();
-    const auto grid = rtgmcSearchPrefilterGrid(dst);
-    kernel_rtgmc_search_prefilter_field_stable_search_cuda<TypePixel, SMOOTH_RADIUS><<<grid, block, 0, stream>>>(
-        prev2.ptr[0], prev.ptr[0], cur.ptr[0], next.ptr[0], next2.ptr[0], cur.pitch[0], dst.ptr[0], dst.width, dst.height, repairProfile, smoothRadius);
-    return err_to_rgy(cudaGetLastError());
-}
-
-template<typename TypePixel, int SMOOTH_RADIUS>
-static RGY_ERR launchRtgmcSearchPrefilterLumaTyped(
-    const RGYFrameInfo &prev2, const RGYFrameInfo &prev, const RGYFrameInfo &cur, const RGYFrameInfo &next, const RGYFrameInfo &next2,
-    const RGYFrameInfo &dst, const int searchRefine, const uint32_t repairProfile, const int fullRangeMode, const int smoothRadius, cudaStream_t stream) {
-    const auto block = rtgmcSearchPrefilterBlock();
-    const auto grid = rtgmcSearchPrefilterGrid(dst);
-    kernel_rtgmc_search_prefilter_luma_cuda<TypePixel, SMOOTH_RADIUS><<<grid, block, 0, stream>>>(
-        prev2.ptr[0], prev.ptr[0], cur.ptr[0], next.ptr[0], next2.ptr[0], cur.pitch[0], dst.ptr[0],
-        dst.width, dst.height, searchRefine, repairProfile, fullRangeMode, smoothRadius);
-    return err_to_rgy(cudaGetLastError());
-}
-
 template<typename TypePixel>
 static RGY_ERR launchRtgmcSearchPrefilterRefine2TileTyped(
     const RGYFrameInfo &motionGuide, const RGYFrameInfo &dst, const int fullRangeMode, cudaStream_t stream) {
@@ -1580,35 +1133,6 @@ static RGY_ERR launchRtgmcSearchPrefilterStabilizedSearchTyped(
     return err_to_rgy(cudaGetLastError());
 }
 
-template<typename TypePixel, int SMOOTH_RADIUS>
-static RGY_ERR launchRtgmcSearchPrefilterHalfSearchTyped(
-    const bool smoothed, const RGYFrameInfo &prev2, const RGYFrameInfo &prev, const RGYFrameInfo &cur,
-    const RGYFrameInfo &next, const RGYFrameInfo &next2, const RGYFrameInfo &dst,
-    const uint32_t repairProfile, const int smoothRadius, cudaStream_t stream) {
-    const auto block = rtgmcSearchPrefilterBlock();
-    const auto grid = rtgmcSearchPrefilterGrid(dst);
-    if (smoothed) {
-        kernel_rtgmc_search_prefilter_half_search_smoothed_cuda<TypePixel, SMOOTH_RADIUS><<<grid, block, 0, stream>>>(
-            prev2.ptr[0], prev.ptr[0], cur.ptr[0], next.ptr[0], next2.ptr[0], cur.pitch[0], dst.ptr[0], dst.pitch[0],
-            cur.width, cur.height, repairProfile, smoothRadius);
-    } else {
-        kernel_rtgmc_search_prefilter_half_search_base_cuda<TypePixel, SMOOTH_RADIUS><<<grid, block, 0, stream>>>(
-            prev2.ptr[0], prev.ptr[0], cur.ptr[0], next.ptr[0], next2.ptr[0], cur.pitch[0], dst.ptr[0], dst.pitch[0],
-            cur.width, cur.height, repairProfile, smoothRadius);
-    }
-    return err_to_rgy(cudaGetLastError());
-}
-
-template<typename TypePixel>
-static RGY_ERR launchRtgmcSearchPrefilterHalfSearchBaseFromGuideTyped(
-    const RGYFrameInfo &guide, const RGYFrameInfo &dst, cudaStream_t stream) {
-    const auto block = rtgmcSearchPrefilterBlock();
-    const auto grid = rtgmcSearchPrefilterGrid(dst);
-    kernel_rtgmc_search_prefilter_half_search_base_from_guide_cuda<TypePixel><<<grid, block, 0, stream>>>(
-        guide.ptr[0], guide.pitch[0], dst.ptr[0], dst.pitch[0], guide.width, guide.height);
-    return err_to_rgy(cudaGetLastError());
-}
-
 template<typename TypePixel>
 static RGY_ERR launchRtgmcSearchPrefilterHalfResolutionUpsampleTyped(
     const RGYFrameInfo &smoothed, const RGYFrameInfo &dst, const int fullRangeMode, cudaStream_t stream) {
@@ -1620,54 +1144,80 @@ static RGY_ERR launchRtgmcSearchPrefilterHalfResolutionUpsampleTyped(
 }
 
 template<typename TypePixel>
-static RGY_ERR launchRtgmcSearchPrefilterRangeConvertTyped(
-    const RGYFrameInfo &dst, const int fullRangeMode, cudaStream_t stream) {
+static RGY_ERR launchRtgmcSearchPrefilterRepairTemporalTyped(const RGYFrameInfo &prev2, const RGYFrameInfo &prev, const RGYFrameInfo &cur, const RGYFrameInfo &next, const RGYFrameInfo &next2, const RGYFrameInfo &tc, const RGYFrameInfo &delta, int tr0, const uint32_t *sceneFlags, cudaStream_t stream) {
+    if (tc.pitch[0] != delta.pitch[0]) return RGY_ERR_INVALID_PARAM;
     const auto block = rtgmcSearchPrefilterBlock();
-    const auto grid = rtgmcSearchPrefilterGrid(dst);
-    kernel_rtgmc_search_prefilter_range_convert_cuda<TypePixel><<<grid, block, 0, stream>>>(
-        dst.ptr[0], dst.pitch[0], dst.width, dst.height, fullRangeMode);
+    const auto grid = rtgmcSearchPrefilterGrid(cur);
+    kernel_rtgmc_search_prefilter_repair_temporal<TypePixel><<<grid, block, 0, stream>>>(
+        prev2.ptr[0], prev.ptr[0], cur.ptr[0], next.ptr[0], next2.ptr[0], cur.pitch[0], tc.ptr[0], delta.ptr[0], tc.pitch[0], cur.width, cur.height, tr0, sceneFlags);
     return err_to_rgy(cudaGetLastError());
 }
 
 template<typename TypePixel>
-static RGY_ERR launchRtgmcSearchPrefilterDebugTyped(
-    const int debugStage, const RGYFrameInfo &prev2, const RGYFrameInfo &prev, const RGYFrameInfo &cur,
-    const RGYFrameInfo &next, const RGYFrameInfo &next2, const RGYFrameInfo &dst,
-    const uint32_t repairProfile, const int smoothRadius, cudaStream_t stream) {
+static RGY_ERR launchRtgmcSearchPrefilterRepairStageTyped(const RGYFrameInfo &srcPos, const RGYFrameInfo &srcNeg, int srcHx, int srcHy, const RGYFrameInfo &dstPos, const RGYFrameInfo &dstNeg, int dstHx, int dstHy, int width, int height, uint32_t repairProfile, int stage, const RGYFrameInfo &corePos, const RGYFrameInfo &coreNeg, int coreHx, int coreHy, cudaStream_t stream) {
+    if (srcPos.pitch[0] != srcNeg.pitch[0] || dstPos.pitch[0] != dstNeg.pitch[0] || corePos.pitch[0] != coreNeg.pitch[0]) return RGY_ERR_INVALID_PARAM;
+    const auto block = rtgmcSearchPrefilterBlock();
+    const auto grid = rtgmcSearchPrefilterGrid(dstPos);
+    kernel_rtgmc_search_prefilter_repair_stage<TypePixel><<<grid, block, 0, stream>>>(
+        srcPos.ptr[0], srcNeg.ptr[0], srcPos.pitch[0], srcHx, srcHy, dstPos.ptr[0], dstNeg.ptr[0], dstPos.pitch[0], dstHx, dstHy, width, height, repairProfile, stage, corePos.ptr[0], coreNeg.ptr[0], corePos.pitch[0], coreHx, coreHy);
+    return err_to_rgy(cudaGetLastError());
+}
+
+template<typename TypePixel>
+static RGY_ERR launchRtgmcSearchPrefilterRepairApplyTyped(const RGYFrameInfo &tc, const RGYFrameInfo &delta, const RGYFrameInfo &gatePos, const RGYFrameInfo &gateNeg, int gateHx, int gateHy, const RGYFrameInfo &dst, int dstHx, int dstHy, int width, int height, uint32_t repairProfile, cudaStream_t stream) {
+    if (tc.pitch[0] != delta.pitch[0] || gatePos.pitch[0] != gateNeg.pitch[0]) return RGY_ERR_INVALID_PARAM;
     const auto block = rtgmcSearchPrefilterBlock();
     const auto grid = rtgmcSearchPrefilterGrid(dst);
-    if (debugStage == 9) {
-        kernel_rtgmc_search_prefilter_debug_temporal_candidate_cuda<TypePixel><<<grid, block, 0, stream>>>(prev2.ptr[0], prev.ptr[0], cur.ptr[0], next.ptr[0], next2.ptr[0], cur.pitch[0], dst.ptr[0], dst.width, dst.height, repairProfile, smoothRadius);
-    } else if (debugStage == 11) {
-        kernel_rtgmc_search_prefilter_debug_search_correction_delta_cuda<TypePixel><<<grid, block, 0, stream>>>(prev2.ptr[0], prev.ptr[0], cur.ptr[0], next.ptr[0], next2.ptr[0], cur.pitch[0], dst.ptr[0], dst.width, dst.height, repairProfile, smoothRadius);
-    } else if (debugStage == 12) {
-        kernel_rtgmc_search_prefilter_debug_positive_correction_gate_cuda<TypePixel><<<grid, block, 0, stream>>>(prev2.ptr[0], prev.ptr[0], cur.ptr[0], next.ptr[0], next2.ptr[0], cur.pitch[0], dst.ptr[0], dst.width, dst.height, repairProfile, smoothRadius);
-    } else if (debugStage == 13) {
-        kernel_rtgmc_search_prefilter_debug_negative_correction_gate_cuda<TypePixel><<<grid, block, 0, stream>>>(prev2.ptr[0], prev.ptr[0], cur.ptr[0], next.ptr[0], next2.ptr[0], cur.pitch[0], dst.ptr[0], dst.width, dst.height, repairProfile, smoothRadius);
+    kernel_rtgmc_search_prefilter_repair_apply<TypePixel><<<grid, block, 0, stream>>>(
+        tc.ptr[0], delta.ptr[0], tc.pitch[0], gatePos.ptr[0], gateNeg.ptr[0], gatePos.pitch[0], gateHx, gateHy, dst.ptr[0], dst.pitch[0], dstHx, dstHy, width, height, repairProfile);
+    return err_to_rgy(cudaGetLastError());
+}
+
+template<typename TypePixel>
+static RGY_ERR launchRtgmcSearchPrefilterRepairCopyTyped(const RGYFrameInfo &src, int srcHx, int srcHy, const RGYFrameInfo &dst, int fullRangeMode, int constantValue, cudaStream_t stream) {
+    const auto block = rtgmcSearchPrefilterBlock();
+    const auto grid = rtgmcSearchPrefilterGrid(dst);
+    kernel_rtgmc_search_prefilter_copy_from_plane<TypePixel><<<grid, block, 0, stream>>>(
+        src.ptr[0], src.pitch[0], srcHx, srcHy, dst.ptr[0], dst.pitch[0], dst.width, dst.height, fullRangeMode, constantValue);
+    return err_to_rgy(cudaGetLastError());
+}
+
+template<typename TypePixel>
+static RGY_ERR launchRtgmcSearchPrefilterRepairHalfSearchTyped(bool smoothed, const RGYFrameInfo &fc, int fcHx, int fcHy, const RGYFrameInfo &dst, cudaStream_t stream) {
+    const auto block = rtgmcSearchPrefilterBlock();
+    const auto grid = rtgmcSearchPrefilterGrid(dst);
+    if (smoothed) {
+        kernel_rtgmc_search_prefilter_half_search_smoothed_from_fc<TypePixel><<<grid, block, 0, stream>>>(
+            fc.ptr[0], fc.pitch[0], fcHx, fcHy, dst.ptr[0], dst.pitch[0], fc.width - 2 * fcHx, fc.height - 2 * fcHy);
     } else {
-        kernel_rtgmc_search_prefilter_debug_field_stable_search_cuda<TypePixel><<<grid, block, 0, stream>>>(prev2.ptr[0], prev.ptr[0], cur.ptr[0], next.ptr[0], next2.ptr[0], cur.pitch[0], dst.ptr[0], dst.width, dst.height, repairProfile, smoothRadius);
+        kernel_rtgmc_search_prefilter_half_search_base_from_fc<TypePixel><<<grid, block, 0, stream>>>(
+            fc.ptr[0], fc.pitch[0], fcHx, fcHy, dst.ptr[0], dst.pitch[0], fc.width - 2 * fcHx, fc.height - 2 * fcHy);
     }
     return err_to_rgy(cudaGetLastError());
 }
 
-template<typename TypePixel, int SMOOTH_RADIUS>
+template<typename TypePixel>
+static RGY_ERR launchRtgmcSearchPrefilterRepairLumaTyped(const RGYFrameInfo &fc, int fcHx, int fcHy, const RGYFrameInfo &cur, const RGYFrameInfo &dst, int searchRefine, int fullRangeMode, cudaStream_t stream) {
+    if (dst.width != cur.width || dst.height != cur.height) return RGY_ERR_INVALID_PARAM;
+    const auto block = rtgmcSearchPrefilterBlock();
+    const auto grid = rtgmcSearchPrefilterGrid(dst);
+    kernel_rtgmc_search_prefilter_luma_from_fc<TypePixel><<<grid, block, 0, stream>>>(
+        fc.ptr[0], fc.pitch[0], fcHx, fcHy, dst.ptr[0], dst.pitch[0], cur.width, cur.height, searchRefine, fullRangeMode);
+    return err_to_rgy(cudaGetLastError());
+}
+
+template<typename TypePixel>
 static const NVEncRtgmcSearchPrefilterLaunchFuncs *getNVEncRtgmcSearchPrefilterLaunchFuncs() {
     constexpr bool highbit = std::is_same<TypePixel, uint16_t>::value;
     static const NVEncRtgmcSearchPrefilterLaunchFuncs funcs = {
         highbit ? launchRtgmcSearchPrefilterScenechangeU16 : launchRtgmcSearchPrefilterScenechangeU8,
-        launchRtgmcSearchPrefilterFieldStableTyped<TypePixel, SMOOTH_RADIUS>,
-        launchRtgmcSearchPrefilterLumaTyped<TypePixel, SMOOTH_RADIUS>,
         highbit ? launchRtgmcSearchPrefilterRefine2TileU16 : launchRtgmcSearchPrefilterRefine2TileU8,
         highbit ? launchRtgmcSearchPrefilterEdgeSoftenedSearchU16 : launchRtgmcSearchPrefilterEdgeSoftenedSearchU8,
         highbit ? launchRtgmcSearchPrefilterSearchSmoothed3x3U16 : launchRtgmcSearchPrefilterSearchSmoothed3x3U8,
         highbit ? launchRtgmcSearchPrefilterSoftenedSearchBlendU16 : launchRtgmcSearchPrefilterSoftenedSearchBlendU8,
         highbit ? launchRtgmcSearchPrefilterSoftenedSearchBlendStabilizedU16 : launchRtgmcSearchPrefilterSoftenedSearchBlendStabilizedU8,
         highbit ? launchRtgmcSearchPrefilterStabilizedSearchU16 : launchRtgmcSearchPrefilterStabilizedSearchU8,
-        launchRtgmcSearchPrefilterHalfSearchTyped<TypePixel, SMOOTH_RADIUS>,
-        launchRtgmcSearchPrefilterHalfSearchBaseFromGuideTyped<TypePixel>,
         launchRtgmcSearchPrefilterHalfResolutionUpsampleTyped<TypePixel>,
-        highbit ? launchRtgmcSearchPrefilterRangeConvertU16 : launchRtgmcSearchPrefilterRangeConvertU8,
-        highbit ? launchRtgmcSearchPrefilterDebugU16 : launchRtgmcSearchPrefilterDebugU8
     };
     return &funcs;
 }

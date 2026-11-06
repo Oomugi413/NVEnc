@@ -202,6 +202,35 @@ protected:
         }
     };
 
+    // 段のハローは仮想座標を保持するための領域。正負は同じ寸法・pitchで確保する。
+    struct RepairPlane {
+        std::array<std::unique_ptr<CUFrameBuf>, 2> polarity;
+        int hx = 0;
+        int hy = 0;
+    };
+    struct RepairPlaneResources {
+        std::unique_ptr<CUFrameBuf> temporal;
+        std::unique_ptr<CUFrameBuf> delta;
+        std::unique_ptr<CUFrameBuf> corrected;
+        int fcHx = 0;
+        int fcHy = 0;
+        std::array<RepairPlane, 6> stages;
+        int stageCount = 0;
+        std::shared_ptr<cudaEvent_t> lastEvent;
+        void clear() {
+            // 前回のconsumerが完了してから中間プレーンを解放する。
+            if (lastEvent) cudaEventSynchronize(*lastEvent);
+            stageCount = 0;
+            temporal.reset();
+            delta.reset();
+            corrected.reset();
+            for (auto &stage : stages) {
+                for (auto &frame : stage.polarity) frame.reset();
+            }
+            lastEvent.reset();
+        }
+    };
+
     struct SharedFramePool : public std::enable_shared_from_this<SharedFramePool> {
         struct Entry {
             std::unique_ptr<CUFrameBuf> frame;
@@ -214,22 +243,23 @@ protected:
         void recycle(CUFrameBuf *frame);
         void clear();
     };
+    struct SceneChangeBufferEntry {
+        std::unique_ptr<CUMemBuf> buffer;
+        std::shared_ptr<cudaEvent_t> readyEvent;
+    };
     struct PendingSceneChangePlane {
         RGY_PLANE plane;
         tstring planeName;
         int smoothRadius;
         int groupCount;
         uint64_t sceneThreshold;
-        std::array<int, 4> flags;
-        std::unique_ptr<CUMemBufPair> partial;
-        std::unique_ptr<cudaEvent_t, cudaevent_deleter> mapEvent;
-        bool mapSubmitted;
+        // 先頭4要素が判定、続く領域が4方向の部分和。GPU上だけで受け渡す。
+        std::unique_ptr<CUMemBuf> partial;
+        std::shared_ptr<cudaEvent_t> readyEvent;
 
         PendingSceneChangePlane() :
-            plane(RGY_PLANE_Y), planeName(), smoothRadius(0), groupCount(0), sceneThreshold(0), flags(),
-            partial(), mapEvent(), mapSubmitted(false) {
-            flags.fill(0);
-        }
+            plane(RGY_PLANE_Y), planeName(), smoothRadius(0), groupCount(0), sceneThreshold(0),
+            partial(), readyEvent() {}
     };
     struct PendingSearchPrefilterFrame {
         int currentFrame;
@@ -248,6 +278,17 @@ protected:
 
     RGY_ERR checkParam(const std::shared_ptr<NVEncFilterParamRtgmcSearchPrefilter> &prm);
     RGY_ERR buildKernel(const std::shared_ptr<NVEncFilterParamRtgmcSearchPrefilter> &prm);
+    RGY_ERR setupRepairResources(const NVEncFilterParamRtgmcSearchPrefilter &prm, bool processChroma);
+    RGY_ERR emitFieldStableSearch(int planeIndex, const RGYFrameInfo &prev2, const RGYFrameInfo &prev,
+        const RGYFrameInfo &cur, const RGYFrameInfo &next, const RGYFrameInfo &next2, const RGYFrameInfo &dst,
+        const NVEncFilterParamRtgmcSearchPrefilter &prm, const uint32_t *sceneFlags, cudaStream_t stream);
+    RGY_ERR recordRepairUse(int planeIndex, RGY_ERR status, cudaStream_t stream);
+    RGY_ERR emitRepairFC(int planeIndex, const RGYFrameInfo &prev2, const RGYFrameInfo &prev,
+        const RGYFrameInfo &cur, const RGYFrameInfo &next, const RGYFrameInfo &next2,
+        const NVEncFilterParamRtgmcSearchPrefilter &prm, const uint32_t *sceneFlags, cudaStream_t stream);
+    RGY_ERR emitLumaSearch(int planeIndex, const RGYFrameInfo &prev2, const RGYFrameInfo &prev,
+        const RGYFrameInfo &cur, const RGYFrameInfo &next, const RGYFrameInfo &next2, const RGYFrameInfo &dst,
+        const NVEncFilterParamRtgmcSearchPrefilter &prm, int fullRangeMode, const uint32_t *sceneFlags, cudaStream_t stream);
     RGY_ERR allocCacheFrames(const RGYFrameInfo &frameInfo);
     RGY_ERR setupSearchRefine1Resources(const RGYFrameInfo &frameInfo, bool processChroma);
     RGY_ERR setupSearchRefine2Resources(const RGYFrameInfo &frameInfo, bool processChroma);
@@ -257,17 +298,17 @@ protected:
     RGY_ERR checkSameResolutionPlanePitches(const TCHAR *stageName, const std::vector<const RGYFrameInfo *> &planes);
     RGY_ERR checkTemporalPlanePitches(const TCHAR *planeName,
         const RGYFrameInfo *prev2, const RGYFrameInfo *prev, const RGYFrameInfo *cur, const RGYFrameInfo *next, const RGYFrameInfo *next2);
-    std::unique_ptr<CUMemBufPair> getSceneChangeBuffer(size_t requiredSize);
-    void recycleSceneChangeBuffer(std::unique_ptr<CUMemBufPair> &&buf);
+    std::unique_ptr<CUMemBuf> getSceneChangeBuffer(size_t requiredSize, std::shared_ptr<cudaEvent_t> *readyEvent);
+    void recycleSceneChangeBuffer(std::unique_ptr<CUMemBuf> &&buf, const std::shared_ptr<cudaEvent_t> &readyEvent);
     RGY_ERR submitSceneChangePlane(PendingSceneChangePlane *pending,
         const RGYFrameInfo *prev2, const RGYFrameInfo *prev, const RGYFrameInfo *cur, const RGYFrameInfo *next, const RGYFrameInfo *next2,
         RGY_PLANE plane, const TCHAR *planeName, int smoothRadius, cudaStream_t stream);
-    RGY_ERR resolveSceneChangePlane(PendingSceneChangePlane *pending);
+    RGY_ERR checkSceneChangePlane(PendingSceneChangePlane *pending, int currentFrame, cudaStream_t stream);
     RGY_ERR submitPendingSearchPrefilterFrame(int currentFrame, cudaStream_t stream);
     RGY_ERR resolvePendingSearchPrefilterFrame(RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
         cudaStream_t stream);
     void clearPendingSearchPrefilterFrames();
-    std::array<int, 4> sceneChangeFlagsForPlane(const PendingSearchPrefilterFrame &pending, RGY_PLANE plane) const;
+    const PendingSceneChangePlane *sceneChangeForPlane(const PendingSearchPrefilterFrame &pending, RGY_PLANE plane) const;
     RGY_ERR emitPrefilteredFrame(PendingSearchPrefilterFrame &pending, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
         cudaStream_t stream);
     RGY_ERR initSearchLumaDump(const RGYFrameInfo &frameInfo, const NVEncFilterParamRtgmcSearchPrefilter &prm);
@@ -282,13 +323,14 @@ protected:
     int drainFrameCount() const;
 
     std::array<std::shared_ptr<CUFrameBuf>, RTGMC_SEARCH_PREFILTER_CACHE_SIZE> m_cacheFrames;
-    std::deque<std::unique_ptr<CUMemBufPair>> m_sceneChangeBufferPool;
+    std::deque<SceneChangeBufferEntry> m_sceneChangeBufferPool;
     std::deque<PendingSearchPrefilterFrame> m_pendingSearchPrefilterFrames;
     std::array<SearchRefine1PlaneResources, 2> m_searchRefine1PlaneResources;
     std::array<SearchRefine2PlaneResources, 2> m_searchRefine2PlaneResources;
     std::array<std::unique_ptr<NVEncFilterResizePlaneProxy>, 2> m_searchRefine2ResizeEdgeSoftenedSearch;
     std::shared_ptr<SharedFramePool> m_cacheFramePool;
     std::shared_ptr<SharedFramePool> m_searchLumaPool;
+    std::array<RepairPlaneResources, 2> m_repairPlaneResources;
     std::string m_buildOptions;
     std::ofstream m_searchLumaDump;
     std::string m_searchLumaDumpPath;

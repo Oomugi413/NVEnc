@@ -59,6 +59,7 @@ class NVRtgmcSharedFramePool {
 public:
     NVRtgmcSharedFramePool(const char *allocStatsTag = "RTGMC shared frame pool");
     std::shared_ptr<CUFrameBuf> acquire(const RGYFrameInfo *frame);
+    void trim(size_t maxFreeFrames);
     void clear();
 private:
     std::vector<std::shared_ptr<CUFrameBuf>> m_pool;
@@ -70,8 +71,10 @@ public:
     VppRtgmc rtgmc;
     rgy_rational<int> timebase;
     bool sharedAnalysisMode;
+    // 内部利用時のresetで残す返却済みEDI画像数。通常経路は従来どおり全解放する。
+    size_t ediPoolResetRetainFrames;
 
-    NVEncFilterParamRtgmc() : rtgmc(), timebase(), sharedAnalysisMode(false) {}
+    NVEncFilterParamRtgmc() : rtgmc(), timebase(), sharedAnalysisMode(false), ediPoolResetRetainFrames(0) {}
     virtual ~NVEncFilterParamRtgmc() {}
     virtual tstring print() const override { return rtgmc.print(); }
 };
@@ -191,6 +194,10 @@ public:
     const std::vector<RtgmcCapturedIntermediate>& getCapturedIntermediates() const;
     void clearCapturedIntermediates();
     void pushIntermediateInput(const RtgmcCapturedIntermediate &input);
+    // 有効にすると、中間データ(INPUTTYPE_BLEND出力)のキャプチャまでで止め、TR1以降を実行しない。
+    // kfm UCFのbefore60/after60に中間データだけを供給したい区間で、deint60の不要な最終段を省くために使う。
+    // TR1以降の時間方向の状態は不連続になるため、解除後に出力を得るにはresetTemporalStateから作り直すこと。
+    void setAnalysisOnly(bool enable);
 
 protected:
     virtual RGY_ERR run_filter(const RGYFrameInfo *pInputFrame, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
@@ -201,6 +208,7 @@ protected:
 public:
     virtual void resetTemporalState() override;
     int requiredPrimingSourceFrames() const;
+    int requiredAnalysisPrimingSourceFrames() const;
 protected:
 
     RGY_ERR checkParam(const std::shared_ptr<NVEncFilterParamRtgmc> &prm);
@@ -215,8 +223,11 @@ protected:
         cudaStream_t stream, const std::vector<RGYCudaEvent> &wait_events, RGYCudaEvent *event);
     RGY_ERR runSourceMatchCorrectionPass(int stage, RGYFrameInfo *pInputFrame, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
         cudaStream_t stream, const std::vector<RGYCudaEvent> &wait_events, RGYCudaEvent *event);
+    void eraseAnalyzeOutputUnusedFrameData(RGYFrameInfo *frame);
+    RGY_ERR captureIntermediateFrame(const RGYFrameInfo *frame, cudaStream_t stream,
+        const std::vector<RGYCudaEvent>& waitEvents);
     RGY_ERR runThrough(size_t filterIdx, RGYFrameInfo *pInputFrame, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
-        cudaStream_t stream, const std::vector<RGYCudaEvent> &wait_events, RGYCudaEvent *event, bool storePending);
+        cudaStream_t stream, const std::vector<RGYCudaEvent> &wait_events, RGYCudaEvent *event, bool storePending, bool finalOutputWritten = false);
     RGY_ERR drainFrom(size_t filterIdx, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
         cudaStream_t stream, RGYCudaEvent *event);
     RGY_ERR returnPendingFrames(RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum);
@@ -287,6 +298,7 @@ protected:
     bool m_sharedAnalysisMode;
     RtgmcSharedAnalysisData m_sharedData;
     bool m_captureIntermediate;
+    bool m_analysisOnly;
     std::vector<RtgmcCapturedIntermediate> m_capturedIntermediates;
     std::deque<RtgmcCapturedIntermediate> m_pendingIntermediateInputs;
 };

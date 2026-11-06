@@ -246,6 +246,8 @@ __device__ uchar4 kfm_analyze_block(
     const int xBase = bx * 4;
     const int yBase = by * 4;
 
+    // 列ごとの生存範囲を保ち、8列同時展開によるレジスタ増加を防ぐ。
+    #pragma unroll 1
     for (int tx = 0; tx < 8; ++tx) {
         const int x = xBase + tx;
         const int y = yBase;
@@ -711,6 +713,14 @@ __global__ void kernel_kfm_temporal_min_diff5_3(
     const int4 v5 = KfmVec4Traits<Type>::to_int4(((const Type4 *)src5)[off]);
     const int4 v6 = KfmVec4Traits<Type>::to_int4(((const Type4 *)src6)[off]);
 
+    if constexpr (sizeof(Type) == 1) {
+        const int4 min234 = kfm_i4_min(v2, kfm_i4_min(v3, v4));
+        const int4 max234 = kfm_i4_max(v2, kfm_i4_max(v3, v4));
+        const int4 diff0 = kfm_i4_sub(kfm_i4_max(kfm_i4_max(v0, v1), max234), kfm_i4_min(kfm_i4_min(v0, v1), min234));
+        const int4 diff1 = kfm_i4_sub(kfm_i4_max(kfm_i4_max(v1, v5), max234), kfm_i4_min(kfm_i4_min(v1, v5), min234));
+        const int4 diff2 = kfm_i4_sub(kfm_i4_max(kfm_i4_max(v5, v6), max234), kfm_i4_min(kfm_i4_min(v5, v6), min234));
+    ((Type4 *)dst)[y * (dstPitch / (int)sizeof(Type4)) + x] = KfmVec4Traits<Type>::to_type4(kfm_i4_min(diff0, kfm_i4_min(diff1, diff2)));
+    } else {
     const int4 min0 = kfm_i4_min(kfm_i4_min(v0, v1), kfm_i4_min(v2, kfm_i4_min(v3, v4)));
     const int4 max0 = kfm_i4_max(kfm_i4_max(v0, v1), kfm_i4_max(v2, kfm_i4_max(v3, v4)));
     const int4 diff0 = kfm_i4_sub(max0, min0);
@@ -724,6 +734,7 @@ __global__ void kernel_kfm_temporal_min_diff5_3(
     const int4 diff2 = kfm_i4_sub(max2, min2);
 
     ((Type4 *)dst)[y * (dstPitch / (int)sizeof(Type4)) + x] = KfmVec4Traits<Type>::to_type4(kfm_i4_min(diff0, kfm_i4_min(diff1, diff2)));
+    }
 }
 
 template<typename Type>
@@ -2647,4 +2658,235 @@ RGY_ERR run_kfm_ucf_noise_limit_plane(RGYFrameInfo *dst, const RGYFrameInfo *src
 
 RGY_ERR run_kfm_ucf_source_crop_noise_limit_plane(RGYFrameInfo *dst, const RGYFrameInfo *src, const RGYFrameInfo *noise, int srcXOffset, int srcYOffset, int srcYStep, int nmin, int range, cudaStream_t stream) {
     return run_kfm_ucf_source_crop_noise_limit(dst, src, noise, srcXOffset, srcYOffset, srcYStep, nmin, range, stream);
+}
+
+// V段の整数丸めをタイル内で済ませ、H段とnoise limitまで中間画像を作らず実行する。
+// 左右8画素の余裕は端で片側へ寄る9 tapとUVインターリーブにも対応する。
+// 1スレッドが横4画素を担当し、V段の整数丸めを共有タイルへ保存する。
+template<typename Type, int channels>
+__global__ void kernel_kfm_ucf_preprocess(
+    uint8_t *dst, const int dstPitch, const uint8_t *src, const int srcPitch,
+    const int width, const int height, const int srcXOffset, const int srcYOffset, const int srcYStep,
+    const int *offsetV, const float *coeffV, const int *offsetH, const float *coeffH,
+    const int nmin, const int range, const int bitDepth) {
+    const int lx = threadIdx.x, ly = threadIdx.y;
+    const int x = (blockIdx.x * 32 + lx) * 4;
+    const int y = blockIdx.y * 4 + ly;
+    const int baseX = blockIdx.x * 128;
+    const int shift = channels == 2 ? 1 : 0;
+    const int planeWidth = width >> shift;
+    const int beginH = offsetH[baseX >> shift];
+    const int endH = min(offsetH[min((baseX + 127) >> shift, planeWidth - 1)] + 9, planeWidth);
+    const int origin = ((beginH * channels + srcXOffset) & ~3) - srcXOffset;
+    const int tileWidth = endH * channels - origin;
+    const int maxValue = (1 << bitDepth) - 1;
+    __shared__ Type vertical[4][152];
+    if (y < height) {
+        const int begin = offsetV[y];
+        for (int tx = lx * 4; tx < tileWidth; tx += 128) {
+            float result[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            #pragma unroll
+            for (int i = 0; i < 9; i++) {
+                const int iy = height >= 9 ? begin + i : min(begin + i, height - 1);
+                const Type *row = (const Type *)(src + (iy * srcYStep + srcYOffset) * srcPitch);
+                const int sx = origin + tx + srcXOffset;
+                Type pixels[4];
+                using Vec = typename KfmVec4Traits<Type>::Type4;
+                if (((srcPitch | (sx * int(sizeof(Type)))) & (sizeof(Vec) - 1)) == 0 && sx + 3 < width + srcXOffset) {
+                    const auto v = ((const Vec *)row)[sx >> 2];
+                    pixels[0] = v.x; pixels[1] = v.y; pixels[2] = v.z; pixels[3] = v.w;
+                } else {
+                    #pragma unroll
+                    for (int j = 0; j < 4; j++) pixels[j] = row[min(sx + j, width + srcXOffset - 1)];
+                }
+                const float c = coeffV[y * 9 + i];
+                #pragma unroll
+                for (int j = 0; j < 4; j++) result[j] += float(pixels[j]) * c;
+            }
+            #pragma unroll
+            for (int j = 0; j < 4; j++) vertical[ly][tx + j] = Type(int(clamp(result[j], 0.0f, float(maxValue)) + 0.5f));
+        }
+    }
+    __syncthreads();
+    if (x >= width || y >= height) return;
+    const int neutral = 1 << (bitDepth - 1);
+    const Type *original = (const Type *)(src + (y * srcYStep + srcYOffset) * srcPitch) + srcXOffset;
+    Type *out = (Type *)(dst + y * dstPitch);
+    #pragma unroll
+    for (int j = 0; j < 4; j++) {
+        const int xx = min(x + j, width - 1);
+        const int hx = xx >> shift, channel = xx & (channels - 1);
+        const int begin = offsetH[hx];
+        float result = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 9; i++) {
+            const int ix = planeWidth >= 9 ? begin + i : min(begin + i, planeWidth - 1);
+            result += float(vertical[ly][ix * channels + channel - origin]) * coeffH[hx * 9 + i];
+        }
+        const int noise = int(clamp(result, 0.0f, float(maxValue)) + 0.5f);
+        const int value = (int(original[xx]) - noise + neutral * 2) >> 1;
+        if (x + j < width) out[x + j] = Type(clamp(kfm_ucf_limiter(value, neutral, maxValue, nmin << max(bitDepth - 8, 0), range << max(bitDepth - 8, 0)), 0, maxValue));
+    }
+}
+
+template<typename Type>
+__global__ void kernel_kfm_ucf_analyze_partial(
+    RGYKFM::NoiseResult *dst, const int dstOffset,
+    const uint8_t *noise0, const uint8_t *noise1, const uint8_t *noise2,
+    const int noisePitch, const int noiseWidth4, const int noiseHeight,
+    const uint8_t *src0, const uint8_t *src1,
+    const int diffPitch, const int diffWidth4, const int diffHeight, const int srcYOffset, const int bitDepth) {
+    using Type4 = typename KfmVec4Traits<Type>::Type4;
+    const int baseX = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
+    const int y = (blockIdx.y * blockDim.y + threadIdx.y);
+    const int localLinear = threadIdx.x + 32 * threadIdx.y;
+    const int groupLinear = blockIdx.x + gridDim.x * blockIdx.y;
+    // 16bitでも1項目の最大値は256 * 4 * 6 * 65535でuintに収まる。
+    __shared__ unsigned int partial[6][256];
+    unsigned int sums[6] = { 0, 0, 0, 0, 0, 0 };
+    #pragma unroll
+    for (int j = 0; j < 4; j++) {
+    const int x = baseX + j;
+    if (x < noiseWidth4 && y < noiseHeight) {
+        const int pitch4 = noisePitch / (int)sizeof(Type4);
+        const int off = x + y * pitch4;
+        const int4 s0 = KfmVec4Traits<Type>::to_int4(((const Type4 *)noise0)[off]);
+        const int4 s1 = KfmVec4Traits<Type>::to_int4(((const Type4 *)noise1)[off]);
+        const int4 s2 = KfmVec4Traits<Type>::to_int4(((const Type4 *)noise2)[off]);
+        const int neutral = 1 << max(bitDepth - 1, 0);
+        sums[0] += kfm_ucf_hsum4u<Type>(kfm_i4_abs(kfm_i4_sub(s0, make_int4(neutral, neutral, neutral, neutral))));
+        sums[1] += kfm_ucf_hsum4u<Type>(kfm_i4_abs(kfm_i4_sub(s1, make_int4(neutral, neutral, neutral, neutral))));
+        sums[2] += kfm_ucf_hsum4u<Type>(kfm_i4_abs(kfm_i4_sub(s1, s0)));
+        sums[3] += kfm_ucf_hsum4u<Type>(kfm_i4_abs(kfm_i4_sub(s2, s1)));
+    }
+
+    if (x < diffWidth4 && y < diffHeight) {
+        const int pitch4 = diffPitch / (int)sizeof(Type4);
+        const Type4 *f0 = (const Type4 *)src0;
+        const Type4 *f1 = (const Type4 *)src1;
+        const int yy = y + srcYOffset;
+        const Type4 a0 = f0[x + (yy - 2) * pitch4];
+        const Type4 b0 = f0[x + (yy - 1) * pitch4];
+        const Type4 c0 = f0[x + yy * pitch4];
+        const Type4 d0 = f0[x + (yy + 1) * pitch4];
+        const Type4 e0 = f0[x + (yy + 2) * pitch4];
+        sums[4] += kfm_ucf_hsum4u<Type>(kfm_ucf_calc_combe4<Type>(a0, b0, c0, d0, e0));
+
+        if (y & 1) {
+            const Type4 a = f0[x + (yy - 2) * pitch4];
+            const Type4 b = f1[x + (yy - 1) * pitch4];
+            const Type4 c = f0[x + yy * pitch4];
+            const Type4 d = f1[x + (yy + 1) * pitch4];
+            const Type4 e = f0[x + (yy + 2) * pitch4];
+            sums[5] += kfm_ucf_hsum4u<Type>(kfm_ucf_calc_combe4<Type>(a, b, c, d, e));
+        } else {
+            const Type4 a = f1[x + (yy - 2) * pitch4];
+            const Type4 b = f0[x + (yy - 1) * pitch4];
+            const Type4 c = f1[x + yy * pitch4];
+            const Type4 d = f0[x + (yy + 1) * pitch4];
+            const Type4 e = f1[x + (yy + 2) * pitch4];
+            sums[5] += kfm_ucf_hsum4u<Type>(kfm_ucf_calc_combe4<Type>(a, b, c, d, e));
+        }
+    }
+
+
+    }
+    // warp内で先に集約し、共有メモリとブロック同期を減らす。
+    const int lane = localLinear & 31, warp = localLinear >> 5;
+    for (int i = 0; i < 6; i++) {
+        for (int step = 16; step > 0; step >>= 1) sums[i] += __shfl_down_sync(0xffffffff, sums[i], step);
+        if (lane == 0) partial[i][warp] = sums[i];
+    }
+    __syncthreads();
+    if (warp == 0) {
+        for (int i = 0; i < 6; i++) {
+            unsigned int sum = lane < 8 ? partial[i][lane] : 0;
+            for (int step = 16; step > 0; step >>= 1) sum += __shfl_down_sync(0xffffffff, sum, step);
+            if (lane == 0) partial[i][0] = sum;
+        }
+    }
+    if (localLinear == 0) {
+        RGYKFM::NoiseResult result;
+        result.noise0 = partial[0][0];
+        result.noise1 = partial[1][0];
+        result.noiseR0 = partial[2][0];
+        result.noiseR1 = partial[3][0];
+        result.diff0 = partial[4][0];
+        result.diff1 = partial[5][0];
+        dst[dstOffset + groupLinear] = result;
+    }
+}
+
+__global__ void kernel_kfm_ucf_analyze_reduce(
+    RGYKFM::NoiseResult *dst, const RGYKFM::NoiseResult *src,
+    const int lumaCount, const int chromaCount) {
+    const int plane = blockIdx.x;
+    const int lid = threadIdx.x;
+    const int begin = plane == 0 ? 0 : lumaCount;
+    const int count = plane == 0 ? lumaCount : chromaCount;
+    __shared__ uint64_t partial[6][256];
+    uint64_t sums[6] = { 0, 0, 0, 0, 0, 0 };
+    for (int i = lid; i < count; i += 256) {
+        const RGYKFM::NoiseResult v = src[begin + i];
+        sums[0] += v.noise0;
+        sums[1] += v.noise1;
+        sums[2] += v.noiseR0;
+        sums[3] += v.noiseR1;
+        sums[4] += v.diff0;
+        sums[5] += v.diff1;
+    }
+    for (int i = 0; i < 6; i++) partial[i][lid] = sums[i];
+    __syncthreads();
+    for (int step = 128; step > 0; step >>= 1) {
+        if (lid < step) {
+            for (int i = 0; i < 6; i++) partial[i][lid] += partial[i][lid + step];
+        }
+        __syncthreads();
+    }
+    if (lid == 0) {
+        RGYKFM::NoiseResult result;
+        result.noise0 = partial[0][0];
+        result.noise1 = partial[1][0];
+        result.noiseR0 = partial[2][0];
+        result.noiseR1 = partial[3][0];
+        result.diff0 = partial[4][0];
+        result.diff1 = partial[5][0];
+        dst[plane] = result;
+    }
+}
+
+
+RGY_ERR run_kfm_ucf_preprocess(RGYFrameInfo *dst, const RGYFrameInfo *src, int srcXOffset, int srcYOffset, int srcYStep, int channels,
+    const int *offsetV, const float *coeffV, const int *offsetH, const float *coeffH, int nmin, int range, cudaStream_t stream) {
+    const dim3 block(32, 4), grid(divCeil(dst->width, 128), divCeil(dst->height, 4));
+    const int bitDepth = RGY_CSP_BIT_DEPTH[dst->csp];
+    if (bitDepth <= 8) {
+        if (channels == 2) {
+            kernel_kfm_ucf_preprocess<uint8_t, 2><<<grid, block, 0, stream>>>((uint8_t *)dst->ptr[0], dst->pitch[0], (const uint8_t *)src->ptr[0], src->pitch[0], dst->width, dst->height, srcXOffset, srcYOffset, srcYStep, offsetV, coeffV, offsetH, coeffH, nmin, range, bitDepth);
+        } else {
+            kernel_kfm_ucf_preprocess<uint8_t, 1><<<grid, block, 0, stream>>>((uint8_t *)dst->ptr[0], dst->pitch[0], (const uint8_t *)src->ptr[0], src->pitch[0], dst->width, dst->height, srcXOffset, srcYOffset, srcYStep, offsetV, coeffV, offsetH, coeffH, nmin, range, bitDepth);
+        }
+    } else {
+        if (channels == 2) {
+            kernel_kfm_ucf_preprocess<uint16_t, 2><<<grid, block, 0, stream>>>((uint8_t *)dst->ptr[0], dst->pitch[0], (const uint8_t *)src->ptr[0], src->pitch[0], dst->width, dst->height, srcXOffset, srcYOffset, srcYStep, offsetV, coeffV, offsetH, coeffH, nmin, range, bitDepth);
+        } else {
+            kernel_kfm_ucf_preprocess<uint16_t, 1><<<grid, block, 0, stream>>>((uint8_t *)dst->ptr[0], dst->pitch[0], (const uint8_t *)src->ptr[0], src->pitch[0], dst->width, dst->height, srcXOffset, srcYOffset, srcYStep, offsetV, coeffV, offsetH, coeffH, nmin, range, bitDepth);
+        }
+    }
+    return err_to_rgy(cudaGetLastError());
+}
+RGY_ERR run_kfm_ucf_analyze_fused(RGYKFM::NoiseResult *dst, int offset, const RGYFrameInfo *n0, const RGYFrameInfo *n1, const RGYFrameInfo *n2,
+    const RGYFrameInfo *d0, const RGYFrameInfo *d1, int nw4, int dw4, int dh, int vpad, cudaStream_t stream) {
+    const dim3 block(32, 8), grid(divCeil(std::max(nw4, dw4), 128), divCeil(std::max(n0->height, dh), 8));
+    const int bitDepth = RGY_CSP_BIT_DEPTH[n0->csp];
+    if (bitDepth <= 8) {
+        kernel_kfm_ucf_analyze_partial<uint8_t><<<grid, block, 0, stream>>>(dst, offset, (const uint8_t *)n0->ptr[0], (const uint8_t *)n1->ptr[0], (const uint8_t *)n2->ptr[0], n0->pitch[0], nw4, n0->height, (const uint8_t *)d0->ptr[0], (const uint8_t *)d1->ptr[0], d0->pitch[0], dw4, dh, vpad, bitDepth);
+    } else {
+        kernel_kfm_ucf_analyze_partial<uint16_t><<<grid, block, 0, stream>>>(dst, offset, (const uint8_t *)n0->ptr[0], (const uint8_t *)n1->ptr[0], (const uint8_t *)n2->ptr[0], n0->pitch[0], nw4, n0->height, (const uint8_t *)d0->ptr[0], (const uint8_t *)d1->ptr[0], d0->pitch[0], dw4, dh, vpad, bitDepth);
+    }
+    return err_to_rgy(cudaGetLastError());
+}
+RGY_ERR run_kfm_ucf_reduce(RGYKFM::NoiseResult *dst, const RGYKFM::NoiseResult *src, int lumaCount, int chromaCount, cudaStream_t stream) {
+    kernel_kfm_ucf_analyze_reduce<<<2, 256, 0, stream>>>(dst, src, lumaCount, chromaCount);
+    return err_to_rgy(cudaGetLastError());
 }

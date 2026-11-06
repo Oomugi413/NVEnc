@@ -6471,7 +6471,14 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
         }
         return 0;
     }
-    if (IS_OPTION("vpp-onnx-deint") && ENABLE_VPP_FILTER_ONNX_DEINT) {
+    if ((IS_OPTION("vpp-onnx-deint") || IS_OPTION("vpp-vhs-restore")) && ENABLE_VPP_FILTER_ONNX_DEINT) {
+        const auto operation = IS_OPTION("vpp-vhs-restore") ? VppOnnxDeintOperation::VhsRestore : VppOnnxDeintOperation::Deinterlace;
+        // enable=falseの指定も含めて併記を拒否し、後の指定で他方の設定を流用しない。
+        if (vpp->onnxDeint.operation != VppOnnxDeintOperation::Unspecified && vpp->onnxDeint.operation != operation) {
+            _ftprintf(stderr, _T("--vpp-onnx-deintと--vpp-vhs-restoreは同時に指定できません。\n"));
+            return 1;
+        }
+        vpp->onnxDeint.operation = operation;
         vpp->onnxDeint.enable = true;
         if (i + 1 >= nArgNum || strInput[i + 1][0] == _T('-')) {
             return 0;
@@ -14920,6 +14927,7 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
         cmd << _T(" --vpp-rife-ov ") << tmp.str().substr(1);
     }
     if (param->onnxDeint != defaultPrm->onnxDeint) {
+        const auto option = param->onnxDeint.operation == VppOnnxDeintOperation::VhsRestore ? _T(" --vpp-vhs-restore") : _T(" --vpp-onnx-deint");
         tmp.str(tstring());
         if (!param->onnxDeint.enable && save_disabled_prm) {
             tmp << _T(",enable=false");
@@ -14933,9 +14941,9 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             tmp << _T(",colorrange=") << get_cx_desc(list_colorrange, param->onnxDeint.colorrange);
         }
         if (!tmp.str().empty()) {
-            cmd << _T(" --vpp-onnx-deint ") << tmp.str().substr(1);
+            cmd << option << _T(" ") << tmp.str().substr(1);
         } else if (param->onnxDeint.enable) {
-            cmd << _T(" --vpp-onnx-deint");
+            cmd << option;
         }
     }
     if (!param->onnx.cacheDir.empty()) {
@@ -17329,7 +17337,11 @@ tstring gen_cmd_help_vpp() {
         _T("      past_cycles=<int>      commit delay cycles for realtime+ (default=30)\n")
         _T("      thswitch=<float>       60p switch threshold (default=0.5)\n")
         _T("      ucf=<bool>             use placeholder UCF copy stage (default=false)\n")
-        _T("      nr=<bool>              reserve NR path parameter (default=false)\n")
+        _T("      nr=<bool>              apply NR to 24p/30p branches after UCF, before patch (default=false)\n")
+        _T("                             no NR on the 60p branch; disabled in mode=60\n")
+        _T("                             NR blksize: input height >=720: 32, otherwise: 16\n")
+        _T("                             inherit KFM search_early_sad/spatial_early_sad settings\n")
+        _T("                             preserved RFF source frames skip UCF/patch and receive 24p NR\n")
         _T("      is120=<bool>           reserve 120fps duration correction flag (default=true)\n")
         _T("      rff=<bool>             preserve progressive RFF frames (default=true)\n")
         _T("      debug=<bool>           reserve stage dump flag (default=false)\n")
@@ -17874,6 +17886,19 @@ tstring gen_cmd_help_vpp() {
         _T("                                  auto / auto_res / bt709 / smpte170m / bt470bg / bt2020nc\n")
         _T("      colorrange=<string>         same list as --colorrange; supports\n")
         _T("                                  auto / limited (tv) / full (pc)\n"));
+    str += strsprintf(_T("\n")
+        _T("   --vpp-vhs-restore [<param1>=<value>][,<param2>=<value>][...]\n")
+        _T("     VHSのフィールド修復後にGPU版Bwdifを適用。--vpp-onnx-deintとは排他。\n")
+        _T("      enable=<bool>               true（デフォルト）/ false\n")
+        _T("      model=<name>                vhs_restore_pal / vhs_restore_secam（必須）\n")
+        _T("                                  --vpp-onnx-model-dirでモデル配置先を指定。\n")
+        _T("      mode=<string>               bob（デフォルト、倍フレームレート）/ normal\n")
+#if ENABLE_OPENVINO
+        _T("      device=<string>             GPU.0（デフォルト）/ GPU / AUTO、共有GPU経路必須\n")
+#endif
+        _T("      precision=<string>          fp32（デフォルト）/ auto\n")
+        _T("      colormatrix=<string>        auto / auto_res / bt709 / smpte170m / bt470bg / bt2020nc\n")
+        _T("      colorrange=<string>         auto / limited（tv）/ full（pc）\n"));
 #endif
 #if ENABLE_OPENVINO || ENCODER_NVENC
     str += strsprintf(_T("\n")

@@ -31,6 +31,7 @@
 #include <array>
 #include <cstdio>
 #include <deque>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -42,6 +43,13 @@
 #include "rgy_filter_kfm_analyze.h"
 
 class NVEncFilterDegrain;
+
+
+RGY_ERR run_kfm_ucf_preprocess(RGYFrameInfo *dst, const RGYFrameInfo *src, int srcXOffset, int srcYOffset, int srcYStep, int channels,
+    const int *offsetV, const float *coeffV, const int *offsetH, const float *coeffH, int nmin, int range, cudaStream_t stream);
+RGY_ERR run_kfm_ucf_analyze_fused(RGYKFM::NoiseResult *dst, int offset, const RGYFrameInfo *n0, const RGYFrameInfo *n1, const RGYFrameInfo *n2,
+    const RGYFrameInfo *d0, const RGYFrameInfo *d1, int nw4, int dw4, int dh, int vpad, cudaStream_t stream);
+RGY_ERR run_kfm_ucf_reduce(RGYKFM::NoiseResult *dst, const RGYKFM::NoiseResult *src, int lumaCount, int chromaCount, cudaStream_t stream);
 
 class NVEncFilterParamKfm : public NVEncFilterParam {
 public:
@@ -331,6 +339,7 @@ protected:
         RGY_ERR drainTo(int n60end, cudaStream_t stream);
         RGY_ERR ensureRange(int n60begin, int n60end, cudaStream_t stream);
         RGY_ERR feedHot(cudaStream_t stream);
+        RGY_ERR feedIntermediatesOnly(int sourceBegin, int sourceEnd, cudaStream_t stream);
         RGY_ERR cacheFrame(const RGYFrameInfo *frame, cudaStream_t stream, const std::vector<RGYCudaEvent> &wait_events, RGYCudaEvent *event);
         const KfmCachedDeint60 *find(int n60, std::vector<RGYCudaEvent> *wait_events) const;
         void trim(int n60floor, size_t cacheLimit);
@@ -384,7 +393,7 @@ protected:
         cudaStream_t stream, const std::vector<RGYCudaEvent> &wait_events);
     RGY_ERR drainUcfRtgmcBranch(KfmRtgmcLane& lane, cudaStream_t stream);
     RGY_ERR ensureUcfRtgmcRange(KfmUcfLaneType laneType, int n60begin, int n60end, cudaStream_t stream);
-    void captureDeint60Intermediates(int sourceIndex);
+    void captureDeint60Intermediates();
     bool hasDeint60Intermediate(int sourceIndex, uint64_t *generation = nullptr) const;
     bool hasDeint60Intermediates(int sourceBegin, int sourceEnd) const;
     RGY_ERR ensureDeint60IntermediateForSource(int sourceIndex, cudaStream_t stream);
@@ -413,6 +422,8 @@ protected:
     int64_t rffFilmOffset(int64_t frameIndex) const;
     int64_t p24SlotAtInputPts(int64_t inputPts) const;
     void resetRffTiming();
+    RGY_ERR planRffDirect24(KfmRffDirectOutput& direct, int sourceIndex, int start60, int64_t nextOutputPts, bool useInputTimestamp) const;
+    RGY_ERR applyRffDirect24Properties(RGYFrameInfo *output, const KfmRffDirectOutput& direct) const;
     RGY_ERR prepareRffDirect24(KfmRffDirectOutput& direct, RGYFrameInfo *output, int sourceIndex, int start60, int64_t nextOutputPts, bool useInputTimestamp,
         cudaStream_t stream, const std::vector<RGYCudaEvent>& waitEvents, RGYCudaEvent *event);
     void commitRffDirect24(const KfmRffDirectOutput& direct, int64_t nextOutputPts);
@@ -454,8 +465,8 @@ protected:
     void appendAnalyzerResults(size_t resultCount, bool dump, bool mark60p);
     void logKfmProfileStats();
     bool deriveSwitchTimingAt(KfmSwitchTiming& timing, int n60, int total60) const;
+    bool deriveSwitchTimingAtWithSingleFrames(KfmSwitchTiming& timing, int n60, int total60, const std::set<int>& singleFrames) const;
     bool deriveTelecine24TimingAt(KfmSwitchTiming& timing, int n60, int total60, bool afterRff) const;
-    std::vector<KfmSwitchTiming> deriveSwitchTimings(int total60) const;
     int64_t sourceFrameDuration(const KfmCachedSource *source) const;
     struct KfmSourceSlot;
     std::shared_ptr<KfmSourceSlot> acquireKfmSourceSlot(const RGYFrameInfo& sourceInfo);
@@ -465,9 +476,12 @@ protected:
     void clearKfmSourceSlotPool(bool wait);
     RGY_ERR trimSourceCache(cudaStream_t stream);
     void trimDeint60Cache(std::deque<KfmCachedDeint60>& cache);
-    bool isSwitchSingleFrameN60(int n60) const;
     void markSwitchSingleFrameN60Range(int start60, int duration60);
+    void applyCombedSingleFrameDuration(KfmSwitchTiming& timing);
+    int telecine24PatchN60(int frame24Index) const;
     bool switchSingleFrameDurationEnabled() const;
+    void trimSwitchSingleFrames();
+    void appendSwitchTimingDump(int end60);
     void writeSwitchTimingDump();
     void writeTelecine24DurationDump();
     void writeFMCountDump(const std::array<RGYKFM::FMCount, 18>& counts, int cycle);
@@ -485,7 +499,7 @@ protected:
     RGY_ERR drainMainRtgmcBranch(const NVEncFilterParamKfm& prm, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
         cudaStream_t stream, RGYCudaEvent *event);
     RGY_ERR emitOutputFrame(RGYFrameInfo *pFrame, RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
-        cudaStream_t stream, const RGYCudaEvent &frameEvent, RGYCudaEvent *event);
+        cudaStream_t stream, const RGYCudaEvent &frameEvent, RGYCudaEvent *event, RGYFrameInfo *reservedOutputFrame = nullptr);
     RGY_ERR queueVfrOutputFrame(const RGYFrameInfo *pFrame, cudaStream_t stream, const RGYCudaEvent &frameEvent);
     RGY_ERR emitPendingVfrOutput(RGYFrameInfo **ppOutputFrames, int *pOutputFrameNum,
         cudaStream_t stream, RGYCudaEvent *event);
@@ -580,6 +594,7 @@ protected:
         };
         int sourceIndex;
         std::unique_ptr<CUMemBufPair> resultBuf;
+        std::unique_ptr<CUMemBufPair> partialBuf;
         std::vector<Segment> segments;
         RGYCudaEvent event;
         RGYKFM::UCFNoiseMeta meta;
@@ -612,8 +627,9 @@ protected:
     struct KfmPendingVfrOutput {
         std::shared_ptr<CUFrameBuf> frame;
         RGYCudaEvent event;
+        int outputFrameIndex;
 
-        KfmPendingVfrOutput() : frame(), event() {};
+        KfmPendingVfrOutput() : frame(), event(), outputFrameIndex(-1) {};
     };
 
     struct KfmCleanSuperCacheKey {
@@ -660,6 +676,7 @@ protected:
     struct KfmProfileStats {
         bool enabled;
         KfmProfileCounter submitFMCounts, readbackFMCounts, analyzeCpu, analyzerTrailing, appendAnalyzer, snapshotCopy, snapshotMark60p, appendWrite, writeFinal, deriveTimings, emitPending, vfrScheduler;
+        KfmProfileCounter containsCombeWait, nrMaskWait;
         int64_t cleanSuperCacheHits;
         int64_t cleanSuperCacheMisses;
         int64_t cleanSuperCacheAvoidedFields;
@@ -673,6 +690,80 @@ protected:
     std::unique_ptr<NVEncFilterRtgmc> m_before60Rtgmc;
     std::unique_ptr<NVEncFilterRtgmc> m_after60Rtgmc;
     std::unique_ptr<NVEncFilterDegrain> m_nrFilter;
+    struct KfmNrCacheEntry {
+        int index = -1;
+        std::shared_ptr<CUFrameBuf> frame;
+        RGYCudaEvent event;
+    };
+    struct KfmNrResult {
+        int index = -1;
+        // 枝Degrainが所有する最終出力。次の同枝filter/reset前にkeyを無効化する。
+        RGYFrameInfo *frame = nullptr;
+        RGYCudaEvent event;
+    };
+    struct KfmBranchNrStats {
+        int64_t baseDraws = 0, neighborDraws = 0, baseHits = 0, resultHits = 0, nrFrames = 0;
+        int64_t baseAllocations = 0, baseReuses = 0;
+        int64_t rffBaseDraws = 0;
+        int64_t continuousFeeds = 0, nrResets = 0;
+        size_t maxSource = 0;
+        size_t maxSingleLive = 0, maxSinglePlan = 0;
+    };
+    std::array<std::unique_ptr<NVEncFilterDegrain>, 2> m_nrBranches;
+    std::array<int, 2> m_nrRunLastIndex = { -1, -1 };
+    std::array<std::deque<KfmNrCacheEntry>, 2> m_nrBaseCache;
+    std::array<std::vector<std::shared_ptr<CUFrameBuf>>, 2> m_nrBasePool;
+    std::array<KfmNrResult, 2> m_nrResults;
+    std::array<std::unique_ptr<CUFrameBuf>, 1> m_nrBaseWork;
+    std::array<std::unique_ptr<CUFrameBuf>, 3> m_nrSuperWork;
+    KfmBranchNrStats m_branchNrStats;
+    struct KfmNrMaskCount {
+        int index;
+        uint32_t count;
+    };
+    std::array<std::deque<KfmNrMaskCount>, 2> m_nrMaskCounts;
+    struct KfmNrFilmImage {
+        int baseType;
+        int index;
+        int lastSource;
+    };
+    struct KfmNrFilmCursor {
+        int n60 = 0;
+        int64_t slot = 0;
+        int lastRffSource = -1;
+        int lastBaseType = KFM_FRAME_60;
+        bool complete = false;
+        std::set<int> singleFrames;
+    };
+    std::deque<KfmNrFilmImage> m_nrFilmImages;
+    std::unordered_map<int, int> m_nrFilmNormalKeys;
+    std::unordered_map<int, int> m_nrFilmRffKeys;
+    int m_nrFilmOffset = 0;
+    int m_nrFilmRetiredNormal = -1;
+    int m_nrFilmRetiredRff = -1;
+    int m_nrFilmLastNormal = -1;
+    int64_t m_nrFilmNormalCount = 0;
+    int64_t m_nrFilmRffCount = 0;
+    size_t m_nrFilmPeak = 0;
+    KfmNrFilmCursor m_nrFilmCursor;
+    void resetNrFilmPlan();
+    int nrFilmImageKey(int baseType, int index) const;
+    void trimNrFilmPlan(int keepK = -1);
+    RGY_ERR appendNrFilmImage(int baseType, int index, int keepK = -1);
+    RGY_ERR appendNrFilmCoverage(const KfmSwitchTiming& timing, bool drain, int keepK = -1);
+    RGY_ERR advanceNrFilmPlan(bool drain, cudaStream_t stream, int keepK = -1);
+    RGY_ERR ensureNrFilmPlanThrough(int n60, bool drain, cudaStream_t stream);
+    RGY_ERR resolveNrFilmWindow(const KfmSwitchTiming& timing, bool drain, cudaStream_t stream,
+        int& index, int& length);
+    RGY_ERR prepareNrMask(int branch, int index, bool drain, bool needMask, cudaStream_t stream,
+        uint32_t& count, RGYFrameInfo **mask, RGYCudaEvent *event);
+    bool branchNrEnabled(const NVEncFilterParamKfm& prm) const;
+    int branchNrSourceFloor() const;
+    RGY_ERR getNrBase(int branch, int index, bool drain, cudaStream_t stream,
+        std::shared_ptr<CUFrameBuf>& frame, RGYCudaEvent& event);
+    RGY_ERR renderBranchNr(RGYFrameInfo **output, KfmSwitchTiming& timing, bool drain, bool fixed24,
+        cudaStream_t stream, RGYCudaEvent *event);
+
     std::unique_ptr<RGYKFM::KFMAnalyze> m_analyzer;
     std::shared_ptr<SharedFramePool> m_kfmFramePool;
     std::deque<std::shared_ptr<KfmSourceSlot>> m_kfmSourceSlotFree;
@@ -717,6 +808,8 @@ protected:
     FILE *m_fpResult;
     FILE *m_fpFMCount;
     FILE *m_fpTimecode;
+    FILE *m_fpSwitchDuration;
+    int m_switchDurationNext60;
     FILE *m_fpFrameInfo;
     FILE *m_fpContainsCombe;
     FILE *m_fpUcfNoise;
@@ -755,7 +848,7 @@ protected:
     int m_lastSwitchDuration60;
     int64_t m_lastSwitchStart120;
     bool m_lastSwitchIsFrame24;
-    std::vector<int> m_switchSingleFrameN60;
+    std::set<int> m_switchSingleFrameN60;
     std::unordered_map<std::string, int> m_stageDumpFrameCounts;
     std::unordered_map<std::string, std::unordered_set<int>> m_stageDumpFrameIndices;
     std::unordered_set<int> m_stageDumpTargetFrames;

@@ -276,6 +276,7 @@
   - [--vpp-anime4k-shader \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-anime4k-shader-param1value1param2value2)
   - [--vpp-onnx \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-onnx-param1value1param2value2)
   - [--vpp-onnx-deint \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-onnx-deint-param1value1param2value2)
+  - [--vpp-vhs-restore \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-vhs-restore-param1value1param2value2)
   - [--vpp-onnx-model-dir \<string\>](#--vpp-onnx-model-dir-string)
   - [--vpp-onnx-cache-dir \<string\>](#--vpp-onnx-cache-dir-string)
   - [--vpp-rife-ov \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-rife-ov-param1value1param2value2)
@@ -1959,6 +1960,7 @@ Vpp filters will be applied in fixed order, regardless of the order in the comma
 - [--vpp-anime4k-shader](#--vpp-anime4k-shader-param1value1param2value2)
 - [--vpp-onnx](#--vpp-onnx-param1value1param2value2)
 - [--vpp-onnx-deint](#--vpp-onnx-deint-param1value1param2value2)
+- [--vpp-vhs-restore](#--vpp-vhs-restore-param1value1param2value2)
 - [--vpp-onnx-model-dir](#--vpp-onnx-model-dir-string)
 - [--vpp-onnx-cache-dir](#--vpp-onnx-cache-dir-string)
 - [--vpp-rife-ov](#--vpp-rife-ov-param1value1param2value2)
@@ -2566,7 +2568,9 @@ Please note that this filter is slow, recommended to be used on dGPUs.
   - ucf=&lt;bool&gt;  
     Enable the UCF stage. Default: off.
   - nr=&lt;bool&gt;  
-    Apply degrain on the final KFM output stream. Default: off.
+    Apply NR using `vpp-degrain` to the 24p/30p branches after UCF and before patch processing. NR is not applied to the 60p branch and is disabled in `mode=60`. Default: off.
+    NR uses `blksize=32` when the input height is at least 720, or `16` otherwise. `search_early_sad` / `spatial_early_sad` inherit the KFM settings (preset values or explicit overrides).
+    Progressive RFF source frames preserved by `rff=on` skip UCF and patch processing and receive NR in the 24p branch.
   - is120=&lt;bool&gt;  
     Reserve 120fps duration correction flag. Default: on.
   - rff=&lt;bool&gt;  
@@ -4484,7 +4488,7 @@ Pre/post processing is inferred from the model channel count: 1ch=luma SR, 3ch=R
 
 - **Compatibility parameters**
   - device=&lt;string&gt;, interop=&lt;string&gt;  
-    Accepted for CLI compatibility with QSVEnc/VCEEnc, but NVEnc does not use them to select the inference device or transfer mode. Inference is bound to the CUDA device used by the encoder and uses the host-readback path.
+    Accepted for CLI compatibility with QSVEnc/VCEEnc, but NVEnc does not use them to select the inference device or transfer mode. Inference is bound to the CUDA device used by the encoder. Pre/post processing runs on CUDA, preferring inference with shared GPU tensors. If shared inference is unavailable, only float tensors are transferred through host memory.
 
 - **Available model names**
 
@@ -4532,6 +4536,7 @@ ONNX model based deinterlacing filter. The model is selected by its registered n
 
 The `stdeint` and `stdeint_fast` registrations use ST-DeInt (3-channel input, 6-channel half-height output). The `DDD` registration uses DDD (three-field, transposed 9-channel input and 3-channel output). `mode=bob` outputs two progressive frames per input frame and doubles the frame rate; `mode=normal` outputs one frame using the first displayed field. TFF and BFF field order are preserved. Progressive input is passed through without neural deinterlacing.
 
+
 This filter accepts 8-bit YUV420 input only, with an even frame height of at least 4. Inference uses ONNX Runtime with the CUDA or TensorRT execution provider. DDD keeps tensor packing and output weaving on host memory, while inference still runs on the GPU.
 
 - **Parameters**
@@ -4548,12 +4553,32 @@ This filter accepts 8-bit YUV420 input only, with an even frame height of at lea
   - colorrange=&lt;string&gt; (default: auto)  
     Input color range: auto / limited (tv) / full (pc).
 
-Neither NVEnc nor the HWEnc-onnx-models release archives include ST-DeInt or DDD model files. Check the applicable rights and licenses, place or generate the models separately, then run `run_all.py` in the [HWEnc-onnx-models repository](https://github.com/rigaya/HWEnc-onnx-models) to generate `onnx_deint_models.json`.
+DDDとvhs-restoreのモデル・ライセンス・`onnx_deint_models.json`は、[HWEnc-onnx-models](https://github.com/rigaya/HWEnc-onnx-models)のデインターレース用アーカイブに収録する。ST-DeIntはライセンスが未確定のため標準の取得・生成・配布対象に含めない。
 
 ```
 --vpp-onnx-model-dir C:\models\HWEnc-onnx-models
---vpp-onnx-deint model=stdeint,mode=bob,precision=fp32
 --vpp-onnx-deint model=DDD,mode=normal,precision=auto
+```
+
+VHS修復モデルはこのオプションでは使用できない。[`--vpp-vhs-restore`](#--vpp-vhs-restore-param1value1param2value2)を使用すること。
+
+### --vpp-vhs-restore [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+PAL/SECAM向けのVHS修復モデルを適用し、その後にGPU版Bwdifでデインターレースする。修復モデル自体は欠落フィールドを生成するデインターレースモデルではない。`--vpp-onnx-deint`および他のデインターレースフィルターとは併用できない。
+
+偶数行のフィールドを上段、奇数行を下段へ配置して推論し、元の行順へ戻してからBwdifを適用する。ノイズ除去は追加しない。映像の並べ替え・推論・補間は共有CUDA経路で実行し、ホスト経路へフォールバックしない。
+
+入力は8bit YUV420、高さは4の倍数。TFF/BFFを維持し、Bwdifの前後フレーム参照により1フレーム遅延する。プログレッシブ入力は修復せず、bobでは2枚に複製して出力する。
+
+- model=&lt;string&gt;（必須）：`vhs_restore_pal`または`vhs_restore_secam`。モデル配置先は[`--vpp-onnx-model-dir`](#--vpp-onnx-model-dir-string)で指定する。
+- enable=&lt;bool&gt;：true（デフォルト）/ false。
+- mode=&lt;string&gt;：bob（デフォルト、倍フレームレート）/ normal（元のフレームレート）。
+- precision=&lt;string&gt;：fp32（デフォルト）/ auto。
+- colormatrix=&lt;string&gt;：auto（デフォルト）/ auto_res / bt709 / smpte170m / bt470bg / bt2020nc。
+- colorrange=&lt;string&gt;：auto（デフォルト）/ limited（tv）/ full（pc）。
+
+```
+--vpp-onnx-model-dir C:\models\HWEnc-onnx-models
+--vpp-vhs-restore model=vhs_restore_pal,mode=bob,precision=fp32
 ```
 
 ### --vpp-onnx-model-dir &lt;string&gt;
@@ -4563,7 +4588,7 @@ This option is required when using short model names with `--vpp-onnx model=<nam
 
 Model files can be downloaded from [https://github.com/rigaya/HWEnc-onnx-models/releases](https://github.com/rigaya/HWEnc-onnx-models/releases). Download the zip archive, extract it to an arbitrary directory, and specify that directory.
 
-The release archives do not contain ST-DeInt or DDD models, or the deinterlacer manifest. Generate or place those files separately, verify their rights and licenses, and generate `onnx_deint_models.json` with `run_all.py` before using `--vpp-onnx-deint`.
+`--vpp-onnx-deint`と`--vpp-vhs-restore`では、デインターレース用アーカイブを展開したルートディレクトリを指定する。`vhs_restore_pal`/`vhs_restore_secam`とDDDは同梱の`onnx_deint_models.json`から解決する。
 
 This option only specifies where model files are located. The ONNX Runtime GPU, CUDA runtime, cuDNN, TensorRT, and related DLLs must still be made visible separately through `PATH` or by placing them next to `NVEncC64.exe`.
 

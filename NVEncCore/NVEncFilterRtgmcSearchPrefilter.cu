@@ -165,6 +165,11 @@ std::shared_ptr<CUFrameBuf> NVEncFilterRtgmcSearchPrefilter::SharedFramePool::ge
     auto pooled = std::find_if(frames.begin(), frames.end(), [&frameInfo](const Entry &candidate) {
         return candidate.frame && !cmpFrameInfoCspResolution(&candidate.frame->frame, &frameInfo);
     });
+    // 返却直後の画像へのホスト待ちでGPU投入が途切れないよう、FIFOに空き4枚を残す。
+    constexpr size_t reuseLag = 4;
+    if (frames.size() <= reuseLag) {
+        pooled = frames.end();
+    }
     std::unique_ptr<CUFrameBuf> frame;
     if (pooled != frames.end()) {
         if (pooled->readyEvent) {
@@ -298,6 +303,158 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::buildKernel(const std::shared_ptr<NVEnc
     AddMessage(RGY_LOG_DEBUG, _T("Using CUDA kernels for rtgmc-search-prefilter: %s\n"),
         char_to_tstring(m_buildOptions).c_str());
     return RGY_ERR_NONE;
+}
+
+RGY_ERR NVEncFilterRtgmcSearchPrefilter::recordRepairUse(const int planeIndex, const RGY_ERR status, cudaStream_t stream) {
+    auto &resources = m_repairPlaneResources[planeIndex];
+    const auto recorded = err_to_rgy(cudaEventRecord(*resources.lastEvent, stream));
+    if (recorded != RGY_ERR_NONE) {
+        // 記録できない場合も、投入済み処理が終わるまで資源を解放・再利用しない。
+        cudaStreamSynchronize(stream);
+    }
+    return status != RGY_ERR_NONE ? status : recorded;
+}
+
+RGY_ERR NVEncFilterRtgmcSearchPrefilter::setupRepairResources(const NVEncFilterParamRtgmcSearchPrefilter &prm, const bool processChroma) {
+    for (auto &resources : m_repairPlaneResources) resources.clear();
+    const auto setupPlane = [&](int planeIndex, RGY_PLANE plane) -> RGY_ERR {
+        auto info = rtgmcSearchPrefilterPlaneFrameInfo(getPlane(&prm.frameIn, plane));
+        auto &resources = m_repairPlaneResources[planeIndex];
+        resources.temporal = createPlaneFrame(info);
+        resources.delta = createPlaneFrame(info);
+        if (!resources.temporal || !resources.delta) return RGY_ERR_MEMORY_ALLOC;
+        if (resources.temporal->frame.pitch[0] != resources.delta->frame.pitch[0]) return RGY_ERR_INVALID_PARAM;
+        // 半解像度の4タップは寸法が4未満だと画面外を評価する。
+        // 通常寸法はハロー0、極小プレーンだけ必要な仮想座標までFCを持つ。
+        resources.fcHx = std::max(4 - info.width, 0);
+        resources.fcHy = std::max(4 - info.height, 0);
+        auto correctedInfo = info;
+        correctedInfo.width += 2 * resources.fcHx;
+        correctedInfo.height += 2 * resources.fcHy;
+        resources.corrected = createPlaneFrame(correctedInfo);
+        if (!resources.corrected) return RGY_ERR_MEMORY_ALLOC;
+        // 後段の参照半径を逆順に加算し、画面外でも評価座標をクランプしない。
+        const bool level4 = (prm.repairProfile.restoreFlags & RGY_RTGMC_REPAIR_RESTORE_LEVEL4_PATH) != 0;
+        const bool repairEnabled = (prm.repairProfile.restoreFlags & RGY_RTGMC_REPAIR_RESTORE_ENABLED) != 0;
+        resources.stageCount = repairEnabled ? (level4 ? 4 : ((prm.rep0Pad == 2) ? 6 : 5)) : 0;
+        int hx = resources.fcHx, hy = resources.fcHy;
+        for (int stage = resources.stageCount - 1; stage >= 0; stage--) {
+            auto &target = resources.stages[stage];
+            target.hx = hx;
+            target.hy = hy;
+            auto padded = info;
+            padded.width += 2 * hx;
+            padded.height += 2 * hy;
+            for (auto &frame : target.polarity) {
+                frame = createPlaneFrame(padded);
+                if (!frame) return RGY_ERR_MEMORY_ALLOC;
+            }
+            if (target.polarity[0]->frame.pitch[0] != target.polarity[1]->frame.pitch[0]) return RGY_ERR_INVALID_PARAM;
+            if (level4) {
+                // 縦envelope→mid→mean→core。midはmeanと同座標のcoreを直接読む。
+                // sampleYの端での置換はカーネルで行い、ここでは最大半径を確保する。
+                if (stage == 3) hy += 2;
+                if (stage == 1) { hx++; hy++; }
+            } else {
+                // pad=2はR2→R1→Bで半径を2回加算する。pad=3はBの3x3極値。
+                if (stage == 5 || (stage == 4 && prm.rep0Pad != 0)) { hx++; hy++; }
+                if (stage == 3) hy += 2 + ((prm.repairProfile.restoreFlags & RGY_RTGMC_REPAIR_RESTORE_WIDE_ENVELOPE) ? 1 : 0);
+                if (stage == 2 && (prm.repairProfile.thinRejectFlags & RGY_RTGMC_REPAIR_THIN_RANK_LIMIT)) { hx++; hy++; }
+                if (stage == 1 && (prm.repairProfile.thinRejectFlags & RGY_RTGMC_REPAIR_THIN_CORE_BLEND)) { hx++; hy++; }
+            }
+            // coreはDの縦近傍を読むが、Dだけは元画素と同様にクランプしてよい。
+        }
+        resources.lastEvent = std::shared_ptr<cudaEvent_t>(new cudaEvent_t(), cudaevent_deleter());
+        const auto eventStatus = err_to_rgy(cudaEventCreateWithFlags(resources.lastEvent.get(), cudaEventDisableTiming));
+        if (eventStatus != RGY_ERR_NONE) {
+            resources.lastEvent.reset();
+            return eventStatus;
+        }
+        return RGY_ERR_NONE;
+    };
+    auto sts = setupPlane(0, RGY_PLANE_Y);
+    if (sts == RGY_ERR_NONE && processChroma) sts = setupPlane(1, RGY_PLANE_U);
+    return sts;
+}
+
+RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitRepairFC(const int planeIndex,
+    const RGYFrameInfo &prev2, const RGYFrameInfo &prev, const RGYFrameInfo &cur,
+    const RGYFrameInfo &next, const RGYFrameInfo &next2,
+    const NVEncFilterParamRtgmcSearchPrefilter &prm, const uint32_t *sceneFlags, cudaStream_t stream) {
+    auto &resources = m_repairPlaneResources[planeIndex];
+    if (!resources.temporal || !resources.delta || !resources.lastEvent || !resources.corrected) return RGY_ERR_NULL_PTR;
+    // 同じ領域をU/Vや次フレームが再利用する前に、最後のconsumerを待つ。
+    auto sts = err_to_rgy(cudaStreamWaitEvent(stream, *resources.lastEvent, 0));
+    if (sts != RGY_ERR_NONE) return sts;
+    const auto tc = getPlane(&resources.temporal->frame, RGY_PLANE_Y);
+    const auto delta = getPlane(&resources.delta->frame, RGY_PLANE_Y);
+    const auto profile = rgy_rtgmc_repair_profile_pack(prm.repairProfile);
+    sts = launchRtgmcSearchPrefilterRepairTemporal(prev2, prev, cur, next, next2,
+        tc, delta, prm.tr0, sceneFlags, stream);
+    sts = recordRepairUse(planeIndex, sts, stream);
+    if (sts != RGY_ERR_NONE) return sts;
+    for (int stage = 0; stage < resources.stageCount; stage++) {
+        const auto &target = resources.stages[stage];
+        const auto positive = getPlane(&target.polarity[1]->frame, RGY_PLANE_Y);
+        const auto negative = getPlane(&target.polarity[0]->frame, RGY_PLANE_Y);
+        auto sourcePos = delta;
+        auto sourceNeg = delta;
+        int sourceHx = 0, sourceHy = 0;
+        if (stage > 0) {
+            const auto &source = resources.stages[stage - 1];
+            sourcePos = getPlane(&source.polarity[1]->frame, RGY_PLANE_Y);
+            sourceNeg = getPlane(&source.polarity[0]->frame, RGY_PLANE_Y);
+            sourceHx = source.hx;
+            sourceHy = source.hy;
+        }
+        const auto &core = resources.stages[0];
+        const auto corePos = getPlane(&core.polarity[1]->frame, RGY_PLANE_Y);
+        const auto coreNeg = getPlane(&core.polarity[0]->frame, RGY_PLANE_Y);
+        sts = launchRtgmcSearchPrefilterRepairStage(sourcePos, sourceNeg, sourceHx, sourceHy,
+            positive, negative, target.hx, target.hy, cur.width, cur.height, profile, stage,
+            corePos, coreNeg, core.hx, core.hy, stream);
+        sts = recordRepairUse(planeIndex, sts, stream);
+        if (sts != RGY_ERR_NONE) return sts;
+    }
+    // 無修復時もTC/D/FCを生成し、gateには有効なTCを渡す。
+    auto gatePos = tc;
+    auto gateNeg = tc;
+    int gateHx = 0, gateHy = 0;
+    if (resources.stageCount > 0) {
+        const auto &gate = resources.stages[resources.stageCount - 1];
+        gatePos = getPlane(&gate.polarity[1]->frame, RGY_PLANE_Y);
+        gateNeg = getPlane(&gate.polarity[0]->frame, RGY_PLANE_Y);
+        gateHx = gate.hx;
+        gateHy = gate.hy;
+    }
+    const auto dst = getPlane(&resources.corrected->frame, RGY_PLANE_Y);
+    sts = launchRtgmcSearchPrefilterRepairApply(tc, delta, gatePos, gateNeg, gateHx, gateHy,
+        dst, resources.fcHx, resources.fcHy, cur.width, cur.height, profile, stream);
+    return recordRepairUse(planeIndex, sts, stream);
+}
+
+RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitFieldStableSearch(const int planeIndex,
+    const RGYFrameInfo &prev2, const RGYFrameInfo &prev, const RGYFrameInfo &cur,
+    const RGYFrameInfo &next, const RGYFrameInfo &next2, const RGYFrameInfo &dst,
+    const NVEncFilterParamRtgmcSearchPrefilter &prm, const uint32_t *sceneFlags, cudaStream_t stream) {
+    auto sts = emitRepairFC(planeIndex, prev2, prev, cur, next, next2, prm, sceneFlags, stream);
+    if (sts != RGY_ERR_NONE) return sts;
+    auto &resources = m_repairPlaneResources[planeIndex];
+    const auto fc = getPlane(&resources.corrected->frame, RGY_PLANE_Y);
+    sts = launchRtgmcSearchPrefilterRepairCopy(fc, resources.fcHx, resources.fcHy, dst, 0, -1, stream);
+    return recordRepairUse(planeIndex, sts, stream);
+}
+
+RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitLumaSearch(const int planeIndex,
+    const RGYFrameInfo &prev2, const RGYFrameInfo &prev, const RGYFrameInfo &cur,
+    const RGYFrameInfo &next, const RGYFrameInfo &next2, const RGYFrameInfo &dst,
+    const NVEncFilterParamRtgmcSearchPrefilter &prm, const int fullRangeMode, const uint32_t *sceneFlags, cudaStream_t stream) {
+    auto sts = emitRepairFC(planeIndex, prev2, prev, cur, next, next2, prm, sceneFlags, stream);
+    if (sts != RGY_ERR_NONE) return sts;
+    auto &resources = m_repairPlaneResources[planeIndex];
+    const auto fc = getPlane(&resources.corrected->frame, RGY_PLANE_Y);
+    sts = launchRtgmcSearchPrefilterRepairLuma(fc, resources.fcHx, resources.fcHy, cur, dst, prm.searchRefine, fullRangeMode, stream);
+    return recordRepairUse(planeIndex, sts, stream);
 }
 
 RGY_ERR NVEncFilterRtgmcSearchPrefilter::allocCacheFrames(const RGYFrameInfo &frameInfo) {
@@ -442,6 +599,11 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::init(shared_ptr<NVEncFilterParam> pPara
         return sts;
     }
     const bool processChroma = prm->chromaMotion && RGY_CSP_PLANES[prm->frameIn.csp] > 1;
+    sts = setupRepairResources(*prm, processChroma);
+    if (sts != RGY_ERR_NONE) {
+        AddMessage(RGY_LOG_ERROR, _T("修復の中間プレーンを確保できません: %s.\n"), get_err_mes(sts));
+        return sts;
+    }
     if (RTGMC_SEARCH_PREFILTER_USE_SEARCH_REFINE1_CHAIN && prm->searchRefine == 1) {
         sts = setupSearchRefine1Resources(prm->frameIn, processChroma);
         if (sts != RGY_ERR_NONE) {
@@ -673,26 +835,26 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::checkTemporalPlanePitches(const TCHAR *
         { prev2, prev, cur, next, next2 });
 }
 
-std::unique_ptr<CUMemBufPair> NVEncFilterRtgmcSearchPrefilter::getSceneChangeBuffer(const size_t requiredSize) {
-    auto pooled = std::find_if(m_sceneChangeBufferPool.begin(), m_sceneChangeBufferPool.end(), [requiredSize](const std::unique_ptr<CUMemBufPair> &buf) {
-        return buf && buf->nSize >= requiredSize;
+std::unique_ptr<CUMemBuf> NVEncFilterRtgmcSearchPrefilter::getSceneChangeBuffer(const size_t requiredSize,
+    std::shared_ptr<cudaEvent_t> *readyEvent) {
+    auto pooled = std::find_if(m_sceneChangeBufferPool.begin(), m_sceneChangeBufferPool.end(), [requiredSize](const SceneChangeBufferEntry &entry) {
+        return entry.buffer && entry.buffer->nSize >= requiredSize;
     });
     if (pooled != m_sceneChangeBufferPool.end()) {
-        auto buf = std::move(*pooled);
+        auto buf = std::move(pooled->buffer);
+        *readyEvent = pooled->readyEvent;
         m_sceneChangeBufferPool.erase(pooled);
         return buf;
     }
-    auto buf = std::make_unique<CUMemBufPair>();
-    if (buf->alloc(requiredSize) != RGY_ERR_NONE) {
-        buf.reset();
-    }
+    readyEvent->reset();
+    auto buf = std::make_unique<CUMemBuf>(requiredSize);
+    if (buf->alloc() != RGY_ERR_NONE) buf.reset();
     return buf;
 }
 
-void NVEncFilterRtgmcSearchPrefilter::recycleSceneChangeBuffer(std::unique_ptr<CUMemBufPair> &&buf) {
-    if (buf) {
-        m_sceneChangeBufferPool.emplace_back(std::move(buf));
-    }
+void NVEncFilterRtgmcSearchPrefilter::recycleSceneChangeBuffer(std::unique_ptr<CUMemBuf> &&buf,
+    const std::shared_ptr<cudaEvent_t> &readyEvent) {
+    if (buf) m_sceneChangeBufferPool.push_back({ std::move(buf), readyEvent });
 }
 
 RGY_ERR NVEncFilterRtgmcSearchPrefilter::submitSceneChangePlane(PendingSceneChangePlane *pending,
@@ -705,7 +867,6 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::submitSceneChangePlane(PendingSceneChan
     pending->plane = plane;
     pending->planeName = planeName ? planeName : _T("plane");
     pending->smoothRadius = smoothRadius;
-    pending->flags.fill(0);
     if (smoothRadius <= 0) {
         return RGY_ERR_NONE;
     }
@@ -720,94 +881,70 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::submitSceneChangePlane(PendingSceneChan
     const int groupCountX = divCeil(cur->width, RTGMC_SEARCH_PREFILTER_BLOCK_X);
     const int groupCountY = divCeil(cur->height, RTGMC_SEARCH_PREFILTER_BLOCK_Y);
     const int groupCount = std::max(groupCountX * groupCountY, 1);
-    const size_t requiredSize = (size_t)groupCount * 4 * sizeof(uint32_t);
-    pending->partial = getSceneChangeBuffer(requiredSize);
+    const size_t requiredSize = ((size_t)groupCount + 1) * 4 * sizeof(uint32_t);
+    pending->partial = getSceneChangeBuffer(requiredSize, &pending->readyEvent);
     if (!pending->partial) {
         return RGY_ERR_MEMORY_ALLOC;
     }
     pending->groupCount = groupCount;
     pending->sceneThreshold = (uint64_t)RTGMC_SEARCH_PREFILTER_SCENECHANGE * (uint64_t)cur->width * (uint64_t)cur->height;
-    auto err = err_to_rgy(cudaMemsetAsync(pending->partial->ptrDevice, 0, requiredSize, stream));
-    if (err != RGY_ERR_NONE) {
-        recycleSceneChangeBuffer(std::move(pending->partial));
-        return err;
+    if (pending->readyEvent) {
+        const auto waitErr = err_to_rgy(cudaStreamWaitEvent(stream, *pending->readyEvent, 0));
+        if (waitErr != RGY_ERR_NONE) return waitErr;
     }
-    err = rtgmcSearchPrefilterLaunchFuncs(*cur, smoothRadius)->scenechange(*prev2, *prev, *cur, *next, *next2, (uint32_t *)pending->partial->ptrDevice, groupCount, stream);
-    if (err != RGY_ERR_NONE) {
-        recycleSceneChangeBuffer(std::move(pending->partial));
-        AddMessage(RGY_LOG_ERROR, _T("error at %s %s: %s.\n"),
-            _T("kernel_rtgmc_search_prefilter_scenechange"), planeName ? planeName : _T("plane"), get_err_mes(err));
-        return err;
+    auto ready = std::shared_ptr<cudaEvent_t>(new cudaEvent_t(), cudaevent_deleter());
+    auto err = err_to_rgy(cudaEventCreateWithFlags(ready.get(), cudaEventDisableTiming));
+    if (err != RGY_ERR_NONE) return err;
+    err = rtgmcSearchPrefilterLaunchFuncs(*cur, smoothRadius)->scenechange(*prev2, *prev, *cur, *next, *next2,
+        (uint32_t *)pending->partial->ptr, groupCount, stream);
+    if (err == RGY_ERR_NONE) {
+        err = launchRtgmcSearchPrefilterScenechangeReduce((uint32_t *)pending->partial->ptr, groupCount,
+            pending->sceneThreshold, smoothRadius, stream);
     }
-    err = pending->partial->copyDtoHAsync(stream);
-    if (err != RGY_ERR_NONE) {
-        recycleSceneChangeBuffer(std::move(pending->partial));
-        return err;
+    // 途中失敗時も、投入済みの部分和カーネルまでを保護する。
+    const auto recordErr = err_to_rgy(cudaEventRecord(*ready, stream));
+    if (recordErr == RGY_ERR_NONE) pending->readyEvent = ready;
+    if (err != RGY_ERR_NONE || recordErr != RGY_ERR_NONE) {
+        if (recordErr == RGY_ERR_NONE) recycleSceneChangeBuffer(std::move(pending->partial), ready);
+        return err != RGY_ERR_NONE ? err : recordErr;
     }
-    pending->mapEvent = std::unique_ptr<cudaEvent_t, cudaevent_deleter>(new cudaEvent_t(), cudaevent_deleter());
-    err = err_to_rgy(cudaEventCreateWithFlags(pending->mapEvent.get(), cudaEventDisableTiming));
-    if (err != RGY_ERR_NONE) {
-        recycleSceneChangeBuffer(std::move(pending->partial));
-        return err;
-    }
-    err = err_to_rgy(cudaEventRecord(*pending->mapEvent, stream));
-    if (err != RGY_ERR_NONE) {
-        recycleSceneChangeBuffer(std::move(pending->partial));
-        return err;
-    }
-    pending->mapSubmitted = true;
     return RGY_ERR_NONE;
 }
 
-RGY_ERR NVEncFilterRtgmcSearchPrefilter::resolveSceneChangePlane(PendingSceneChangePlane *pending) {
-    if (!pending) {
-        return RGY_ERR_INVALID_PARAM;
-    }
-    pending->flags.fill(0);
-    if (!pending->mapSubmitted) {
-        recycleSceneChangeBuffer(std::move(pending->partial));
-        return RGY_ERR_NONE;
-    }
-
-    auto err = err_to_rgy(cudaEventSynchronize(*pending->mapEvent));
-    if (err != RGY_ERR_NONE) {
-        pending->mapSubmitted = false;
-        recycleSceneChangeBuffer(std::move(pending->partial));
-        AddMessage(RGY_LOG_ERROR, _T("failed to wait rtgmc-search-prefilter scene-change readback: %s.\n"), get_err_mes(err));
-        return err;
-    }
-    pending->mapSubmitted = false;
-    if (!pending->partial || !pending->partial->ptrHost) {
-        recycleSceneChangeBuffer(std::move(pending->partial));
-        AddMessage(RGY_LOG_ERROR, _T("failed to access rtgmc-search-prefilter scene-change buffer.\n"));
-        return RGY_ERR_NULL_PTR;
-    }
-
-    const auto partial = reinterpret_cast<const uint32_t *>(pending->partial->ptrHost);
-    for (int i = 0; i < 4; i++) {
-        if ((pending->smoothRadius < 2) && i >= 2) {
-            continue;
-        }
+RGY_ERR NVEncFilterRtgmcSearchPrefilter::checkSceneChangePlane(PendingSceneChangePlane *pending,
+    const int currentFrame, cudaStream_t stream) {
+    if (!pending || !pending->partial) return RGY_ERR_NONE;
+    auto err = err_to_rgy(cudaStreamWaitEvent(stream, *pending->readyEvent, 0));
+    if (err != RGY_ERR_NONE) return err;
+    std::vector<uint32_t> state(((size_t)pending->groupCount + 1) * 4);
+    err = err_to_rgy(cudaMemcpyAsync(state.data(), pending->partial->ptr, state.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+    if (err != RGY_ERR_NONE) return err;
+    err = err_to_rgy(cudaStreamSynchronize(stream));
+    if (err != RGY_ERR_NONE) return err;
+    bool matched = true;
+    for (int dir = 0; dir < 4; dir++) {
         uint64_t sum = 0;
-        const auto *refPartial = partial + (size_t)i * pending->groupCount;
         for (int group = 0; group < pending->groupCount; group++) {
-            sum += refPartial[group];
+            sum += state[4 + (size_t)dir * pending->groupCount + group];
         }
-        pending->flags[i] = (sum >= pending->sceneThreshold) ? 1 : 0;
+        const uint32_t expected = pending->smoothRadius > 0 && (dir < 2 || pending->smoothRadius >= 2) && sum >= pending->sceneThreshold;
+        matched &= state[dir] == expected;
     }
-    recycleSceneChangeBuffer(std::move(pending->partial));
+    AddMessage(RGY_LOG_DEBUG, _T("scene-check frame=%d plane=%s flags=%u,%u,%u,%u match=%d\n"),
+        currentFrame, pending->planeName.c_str(), state[0], state[1], state[2], state[3], matched ? 1 : 0);
+    if (!matched) {
+        AddMessage(RGY_LOG_ERROR, _T("探索前処理のシーン判定がCPU参照と一致しません。\n"));
+        return RGY_ERR_UNKNOWN;
+    }
     return RGY_ERR_NONE;
 }
 
-std::array<int, 4> NVEncFilterRtgmcSearchPrefilter::sceneChangeFlagsForPlane(const PendingSearchPrefilterFrame &pending, const RGY_PLANE plane) const {
-    for (const auto &planeFlags : pending.scenePlanes) {
-        if (planeFlags.plane == plane) {
-            return planeFlags.flags;
-        }
+const NVEncFilterRtgmcSearchPrefilter::PendingSceneChangePlane *NVEncFilterRtgmcSearchPrefilter::sceneChangeForPlane(
+    const PendingSearchPrefilterFrame &pending, const RGY_PLANE plane) const {
+    for (const auto &entry : pending.scenePlanes) {
+        if (entry.plane == plane) return &entry;
     }
-    std::array<int, 4> flags = {};
-    flags.fill(0);
-    return flags;
+    return nullptr;
 }
 
 RGY_ERR NVEncFilterRtgmcSearchPrefilter::dumpSearchYuvFrame(const RGYFrameInfo &yFrame, const RGYFrameInfo *chromaFrame,
@@ -967,14 +1104,9 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
         return err;
     }
 
-    const auto lumaSceneFlags = sceneChangeFlagsForPlane(pending, RGY_PLANE_Y);
-    const auto &planePrev2Eff = lumaSceneFlags[2] ? planeCur : planePrev2;
-    const auto &planePrevEff = lumaSceneFlags[0] ? planeCur : planePrev;
-    const auto &planeNextEff = lumaSceneFlags[1] ? planeCur : planeNext;
-    const auto &planeNext2Eff = lumaSceneFlags[3] ? planeCur : planeNext2;
-    const auto repairProfile = rgy_rtgmc_repair_profile_pack(prm->repairProfile);
+    const auto *lumaScene = sceneChangeForPlane(pending, RGY_PLANE_Y);
+    const auto *lumaSceneFlags = (lumaScene && lumaScene->partial) ? (const uint32_t *)lumaScene->partial->ptr : nullptr;
     const auto *launch = rtgmcSearchPrefilterLaunchFuncs(planeCur, prm->tr0);
-    const int smoothRadius = (prm->tr0 <= 0) ? 0 : (prm->tr0 >= 2) ? 2 : 1;
     const bool useSearchRefine1Chain = RTGMC_SEARCH_PREFILTER_USE_SEARCH_REFINE1_CHAIN && prm->searchRefine == 1;
     const bool useSearchRefine2Chain = rtgmcSearchPrefilterUseSearchRefine2Chain(*prm);
     const bool mergeSearchRefine = rtgmcSearchPrefilterMergeSearchRefineEnabled();
@@ -982,7 +1114,7 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
     auto emitSearchRefine1Plane = [&](const int planeIndex,
         const RGYFrameInfo &planePrev2Src, const RGYFrameInfo &planePrevSrc, const RGYFrameInfo &planeCurSrc,
         const RGYFrameInfo &planeNextSrc, const RGYFrameInfo &planeNext2Src, const RGYFrameInfo &planeDstSrc,
-        const int fullRangeMode) -> RGY_ERR {
+        const uint32_t *sceneFlags, const int fullRangeMode) -> RGY_ERR {
         auto &resources = m_searchRefine1PlaneResources[planeIndex];
         if (!resources.motionGuide || !resources.halfSearchBase || !resources.halfSearchSmoothed) {
             AddMessage(RGY_LOG_ERROR, _T("rtgmc-search-prefilter search_refine1 resources are not ready for plane %d.\n"), planeIndex);
@@ -999,19 +1131,22 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
         if (sts != RGY_ERR_NONE) {
             return sts;
         }
-        sts = launch->fieldStable(
+        sts = emitFieldStableSearch(planeIndex,
             planePrev2Src, planePrevSrc, planeCurSrc, planeNextSrc, planeNext2Src,
-            planeMotionGuide, repairProfile, smoothRadius, stream);
+            planeMotionGuide, *prm, sceneFlags, stream);
         if (sts != RGY_ERR_NONE) {
             AddMessage(RGY_LOG_ERROR, _T("error at %s plane %d: %s.\n"),
                 _T("kernel_rtgmc_search_prefilter_field_stable_search"), planeIndex, get_err_mes(sts));
             return sts;
         }
 
-        sts = launch->halfSearchBaseFromGuide(planeMotionGuide, planeHalfSearchBase, stream);
+        auto &repair = m_repairPlaneResources[planeIndex];
+        const auto fc = getPlane(&repair.corrected->frame, RGY_PLANE_Y);
+        sts = launchRtgmcSearchPrefilterRepairHalfSearch(false, fc, repair.fcHx, repair.fcHy, planeHalfSearchBase, stream);
+        sts = recordRepairUse(planeIndex, sts, stream);
         if (sts != RGY_ERR_NONE) {
             AddMessage(RGY_LOG_ERROR, _T("error at %s plane %d: %s.\n"),
-                _T("kernel_rtgmc_search_prefilter_half_search_base_from_guide"),
+                _T("kernel_rtgmc_search_prefilter_half_search_base_from_fc"),
                 planeIndex, get_err_mes(sts));
             return sts;
         }
@@ -1039,7 +1174,7 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
     auto emitSearchRefine2Plane = [&](const int planeIndex,
         const RGYFrameInfo &planePrev2Src, const RGYFrameInfo &planePrevSrc, const RGYFrameInfo &planeCurSrc,
         const RGYFrameInfo &planeNextSrc, const RGYFrameInfo &planeNext2Src, const RGYFrameInfo &planeDstSrc,
-        const int fullRangeMode) -> RGY_ERR {
+        const uint32_t *sceneFlags, const int fullRangeMode) -> RGY_ERR {
         auto &resources = m_searchRefine2PlaneResources[planeIndex];
         if (!resources.motionGuide || !resources.searchSmoothed3x3 || !resources.edgeSoftenedSearch || !resources.preStabilizedSearch) {
             AddMessage(RGY_LOG_ERROR, _T("rtgmc-search-prefilter search_refine2 resources are not ready for plane %d.\n"), planeIndex);
@@ -1056,9 +1191,9 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
         if (sts != RGY_ERR_NONE) {
             return sts;
         }
-        sts = launch->fieldStable(
+        sts = emitFieldStableSearch(planeIndex,
             planePrev2Src, planePrevSrc, planeCurSrc, planeNextSrc, planeNext2Src,
-            planeMotionGuide, repairProfile, smoothRadius, stream);
+            planeMotionGuide, *prm, sceneFlags, stream);
         if (sts != RGY_ERR_NONE) {
             AddMessage(RGY_LOG_ERROR, _T("error at %s plane %d: %s.\n"),
                 _T("kernel_rtgmc_search_prefilter_field_stable_search"), planeIndex, get_err_mes(sts));
@@ -1150,18 +1285,19 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
     };
 
     if (useSearchRefine1Chain) {
-        err = emitSearchRefine1Plane(0, planePrev2Eff, planePrevEff, planeCur, planeNextEff, planeNext2Eff, planeDst, prm->tvRange ? 1 : 0);
+        err = emitSearchRefine1Plane(0, planePrev2, planePrev, planeCur, planeNext, planeNext2, planeDst, lumaSceneFlags, prm->tvRange ? 1 : 0);
     } else if (useSearchRefine2Chain) {
-        err = emitSearchRefine2Plane(0, planePrev2Eff, planePrevEff, planeCur, planeNextEff, planeNext2Eff, planeDst, prm->tvRange ? 1 : 0);
+        err = emitSearchRefine2Plane(0, planePrev2, planePrev, planeCur, planeNext, planeNext2, planeDst, lumaSceneFlags, prm->tvRange ? 1 : 0);
     } else {
-        err = launch->luma(
-            planePrev2Eff, planePrevEff, planeCur, planeNextEff, planeNext2Eff,
-            planeDst, prm->searchRefine, repairProfile, prm->tvRange ? 1 : 0, smoothRadius, stream);
+        err = emitLumaSearch(0, planePrev2, planePrev, planeCur, planeNext, planeNext2,
+            planeDst, *prm, prm->tvRange ? 1 : 0, lumaSceneFlags, stream);
         if (err != RGY_ERR_NONE) {
             AddMessage(RGY_LOG_ERROR, _T("error at %s: %s.\n"), _T("kernel_rtgmc_search_prefilter_luma"), get_err_mes(err));
             return err;
         }
     }
+
+    if (err != RGY_ERR_NONE) return err;
 
     CUFrameBuf *dumpFrame = searchLumaFrame ? searchLumaFrame.get() : outFrameBuf;
     std::unique_ptr<CUFrameBuf> debugDumpFrame;
@@ -1179,10 +1315,11 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
             return RGY_ERR_NULL_PTR;
         }
         auto planeDebugDump = getPlane(&debugDumpFrame->frame, RGY_PLANE_Y);
-        err = launch->halfSearch(
-            m_searchLumaDumpStage == "half_search_smoothed",
-            planePrev2Eff, planePrevEff, planeCur, planeNextEff, planeNext2Eff,
-            planeDebugDump, repairProfile, smoothRadius, stream);
+        auto &repair = m_repairPlaneResources[0];
+        const auto fc = getPlane(&repair.corrected->frame, RGY_PLANE_Y);
+        err = launchRtgmcSearchPrefilterRepairHalfSearch(m_searchLumaDumpStage == "half_search_smoothed",
+            fc, repair.fcHx, repair.fcHy, planeDebugDump, stream);
+        err = recordRepairUse(0, err, stream);
         if (err != RGY_ERR_NONE) {
             AddMessage(RGY_LOG_ERROR, _T("error at %s: %s.\n"),
                 (m_searchLumaDumpStage == "half_search_base") ? _T("kernel_rtgmc_search_prefilter_half_search_base") : _T("kernel_rtgmc_search_prefilter_half_search_smoothed"),
@@ -1235,13 +1372,29 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
         }
         auto planeDebugDump = getPlane(&debugDumpFrame->frame, RGY_PLANE_Y);
         err = checkSameResolutionPlanePitches(_T("debug full-resolution dump"),
-            { &planePrev2Eff, &planePrevEff, &planeCur, &planeNextEff, &planeNext2Eff, &planeDebugDump });
+            { &planePrev2, &planePrev, &planeCur, &planeNext, &planeNext2, &planeDebugDump });
         if (err != RGY_ERR_NONE) {
             return err;
         }
-        err = launch->debug(
-            debugStage, planePrev2Eff, planePrevEff, planeCur, planeNextEff, planeNext2Eff,
-            planeDebugDump, repairProfile, smoothRadius, stream);
+        auto &repair = m_repairPlaneResources[0];
+        auto source = getPlane(&repair.corrected->frame, RGY_PLANE_Y);
+        int hx = repair.fcHx, hy = repair.fcHy, constantValue = -1;
+        if (debugStage == 9 || debugStage == 11) {
+            source = getPlane(debugStage == 9 ? &repair.temporal->frame : &repair.delta->frame, RGY_PLANE_Y);
+            hx = hy = 0;
+        } else if (debugStage == 12 || debugStage == 13) {
+            if (repair.stageCount > 0) {
+                const auto &gate = repair.stages[repair.stageCount - 1];
+                source = getPlane(&gate.polarity[debugStage == 12 ? 1 : 0]->frame, RGY_PLANE_Y);
+                hx = gate.hx;
+                hy = gate.hy;
+            } else {
+                // 無修復時のgateは元ソースと同じ中立値を表示する。
+                constantValue = RGY_CSP_BIT_DEPTH[planeCur.csp] > 8 ? 32768 : 128;
+            }
+        }
+        err = launchRtgmcSearchPrefilterRepairCopy(source, hx, hy, planeDebugDump, 0, constantValue, stream);
+        err = recordRepairUse(0, err, stream);
         if (err != RGY_ERR_NONE) {
             AddMessage(RGY_LOG_ERROR, _T("error at rtgmc-search-prefilter debug stage %d: %s.\n"), debugStage, get_err_mes(err));
             return err;
@@ -1289,23 +1442,19 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::emitPrefilteredFrame(PendingSearchPrefi
             if (err != RGY_ERR_NONE) {
                 return err;
             }
-            const auto chromaSceneFlags = sceneChangeFlagsForPlane(pending, (RGY_PLANE)iplane);
-            const auto &planePrev2CEff = chromaSceneFlags[2] ? planeCurC : planePrev2C;
-            const auto &planePrevCEff = chromaSceneFlags[0] ? planeCurC : planePrevC;
-            const auto &planeNextCEff = chromaSceneFlags[1] ? planeCurC : planeNextC;
-            const auto &planeNext2CEff = chromaSceneFlags[3] ? planeCurC : planeNext2C;
+            const auto *chromaScene = sceneChangeForPlane(pending, (RGY_PLANE)iplane);
+            const auto *chromaSceneFlags = (chromaScene && chromaScene->partial) ? (const uint32_t *)chromaScene->partial->ptr : nullptr;
             if (useSearchRefine1Chain) {
                 err = emitSearchRefine1Plane(1,
-                    planePrev2CEff, planePrevCEff, planeCurC, planeNextCEff, planeNext2CEff, planeDstC,
-                    prm->tvRange ? 2 : 0);
+                    planePrev2C, planePrevC, planeCurC, planeNextC, planeNext2C, planeDstC,
+                    chromaSceneFlags, prm->tvRange ? 2 : 0);
             } else if (useSearchRefine2Chain) {
                 err = emitSearchRefine2Plane(1,
-                    planePrev2CEff, planePrevCEff, planeCurC, planeNextCEff, planeNext2CEff, planeDstC,
-                    prm->tvRange ? 2 : 0);
+                    planePrev2C, planePrevC, planeCurC, planeNextC, planeNext2C, planeDstC,
+                    chromaSceneFlags, prm->tvRange ? 2 : 0);
             } else {
-                err = launch->luma(
-                    planePrev2CEff, planePrevCEff, planeCurC, planeNextCEff, planeNext2CEff,
-                    planeDstC, prm->searchRefine, repairProfile, prm->tvRange ? 2 : 0, smoothRadius, stream);
+                err = emitLumaSearch(1, planePrev2C, planePrevC, planeCurC, planeNextC, planeNext2C,
+                    planeDstC, *prm, prm->tvRange ? 2 : 0, chromaSceneFlags, stream);
             }
             if (err != RGY_ERR_NONE) {
                 AddMessage(RGY_LOG_ERROR, _T("error at rtgmc-search-prefilter chroma plane %d: %s.\n"), iplane, get_err_mes(err));
@@ -1352,11 +1501,7 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::submitPendingSearchPrefilterFrame(const
 
     const auto clearLocalPending = [&]() {
         for (auto &plane : pending.scenePlanes) {
-            if (plane.mapSubmitted && plane.mapEvent) {
-                cudaEventSynchronize(*plane.mapEvent);
-                plane.mapSubmitted = false;
-            }
-            recycleSceneChangeBuffer(std::move(plane.partial));
+            recycleSceneChangeBuffer(std::move(plane.partial), plane.readyEvent);
         }
         pending.scenePlanes.clear();
     };
@@ -1416,15 +1561,27 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::resolvePendingSearchPrefilterFrame(RGYF
     }
 
     auto &pending = m_pendingSearchPrefilterFrames.front();
+    const char *checkScene = std::getenv("RGY_RTGMC_SEARCH_SCENE_CHECK");
     for (auto &plane : pending.scenePlanes) {
-        auto err = resolveSceneChangePlane(&plane);
-        if (err != RGY_ERR_NONE) {
-            m_pendingSearchPrefilterFrames.pop_front();
-            return err;
+        if (checkScene && checkScene[0] != '0') {
+            const auto err = checkSceneChangePlane(&plane, pending.currentFrame, stream);
+            if (err != RGY_ERR_NONE) return err;
+        }
+        if (plane.readyEvent) {
+            const auto err = err_to_rgy(cudaStreamWaitEvent(stream, *plane.readyEvent, 0));
+            if (err != RGY_ERR_NONE) return err;
         }
     }
-
-    auto err = emitPrefilteredFrame(pending, ppOutputFrames, pOutputFrameNum, stream);
+    auto completed = std::shared_ptr<cudaEvent_t>(new cudaEvent_t(), cudaevent_deleter());
+    auto err = err_to_rgy(cudaEventCreateWithFlags(completed.get(), cudaEventDisableTiming));
+    if (err != RGY_ERR_NONE) return err;
+    err = emitPrefilteredFrame(pending, ppOutputFrames, pOutputFrameNum, stream);
+    // 出力コピーを含む最後の消費まで保持し、途中失敗時も投入済み処理を保護する。
+    const auto retireErr = err_to_rgy(cudaEventRecord(*completed, stream));
+    for (auto &plane : pending.scenePlanes) {
+        if (retireErr == RGY_ERR_NONE) recycleSceneChangeBuffer(std::move(plane.partial), completed);
+    }
+    if (err == RGY_ERR_NONE) err = retireErr;
     m_pendingSearchPrefilterFrames.pop_front();
     return err;
 }
@@ -1432,11 +1589,7 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::resolvePendingSearchPrefilterFrame(RGYF
 void NVEncFilterRtgmcSearchPrefilter::clearPendingSearchPrefilterFrames() {
     for (auto &pending : m_pendingSearchPrefilterFrames) {
         for (auto &plane : pending.scenePlanes) {
-            if (plane.mapSubmitted && plane.mapEvent) {
-                cudaEventSynchronize(*plane.mapEvent);
-                plane.mapSubmitted = false;
-            }
-            recycleSceneChangeBuffer(std::move(plane.partial));
+            recycleSceneChangeBuffer(std::move(plane.partial), plane.readyEvent);
         }
     }
     m_pendingSearchPrefilterFrames.clear();
@@ -1493,7 +1646,7 @@ RGY_ERR NVEncFilterRtgmcSearchPrefilter::run_filter(const RGYFrameInfo *pInputFr
 }
 
 void NVEncFilterRtgmcSearchPrefilter::resetTemporalState() {
-    // Synchronize and discard any pending scene-change readbacks, then clear the pending queue.
+    // 未消費の判定バッファを完了イベント付きで回収する。
     clearPendingSearchPrefilterFrames();
     // NOTE: Keep the m_cacheFrames ring-buffer slots and their pooled GPU allocations intact.
     // run_filter() unconditionally dereferences m_cacheFrames[0]->frame (e.g. for memcpyKind),
@@ -1508,6 +1661,7 @@ void NVEncFilterRtgmcSearchPrefilter::resetTemporalState() {
 }
 
 void NVEncFilterRtgmcSearchPrefilter::close() {
+    for (auto &resources : m_repairPlaneResources) resources.clear();
     clearPendingSearchPrefilterFrames();
     if (m_searchLumaDump.is_open()) {
         m_searchLumaDump.close();
